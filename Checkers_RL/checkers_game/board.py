@@ -305,6 +305,7 @@ class Board:
         return all_moves
     
     def _get_all_captures(self, piece, row, col, parent_node, valid_moves, visited_squares):
+        """Recursively go through all possible capture sequences"""
         if valid_moves: # Recursive condition
             original_board = copy.deepcopy(self.board) # Make copy of original board
 
