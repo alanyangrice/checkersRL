@@ -1,7 +1,10 @@
-from piece import Piece # Checkers Pieces
-from MoveTree import MoveTree # Tree to build move tree
-from MoveNode import MoveNode
-from constants import ROWS, COLS, SQUARE_SIZE, RED, BLUE, WHITE, GREEN, BLACK, font, board_number_to_position, position_to_board_number
+import sys
+sys.path.append(r"c:/Users/Alan Yang/Desktop/checkersRL/Checkers_RL")
+
+from checkers_game.piece import Piece  # Checkers Pieces
+from checkers_game.MoveTree import MoveTree  # Tree to build move tree
+from checkers_game.MoveNode import MoveNode
+from checkers_game.constants import ROWS, COLS, SQUARE_SIZE, RED, BLUE, WHITE, GREEN, BLACK, font, board_number_to_position, position_to_board_number
 import pygame
 import copy
 
@@ -39,7 +42,6 @@ class Board:
                     square_number += 1
 
     def draw(self, screen):
-        print(self.get_board_hash())
         screen.fill(BLACK)
         self.draw_squares(screen)
         for row in range(ROWS):
@@ -213,7 +215,7 @@ class Board:
                     # Get valid capture moves for this piece
                     captures = self.valid_moves_for_piece(piece, row, col, capture_only=True)
                     if captures:  # If any valid captures exist
-                        True
+                        return True
         return False
     
     def should_become_king(self, piece, row):
@@ -237,20 +239,15 @@ class Board:
         red_pieces = sum([1 for row in self.board for piece in row if isinstance(piece, Piece) and piece.color == RED])
         blue_pieces = sum([1 for row in self.board for piece in row if isinstance(piece, Piece) and piece.color == BLUE])
 
-        if not self.get_all_possible_moves():
-            return "Tie!"
-
         if red_pieces == 0:
             return BLUE
         elif blue_pieces == 0:
             return RED
-        
         return None
     
     def get_board_hash(self):
         """Converts the board into a hashable format (tuple of tuples)."""
         return tuple(tuple(piece.color if piece != 0 else 0 for piece in row) for row in self.board)
-
 
     def get_all_possible_moves(self):
         """Returns a set of all possible moves for each piece on the board and resulting board state."""
@@ -278,17 +275,13 @@ class Board:
                                 copy.deepcopy(self.board)  # Add board state
                             )
                             self.board = copy.deepcopy(original_board)  # Revert to original boardparent_node, child_value, board
-                            print(self)
                         for sequence in moveTree.get_leaf_sequences(moveTree.root):
                             all_moves.append(sequence)
-                            print(sequence)
 
                     elif valid_moves and capture_possible: # Capture Move
                         self._get_all_captures(piece, row, col, moveTree.root, valid_moves, visited_squares) # Recursively generate tree of all possible capture moves
                         for sequence in moveTree.get_leaf_sequences(moveTree.root, delimiter="x"):
                             all_moves.append(sequence)
-                            print(sequence)
-        print(all_moves)
         return all_moves
     
     def _get_all_captures(self, piece, row, col, parent_node, valid_moves, visited_squares):

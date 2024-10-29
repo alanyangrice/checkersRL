@@ -1,5 +1,5 @@
 import pygame
-from constants import SQUARE_SIZE, WHITE
+from checkers_game.constants import SQUARE_SIZE, WHITE
 
 # Piece class to represent red and blue pieces
 class Piece:

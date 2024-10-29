@@ -1,7 +1,10 @@
+import sys
+sys.path.append(r"c:/Users/Alan Yang/Desktop/checkersRL/Checkers_RL")
+
 import pygame
 import sys
-from board import Board
-from constants import WIDTH, HEIGHT, BLUE, RED
+from checkers_game.board import Board
+from checkers_game.constants import WIDTH, HEIGHT, BLUE, RED
 
 # Initialize pygame
 pygame.init()

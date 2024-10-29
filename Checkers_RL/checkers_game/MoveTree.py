@@ -1,4 +1,4 @@
-from MoveNode import MoveNode
+from checkers_game.MoveNode import MoveNode
 
 class MoveTree:
     def __init__(self, root_value, curr_board):
