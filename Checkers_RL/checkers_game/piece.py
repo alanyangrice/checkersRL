@@ -1,3 +1,6 @@
+import sys
+sys.path.append(r"/Users/alanyang/Downloads/checkersRL/Checkers_RL")
+
 import pygame
 from checkers_game.constants import SQUARE_SIZE, WHITE
 

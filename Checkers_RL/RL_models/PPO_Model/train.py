@@ -1,5 +1,5 @@
 import sys
-sys.path.append(r"c:/Users/Alan Yang/Desktop/checkersRL/Checkers_RL")
+sys.path.append(r"/Users/alanyang/Downloads/checkersRL/Checkers_RL")
 
 from RL_models.checkers_env import CheckersEnv
 from Agent import PPOAgent

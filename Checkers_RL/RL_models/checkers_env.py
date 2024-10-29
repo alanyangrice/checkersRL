@@ -1,12 +1,11 @@
 import sys
-sys.path.append(r"c:/Users/Alan Yang/Desktop/checkersRL/Checkers_RL")
+sys.path.append(r"/Users/alanyang/Downloads/checkersRL/Checkers_RL")
 
 import numpy as np
 import gym
 import copy
 from gym import spaces
 from checkers_game.board import Board
-from checkers_game.piece import Piece
 from checkers_game.constants import RED, BLUE, ROWS, COLS, board_number_to_position, position_to_board_number
 
 class CheckersEnv(gym.Env):

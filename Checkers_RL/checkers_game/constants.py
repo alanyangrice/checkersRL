@@ -1,3 +1,6 @@
+import sys
+sys.path.append(r"/Users/alanyang/Downloads/checkersRL/Checkers_RL")
+
 import pygame
 
 # Colors
@@ -41,4 +44,8 @@ def position_to_board_number(row, col):
         (6, 1), (6, 3), (6, 5), (6, 7),
         (7, 0), (7, 2), (7, 4), (7, 6)
     ]
-    return mapping.index((row, col)) + 1
+
+    if (row, col) in mapping:
+        return mapping.index((row, col)) + 1
+    else:
+        return None
