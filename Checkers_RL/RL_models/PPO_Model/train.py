@@ -2,8 +2,8 @@ import sys
 sys.path.append(r"/Users/alanyang/Downloads/checkersRL/Checkers_RL")
 
 from RL_models.checkers_env import CheckersEnv
-from Agent import PPOAgent
-from Memory import Memory
+from RL_models.PPO_Model.Agent import PPOAgent
+from RL_models.PPO_Model.Memory import Memory
 from checkers_game.constants import BLUE, RED
 from util import get_action_index
 
@@ -60,7 +60,6 @@ for epoch in range(num_epochs):
         print(f"Episode: {episode}")
         state = env.reset()  # Reset environment for each episode
         done = False  # Flag to check if game is over
-        board_states = {}  # Track if there is a tie
         memory1, memory2 = Memory(), Memory()  # Memory object for agent1 and agent2
 
         # Track game info if sampling condition is met
@@ -79,17 +78,10 @@ for epoch in range(num_epochs):
         episode_reward, episode_steps = 0, 0
 
         while not done:
-            legal_moves = env.get_legal_moves()  # Get legal moves for the current player
-            
-            if not legal_moves:  # Check if there are no legal moves left
-                tie += 1
-                break
+            legal_moves = env.game.get_all_possible_moves()  # Get legal moves for the current player
 
             # Get action and log probabilities from the current agent
             action, log_prob, _ = current_agent.select_action(state, len(legal_moves))
-
-            #print(f"Action: {action}")
-            #print(f"Possible Moves: {legal_moves}")
             
             # Step the environment
             next_state, reward, done, info = env.step(action)
@@ -111,7 +103,7 @@ for epoch in range(num_epochs):
                 game_info.append({
                     "epoch": epoch,
                     "episode": episode,
-                    "turn": env.checkers.turn,
+                    "turn": env.game.turn,
                     "agent": agent_label,
                     "move": info["legal_moves"][action] if info["move_success"] else None,
                     "reward": reward,
@@ -138,7 +130,7 @@ for epoch in range(num_epochs):
             state = next_state
 
             # Switch sides
-            env.checkers.switch_turn()
+            env.game.switch_turn()
         
         # Save game information if sampled
         if game_info:

@@ -15,7 +15,7 @@ class MoveNode:
 
         # If the node has no children, it's a leaf node
         if not node.children:
-            yield delimiter.join(map(str, current_path))  # Yield the path as a string
+            yield delimiter.join(map(str, current_path)), node.board  # Yield the path as a string
         else:
             for child in node.children:
                 # Continue the path with the child's value

@@ -13,11 +13,19 @@ screen = pygame.display.set_mode((WIDTH, HEIGHT))
 pygame.display.set_caption("Checkers Game")
 
 def main():
+    game = Game()
+
+    get_all_moves = game.get_all_possible_moves()
+    print(get_all_moves)
+
+main()
+"""
+def main():
     # Initialize the Game
     game = Game()
     run = True
 
-    game.update_board(screen)
+    game.update_board(screen)   
 
     while run:
         # Process player actions and update only if a turn is complete
@@ -25,7 +33,6 @@ def main():
         
         if turn_complete:
             print("Turn completed")
-            game.switch_turn()
 
             #print("Updating board")
             game.update_board(screen)
@@ -39,5 +46,8 @@ def main():
                     print(f"{'Blue' if winner == (0, 0, 255) else 'Red'} wins!")
                 run = False  # End game
 
+            game.switch_turn()
+
 if __name__ == "__main__":
     main()
+"""

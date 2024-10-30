@@ -81,6 +81,9 @@ class Board:
         piece.move(to_row, to_col)
         self.board[to_row][to_col] = piece
         self.remove_piece(from_row, from_col)
+        
+        if self.should_become_king(piece, to_row):  # Update the piece if it promotes to king
+            piece.make_king()
 
     def capture_piece(self, from_row, from_col, to_row, to_col):
         """Perform a capture and update the board."""

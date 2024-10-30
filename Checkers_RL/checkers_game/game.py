@@ -259,15 +259,12 @@ class Game:
         original_board = copy.deepcopy(self.board)  # Make copy of original board
         capture_possible = self.board.is_capture_possible(self.turn)  # Check if copy is possible
 
-        print(f"Is capture possible: {capture_possible}")
-
         piece = self.board.get_piece(row, col)
 
         if piece != 0 and piece.color == self.turn:  # Only check pieces of the current player
             rootNode = MoveNode(position_to_board_number(row, col), original_board)  # Initialize tree
 
             valid_moves = self.board.valid_moves_for_piece(piece, row, col, capture_possible)  # Get valid moves for this piece
-
             visited_squares = set((row, col))  # Make sure recursion doesn't revisit the same square twice
 
             if valid_moves and not capture_possible:  # Regular Move
@@ -279,9 +276,12 @@ class Game:
 
                     self.board = copy.deepcopy(original_board)  # Revert to original boardparent_node, child_value, board
 
+                return rootNode, capture_possible
+
             elif valid_moves and capture_possible:  # Capture Move
                 self._get_all_captures(piece, row, col, rootNode, valid_moves, visited_squares)  # Recursively generate tree of all possible capture moves
-
+                return rootNode, capture_possible
+            
         return rootNode, capture_possible
     
     def get_all_possible_moves(self):
@@ -291,10 +291,14 @@ class Game:
         # Iterate through the board to find all pieces
         for row in range(ROWS):
             for col in range(COLS):
-                rootNode, capture_possible = self.get_all_piece_moves(row, col)  # Get all moves for a specific piece
-                delimiter = "x" if capture_possible else "-"
-                for sequence in rootNode.get_leaf_sequences(rootNode, delimiter):
-                    all_moves.append(sequence)  # Add piece moves to the end of all moves
+                piece = self.board.get_piece(row, col)
+                if piece != 0 and piece.color == self.turn:
+                    rootNode, capture_possible = self.get_all_piece_moves(row, col)  # Get all moves for a specific piece
+
+                    if rootNode:
+                        delimiter = "x" if capture_possible else "-"
+                        for sequence in rootNode.get_leaf_sequences(rootNode, delimiter=delimiter):
+                            all_moves.append(sequence)  # Add piece moves to the end of all moves
         return all_moves
 
     def _get_all_captures(self, piece, row, col, parent_node, valid_moves, visited_squares):
