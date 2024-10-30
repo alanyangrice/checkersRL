@@ -13,14 +13,6 @@ screen = pygame.display.set_mode((WIDTH, HEIGHT))
 pygame.display.set_caption("Checkers Game")
 
 def main():
-    game = Game()
-
-    get_all_moves = game.get_all_possible_moves()
-    print(get_all_moves)
-
-main()
-"""
-def main():
     # Initialize the Game
     game = Game()
     run = True
@@ -50,4 +42,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-"""

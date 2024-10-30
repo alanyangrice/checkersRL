@@ -51,7 +51,7 @@ class Game:
                 radius = SQUARE_SIZE // 2 - piece.PADDING + piece.OUTLINE  # Slightly larger than the piece radius
 
                 # Draw the yellow highlight circle around the piece
-                pygame.draw.circle(screen, (255, 255, 0), (center_x, center_y), radius + 1, 3)  # Slightly larger for the outline
+                pygame.draw.circle(screen, (255, 255, 0), (center_x, center_y), radius - 3, 3)  # Slightly larger for the outline
 
     def show_piece_moves(self, screen, moves):
         """Shows all possible moves for a piece by highlighting target positions."""
