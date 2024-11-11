@@ -105,7 +105,8 @@ class Game:
             self.capture_in_progress = self.capture_possible  # Start capture chain if required
 
             self.highlight_piece(screen)
-            self.show_piece_moves(screen, [child.position for child in self.current_node.children])
+            if self.current_node:
+                self.show_piece_moves(screen, [child.position for child in self.current_node.children])
             pygame.display.update()
     
     def player_action(self, screen):
@@ -282,7 +283,7 @@ class Game:
                 self._get_all_captures(piece, row, col, rootNode, valid_moves, visited_squares)  # Recursively generate tree of all possible capture moves
                 return rootNode, capture_possible
             
-        return rootNode, capture_possible
+        return None, False
     
     def get_all_possible_moves(self):
         """Returns a list of all possible moves for each piece on the board and resulting board states."""
@@ -297,8 +298,8 @@ class Game:
 
                     if rootNode:
                         delimiter = "x" if capture_possible else "-"
-                        for sequence in rootNode.get_leaf_sequences(rootNode, delimiter=delimiter):
-                            all_moves.append(sequence)  # Add piece moves to the end of all moves
+                        for sequence, board in rootNode.get_leaf_sequences(rootNode, delimiter=delimiter):
+                            all_moves.append([sequence, board])  # Add piece moves to the end of all moves
         return all_moves
 
     def _get_all_captures(self, piece, row, col, parent_node, valid_moves, visited_squares):

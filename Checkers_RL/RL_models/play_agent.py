@@ -16,7 +16,7 @@ screen = pygame.display.set_mode((WIDTH, HEIGHT))
 pygame.display.set_caption("Checkers Game - Play Against AI")
 
 # Path to the saved model
-model_path = "Checkers_RL/RL_models/PPO_Model/PPO_saved_models/agent2_epoch_21.pt"
+model_path = "/Users/alanyang/Downloads/checkersRL/Checkers_RL/RL_models/PPO_Model/PPO_saved_models/agent1_epoch_129.pt"
 
 # Load the trained agent
 input_shape = (4, 8, 8)  # 4 channels, 8x8 board
@@ -47,6 +47,7 @@ def play_agent():
             turn_complete = env.game.player_action(screen)
 
             if turn_complete:
+                print("player turn complete")
                 env.game.update_board(screen)
 
                 winner = env.game.check_winner()
@@ -60,13 +61,16 @@ def play_agent():
                 env.game.switch_turn()
         else:
             # AI's turn
+            print("In AI's turn")
             legal_moves = env.game.get_all_possible_moves()
             action, _, _ = agent.select_action(state, len(legal_moves))  # Get AI action
+
+            print("legal_moves", legal_moves)
+            print("Action:", legal_moves[action][0])
 
             next_state, reward, done, info = env.step(action)  # Apply AI move
             env.game.moves.append(legal_moves[action][0])  # Record AI move
             
-            pygame.time.delay(500)
             env.game.update_board(screen)
 
             if done:
