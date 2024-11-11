@@ -97,12 +97,16 @@ class Game:
             self.current_node = self.rootNode  # Start at the root node of the move tree
 
             if self.capture_in_progress:
-                if board_number not in self.move_chain:
-                    self.move_chain.append(board_number)
+                if self.rootNode and board_number not in self.move_chain and board_number in [child.position for child in self.rootNode.children]:
+                    self.move_chain.append(board_number)  # Move in move chain
             else:
-                self.move_chain = [board_number]
-
-            self.capture_in_progress = self.capture_possible  # Start capture chain if required
+                if self.rootNode and self.capture_possible and board_number in [child.position for child in self.rootNode.children]:
+                    self.move_chain.append(board_number)
+                    self.capture_in_progress = self.capture_possible  # Start capture chain
+                elif self.rootNode and self.capture_possible:
+                    self.move_chain = [board_number]  # Select piece to move and capture
+                else:
+                    self.move_chain = [board_number]  # Select piece to move
 
             self.highlight_piece(screen)
             if self.current_node:
@@ -163,11 +167,13 @@ class Game:
         # Find the child node that matches the selected board position
 
         # Find the child node that matches the selected board position
-        print(f"Attempting move to board number: {board_number}")
-        print(f"Available moves in current node: {[child.position for child in self.current_node.children]}")  # Debug info
+        next_node = None
         
-        next_node = next((child for child in self.current_node.children if child.position == board_number), None)
-
+        print(f"Attempting move to board number: {board_number}")
+        if self.current_node:
+            print(f"Available moves in current node: {[child.position for child in self.current_node.children]}")  # Debug info
+            next_node = next((child for child in self.current_node.children if child.position == board_number), None)
+        
         if next_node:
             # Log the move to self.move_chain
             self.move_chain.append(board_number)
