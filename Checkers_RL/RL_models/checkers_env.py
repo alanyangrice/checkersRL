@@ -76,14 +76,14 @@ class CheckersEnv(gym.Env):
         # Reward for capturing pieces
         if "x" in chosen_move:
             num_captures = len(chosen_move.split('x')) - 1
-            reward += 5 ** num_captures  # Increasing reward for multiple captures
+            reward += 7 ** num_captures  # Increasing reward for multiple captures
 
         # Get new undefended
         new_undefended = self.enemy_capture()
-        reward -= new_undefended * 3  # Punishment for leaving pieces undefended
+        reward -= new_undefended * 20  # Punishment for leaving pieces undefended
 
         # Reward for defending pieces under attack
-        reward += max(old_undefended - new_undefended, 0) * 3
+        reward += max(old_undefended - new_undefended, 0) * 10
 
         # Update game outcome: Check for winner or draw
         winner = self.game.check_winner()

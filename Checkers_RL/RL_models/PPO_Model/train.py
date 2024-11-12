@@ -9,8 +9,8 @@ from util import get_action_index
 
 import torch
 import pandas as pd
-import numpy as np
 import random
+import csv
 import os
 
 # Initialize environment and agents
@@ -46,6 +46,20 @@ game_info_dir = "c:/Users/Alan Yang/Desktop/checkersRL/Checkers_RL/RL_models/PPO
 if not os.path.exists(game_info_dir):
     os.makedirs(game_info_dir)
 
+# Specify the path for the CSV file
+csv_file_path = "c:/Users/Alan Yang/Desktop/checkersRL/Checkers_RL/RL_models/PPO_Model/training_progress.csv"
+
+# Define CSV headers
+headers = [
+    "epoch", "average_epoch_reward", "average_episode_length", "win_rate_agent1", "win_rate_agent2", 
+    "tie_rate", "max_move_reward"
+]
+
+# Create the CSV file and write headers (only if it doesn't exist already)
+with open(csv_file_path, mode='w', newline='') as file:
+    writer = csv.writer(file)
+    writer.writerow(headers)
+
 # Training parameters
 num_epochs = 1000  # Number of epochs for training
 num_episodes = 10000  # Number of episodes per epoch
@@ -54,7 +68,7 @@ save_interval = 1  # Save model every epoch (can adjust)
 # Main training loop
 for epoch in range(num_epochs):
     print(f"Epoch: {epoch}")
-    total_rewards, total_steps, agent1_wins, agent2_wins, tie = 0, 0, 0, 0, 0
+    total_rewards, total_penalty, total_steps, agent1_wins, agent2_wins, tie, max_move_reward = 0, 0, 0, 0, 0, 0, 0
 
     for episode in range(num_episodes):
         print(f"Episode: {episode}")
@@ -75,28 +89,43 @@ for epoch in range(num_epochs):
             current_memory, opponent_memory = memory2, memory1
             agent1_side, agent2_side = RED, BLUE  # Agent2 is BLUE, Agent1 is RED
                 
-        episode_reward, episode_steps = 0, 0
+        episode_reward, episode_steps, max_episode_move_reward = 0, 0, 0
+        first_move = True  # Track if it's the first move of the game
 
         while not done:
             legal_moves = env.game.get_all_possible_moves()  # Get legal moves for the current player
 
-            # Get action and log probabilities from the current agent
-            action, log_prob, _ = current_agent.select_action(state, len(legal_moves))
-            
+            # Diversify the first move
+            if first_move:
+                action = random.choice(range(len(legal_moves)))  # Randomly select the first move
+                first_move = False  # Set to False after the first move
+            else:
+                # Get action and log probabilities from the current agent
+                action, log_prob, _ = current_agent.select_action(state, len(legal_moves))
+
             # Step the environment
             next_state, reward, done, info = env.step(action)
 
-            #env.render()
+            # Apply the opponent's penalty as -1/2 of the reward of the current agent
+            opponent_penalty = -0.7 * reward
 
             # Track rewards
             episode_reward += reward
             total_rewards += reward
+            total_penalty += opponent_penalty
             episode_steps += 1
+
+            if reward > max_episode_move_reward and not done:  # Make sure max reward isn't from winning
+                max_episode_move_reward = reward
+
+                if max_episode_move_reward > max_move_reward:
+                    max_move_reward = max_episode_move_reward
 
             # Record in memory based on current agent's perspective
             action_index = get_action_index(action)
             current_memory.add(state, action_index, reward, log_prob)
-            
+            opponent_memory.add(state, action_index, opponent_penalty, log_prob)
+
             # Save selected games stats
             if game_info is not None:
                 agent_label = "Agent 1" if current_agent == agent1 else "Agent 2"
@@ -107,6 +136,7 @@ for epoch in range(num_epochs):
                     "agent": agent_label,
                     "move": info["legal_moves"][action] if info["move_success"] else None,
                     "reward": reward,
+                    "penalty": opponent_penalty,
                     "success": info["move_success"],
                     "winner": info["winner"]
                 })
@@ -147,31 +177,26 @@ for epoch in range(num_epochs):
         # Swap sides after each episode
         agent1_side, agent2_side = agent2_side, agent1_side
 
-    # Calculate epoch statistics
+    # Calculate averages and other metrics after the epoch
     avg_reward = total_rewards / num_episodes
     avg_steps = total_steps / num_episodes
     win_rate1 = agent1_wins / num_episodes
     win_rate2 = agent2_wins / num_episodes
     tie_rate = tie / num_episodes
 
-    # Append data for this epoch
-    training_data["epoch"].append(epoch)
-    training_data["episode_reward"].append(avg_reward)
-    training_data["win_rate_agent1"].append(win_rate1)
-    training_data["win_rate_agent2"].append(win_rate2)
-    training_data["tie_rate"].append(tie_rate)
-    training_data["average_episode_length"].append(avg_steps)
+    # Write data for this epoch as a new row in the CSV file
+    with open(csv_file_path, mode='a', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow([
+            epoch, avg_reward, avg_steps, win_rate1, win_rate2, tie_rate, max_move_reward
+        ])
 
-    print(f"Epoch {epoch + 1}/{num_epochs} - Avg Reward: {avg_reward:.2f}, Win Rate Agent1: {win_rate1:.2%}, Win Rate Agent2: {win_rate2:.2%}, Tie Rate: {tie_rate:.2%}, Avg Steps: {avg_steps:.2f}")
+    print(f"Epoch {epoch + 1}/{num_epochs} - Avg Reward: {avg_reward:.2f}, Avg Steps: {avg_steps:.2f}, Win Rate Agent1: {win_rate1:.2%}, Win Rate Agent2: {win_rate2:.2%}, Tie Rate: {tie_rate:.2%}, Max Move Reward: {max_move_reward}")
 
     # Save model after every save_interval epochs
     if (epoch + 1) % save_interval == 0:
         torch.save(agent1.policy.state_dict(), os.path.join(model_dir, f"agent1_epoch_{epoch + 1}.pt"))
         torch.save(agent2.policy.state_dict(), os.path.join(model_dir, f"agent2_epoch_{epoch + 1}.pt"))
-
-# Save training data as a CSV for later analysis
-training_df = pd.DataFrame(training_data)
-training_df.to_csv("training_progress.csv", index=False)
 
 print("Training complete.")
 env.close()
