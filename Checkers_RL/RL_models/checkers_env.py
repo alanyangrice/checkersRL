@@ -49,55 +49,118 @@ class CheckersEnv(gym.Env):
         return board_state
 
     def step(self, action):
-        reward = 0  # Reward
-        done = False  # Set done to False by default
+        reward = 0  # Reward for this step
+        done = False  # Whether the game is over
 
         legal_moves = self.game.get_all_possible_moves()
 
-        if action >= len(legal_moves):
-            raise ValueError("Invalid action. Action index out of bounds of legal moves array.")
+        if len(legal_moves) == 0:  # No legal moves, the game ends
+            done = True
+            reward += 200
+            info = {
+                "legal_moves": legal_moves,
+                "turn": self.game.turn,
+                "winner": "Tie"
+            }
+            return self.get_board_state(), reward, done, info
 
-        # Get number of pieces under attack before the turn for future reward calculations
+        # Record the current game state for comparison
+        old_board = copy.deepcopy(self.game.board.board)
+
+        # Get number of pieces under attack before the move
         old_undefended = self.enemy_capture()
 
-        # Apply the chosen move on the board
+        # Apply the chosen move
         chosen_move = legal_moves[action][0]
         new_board = legal_moves[action][1]
+        self.game.board = copy.deepcopy(new_board)
 
-        print(f"newboard: {type(new_board)}")
-
-        old_board = copy.deepcopy(self.game.board.board)
-        self.game.board = new_board
-
-        # Reward for promoting a piece to a king
+        # Reward for promoting a king
         if self.king_promoted(old_board):
-            reward += 20  # Reward for becoming a king
-            
-        # Reward for capturing pieces
+            reward += 40
+
+        # Reward for capturing opponent's pieces
         if "x" in chosen_move:
             num_captures = len(chosen_move.split('x')) - 1
-            reward += 7 ** num_captures  # Increasing reward for multiple captures
+            reward += 30 * num_captures
 
-        # Get new undefended
+        # Punish leaving pieces undefended
         new_undefended = self.enemy_capture()
-        reward -= new_undefended * 20  # Punishment for leaving pieces undefended
+        reward -= new_undefended * 30  # Penalize undefended pieces
 
-        # Reward for defending pieces under attack
-        reward += max(old_undefended - new_undefended, 0) * 10
+        # Reward defending pieces
+        reward += max(old_undefended - new_undefended, 0) * 30
 
-        # Update game outcome: Check for winner or draw
+        # End-of-game outcomes
         winner = self.game.check_winner()
-        if winner == self.game.turn:
+        if winner == self.game.turn:  # Current player wins
             done = True
-            reward += 500 if winner == self.game.turn else -500  # Large reward for winning, penalty for losing
+            reward += 500
         elif winner == "Tie":
             done = True
-            reward += 0  # Add reward for tie
+            reward += 0  # Neutral reward for tie
 
-        # Get the updated observation
+        # Calculate reward for best opponent move
+        if not done:
+            # Switch turns to play as the opponent
+            self.game.switch_turn()
+            opponent_legal_moves = self.game.get_all_possible_moves()
+
+            # Evaluate the opponent's best response
+            if opponent_legal_moves:
+                # Simulate the opponent's best move (greedy evaluation)
+                best_opponent_reward = float('-inf')
+                opp_old_board = copy.deepcopy(new_board)
+
+                # Get number of pieces under attack before the move
+                opp_old_undefended = self.enemy_capture()
+
+                for opp_move in opponent_legal_moves:
+                    # Update board
+                    self.game.board = opp_move[1]
+
+                    # Opponent's reward logic
+                    opp_reward = 0
+
+                    # Reward for promoting a king
+                    if self.king_promoted(opp_old_board):
+                        opp_reward += 40
+
+                    # Reward for capturing opponent's pieces
+                    if "x" in opp_move[0]:
+                        opp_num_captures = len(opp_move[0].split('x')) - 1
+                        opp_reward += 30 * opp_num_captures
+
+                    # Punish leaving pieces undefended
+                    opp_new_undefended = self.enemy_capture()
+                    opp_reward -= opp_new_undefended * 40  # Penalize undefended pieces
+
+                    # Reward defending pieces
+                    opp_reward += max(opp_old_undefended - opp_new_undefended, 0) * 30
+
+                    # End-of-game outcomes
+                    winner = self.game.check_winner()
+                    if winner == self.game.turn:
+                        opp_reward += 500
+                    elif winner == "Tie":
+                        opp_reward += 0  # Neutral reward for tie
+
+                    # Update best reward
+                    best_opponent_reward = max(best_opponent_reward, opp_reward)
+                
+                # Revert board to original
+                self.game.board = copy.deepcopy(new_board)
+            else:
+                best_opponent_reward = 200
+
+            # Penalize the current player if it leads to a strong opponent move
+            reward -= 0.7 * best_opponent_reward
+
+            # Switch turn back to the current player
+            self.game.switch_turn()
+
+        # Update observation and return results
         observation = self.get_board_state()
-
-        # Additional info for debugging or logging purposes
         info = {
             "legal_moves": legal_moves,
             "turn": self.game.turn,
