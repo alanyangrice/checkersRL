@@ -9,6 +9,7 @@ from util import get_action_index
 
 import torch
 import pandas as pd
+from datetime import datetime
 import random
 import csv
 import os
@@ -49,7 +50,7 @@ with open(csv_file_path, mode='w', newline='') as file:
 detailed_csv_file_path = "C:/Users/Alan Yang/Downloads/checkersRL/Checkers_RL/RL_models/PPO_Model/training_progress_detailed.csv"
 
 # Define headers for the detailed CSV
-detailed_headers = ["game_number", "epoch", "episode", "blue_win", "red_win", "moves"]
+detailed_headers = ["game_number", "epoch", "episode", "blue_win", "red_win", "moves", "time"]
 
 # Create the CSV file and write headers (only if it doesn't exist already)
 with open(detailed_csv_file_path, mode='w', newline='') as file:
@@ -87,7 +88,7 @@ for epoch in range(num_epochs):
             legal_moves = env.game.get_all_possible_moves()  # Get legal moves for the current player
 
             # Diversify the first move
-            if first_move and epoch < 100:
+            if first_move and epoch < 50:
                 action = random.choice(range(len(legal_moves)))
                 log_prob = 1
                 first_move_count += 1
@@ -96,7 +97,7 @@ for epoch in range(num_epochs):
                     first_move = False
             else:
                 if len(legal_moves) != 0:
-                    epsilon = max(0.03, 1 - epoch / 100)
+                    epsilon = max(0.03, 1 - epoch / 50)
                     if random.random() < epsilon:
                         action = random.choice(range(len(legal_moves)))
                         log_prob = 1
@@ -165,7 +166,7 @@ for epoch in range(num_epochs):
         # Save detailed data for this episode
         with open(detailed_csv_file_path, mode='a', newline='') as file:
             writer = csv.writer(file)
-            writer.writerow([epoch * num_episodes + episode + 1, epoch + 1, episode + 1, 1 if winner == BLUE else 0, 1 if winner == RED else 0, ", ".join(env.game.moves)])
+            writer.writerow([epoch * num_episodes + episode + 1, epoch + 1, episode + 1, 1 if winner == BLUE else 0, 1 if winner == RED else 0, ", ".join(env.game.moves), datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
         
         # Store episode data
         total_steps += episode_steps
