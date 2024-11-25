@@ -1,5 +1,5 @@
 import sys
-sys.path.append(r"/Users/alanyang/Downloads/checkersRL/Checkers_RL")
+sys.path.append(r"C:\Users\Alan Yang\Downloads\checkersRL\Checkers_RL")
 
 from RL_models.checkers_env import CheckersEnv
 from RL_models.PPO_Model.Agent import PPOAgent
@@ -74,7 +74,7 @@ for epoch in range(num_epochs):
         blue_memory, red_memory = Memory(), Memory()  # Memory for the agent playing as BLUE and RED
         
         # Track game info if sampling condition is met
-        game_info = [] if random.random() < 0.0005 else None  # Log moves for ~0.01% of games
+        game_info = [] if random.random() < 0.005 else None  # Log moves for ~0.5% of games
         
         # Randomly choose which side starts first
         current_side = random.choice([BLUE, RED])
@@ -89,10 +89,12 @@ for epoch in range(num_epochs):
             if first_move and epoch < 300:
                 action = random.choice(range(len(legal_moves)))
                 first_move = False
+                log_prob = 1
             else:
                 epsilon = max(0.1, 1 - epoch / 1000)  # Decay exploration
                 if random.random() < epsilon:
                     action = random.choice(range(len(legal_moves)))
+                    log_prob = 1
                 else:
                     action, log_prob, _ = agent.select_action(state, len(legal_moves))
 

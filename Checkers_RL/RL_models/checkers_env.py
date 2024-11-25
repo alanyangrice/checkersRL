@@ -1,5 +1,5 @@
 import sys
-sys.path.append(r"/Users/alanyang/Downloads/checkersRL/Checkers_RL")
+sys.path.append(r"C:\Users\Alan Yang\Downloads\checkersRL\Checkers_RL")
 
 import numpy as np
 import gym
@@ -48,11 +48,9 @@ class CheckersEnv(gym.Env):
                             board_state[2, row, col] = 1  # Blue regular
         return board_state
 
-    def step(self, action):
+    def step(self, action, legal_moves):
         reward = 0  # Reward for this step
         done = False  # Whether the game is over
-
-        legal_moves = self.game.get_all_possible_moves()
 
         if len(legal_moves) == 0:  # No legal moves, the game ends
             done = True
@@ -110,7 +108,7 @@ class CheckersEnv(gym.Env):
             if opponent_legal_moves:
                 # Simulate the opponent's best move (greedy evaluation)
                 best_opponent_reward = float('-inf')
-                opp_old_board = copy.deepcopy(new_board)
+                opp_old_board = copy.deepcopy(new_board.board)
 
                 # Get number of pieces under attack before the move
                 opp_old_undefended = self.enemy_capture()

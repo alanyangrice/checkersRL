@@ -1,5 +1,5 @@
 import sys
-sys.path.append(r"/Users/alanyang/Downloads/checkersRL/Checkers_RL")
+sys.path.append(r"C:\Users\Alan Yang\Downloads\checkersRL\Checkers_RL")
 
 import torch
 import torch.nn as nn
