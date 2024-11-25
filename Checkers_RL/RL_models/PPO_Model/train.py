@@ -50,7 +50,7 @@ with open(csv_file_path, mode='w', newline='') as file:
 detailed_csv_file_path = "C:/Users/Alan Yang/Downloads/checkersRL/Checkers_RL/RL_models/PPO_Model/training_progress_detailed.csv"
 
 # Define headers for the detailed CSV
-detailed_headers = ["game_number", "epoch", "episode", "blue_win", "red_win", "moves", "time"]
+detailed_headers = ["game_number", "epoch", "episode", "blue_win", "red_win", "reward", "time", "moves"]
 
 # Create the CSV file and write headers (only if it doesn't exist already)
 with open(detailed_csv_file_path, mode='w', newline='') as file:
@@ -166,7 +166,7 @@ for epoch in range(num_epochs):
         # Save detailed data for this episode
         with open(detailed_csv_file_path, mode='a', newline='') as file:
             writer = csv.writer(file)
-            writer.writerow([epoch * num_episodes + episode + 1, epoch + 1, episode + 1, 1 if winner == BLUE else 0, 1 if winner == RED else 0, ", ".join(env.game.moves), datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+            writer.writerow([epoch * num_episodes + episode + 1, epoch + 1, episode + 1, 1 if winner == BLUE else 0, 1 if winner == RED else 0, episode_reward, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), ", ".join(env.game.moves)])
         
         # Store episode data
         total_steps += episode_steps
