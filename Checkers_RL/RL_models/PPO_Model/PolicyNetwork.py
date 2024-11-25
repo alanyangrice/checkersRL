@@ -11,7 +11,7 @@ class PPOPolicyNetwork(nn.Module):
             nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
             nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
+            nn.ReLU()
         )
 
         self.flattened_size = 256 * 8 * 8  # Assuming input dimensions lead to this size

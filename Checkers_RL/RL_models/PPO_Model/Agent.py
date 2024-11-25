@@ -36,18 +36,21 @@ class PPOAgent:
 
     def update(self, memory):
         # Convert memory to tensors and move to GPU
-        states = torch.FloatTensor(np.array(memory.states))#.cuda()
-        actions = torch.LongTensor(np.array(memory.actions))#.cuda()
-        rewards = torch.FloatTensor(np.array(memory.rewards))#.cuda()
-        log_probs_old = torch.FloatTensor(memory.log_probs)#.cuda()
+        states = torch.FloatTensor(np.array(memory.states)).cuda()
+        actions = torch.LongTensor(np.array(memory.actions)).cuda()
+        rewards = torch.FloatTensor(np.array(memory.rewards)).cuda()
+        log_probs_old = torch.FloatTensor(memory.log_probs).cuda()
+        done_flags = torch.FloatTensor(np.array(memory.done)).cuda()
 
-        # Calculate discounted rewards
+        # Calculate discounted rewards considering `done` flags
         discounted_rewards = []
         G = 0
-        for reward in reversed(rewards):
+        for reward, done in zip(reversed(rewards), reversed(done_flags)):
+            if done:  # Reset G if the episode has ended
+                G = 0
             G = reward + self.gamma * G
             discounted_rewards.insert(0, G)
-        discounted_rewards = torch.FloatTensor(discounted_rewards).view(-1, 1)#.cuda()
+        discounted_rewards = torch.FloatTensor(discounted_rewards).view(-1, 1).cuda()
 
         # PPO update for K epochs
         for _ in range(self.K_epochs):
