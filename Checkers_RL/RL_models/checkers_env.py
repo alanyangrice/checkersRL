@@ -60,6 +60,10 @@ class CheckersEnv(gym.Env):
                 "turn": self.game.turn,
                 "winner": "Tie"
             }
+
+            print("Forced Draw")
+            self.render()
+            
             return self.get_board_state(), reward, done, info
 
         # Record the current game state for comparison

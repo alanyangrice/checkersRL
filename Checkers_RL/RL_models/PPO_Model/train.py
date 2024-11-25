@@ -22,17 +22,17 @@ n_actions = env.action_space.n
 agent = PPOAgent(input_shape, n_actions)
 
 # Directory for saving models
-model_dir = "c:/Users/Alan Yang/Desktop/checkersRL/Checkers_RL/RL_models/PPO_Model/PPO_saved_models"
+model_dir = "C:/Users/Alan Yang/Downloads/checkersRL/Checkers_RL/RL_models/PPO_Model/PPO_saved_models"
 if not os.path.exists(model_dir):
     os.makedirs(model_dir)
 
 # Directory for saving random games
-game_info_dir = "c:/Users/Alan Yang/Desktop/checkersRL/Checkers_RL/RL_models/PPO_Model/saved_games"
+game_info_dir = "C:/Users/Alan Yang/Downloads/checkersRL/Checkers_RL/RL_models/PPO_Model/saved_games"
 if not os.path.exists(game_info_dir):
     os.makedirs(game_info_dir)
 
 # Specify the path for the CSV file
-csv_file_path = "c:/Users/Alan Yang/Desktop/checkersRL/Checkers_RL/RL_models/PPO_Model/training_progress.csv"
+csv_file_path = "C:/Users/Alan Yang/Downloads/checkersRL/Checkers_RL/RL_models/PPO_Model/training_progress.csv"
 
 # Define CSV headers
 headers = [
@@ -46,7 +46,7 @@ with open(csv_file_path, mode='w', newline='') as file:
     writer.writerow(headers)
 
 # Specify the path for the detailed CSV file
-detailed_csv_file_path = "c:/Users/Alan Yang/Desktop/checkersRL/Checkers_RL/RL_models/PPO_Model/detailed_training_progress.csv"
+detailed_csv_file_path = "C:/Users/Alan Yang/Downloads/checkersRL/Checkers_RL/RL_models/PPO_Model/detailed_training_progress.csv"
 
 # Define headers for the detailed CSV
 detailed_headers = ["epoch", "episode", "blue_win", "red_win", "moves"]
@@ -91,12 +91,7 @@ for epoch in range(num_epochs):
                 first_move = False
                 log_prob = 1
             else:
-                epsilon = max(0.1, 1 - epoch / 1000)  # Decay exploration
-                if random.random() < epsilon:
-                    action = random.choice(range(len(legal_moves)))
-                    log_prob = 1
-                else:
-                    action, log_prob, _ = agent.select_action(state, len(legal_moves))
+                action, log_prob, _ = agent.select_action(state, len(legal_moves))
 
             # Step the environment
             next_state, reward, done, info = env.step(action, legal_moves)
