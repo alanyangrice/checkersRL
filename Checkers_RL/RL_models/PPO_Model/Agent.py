@@ -40,7 +40,7 @@ class PPOAgent:
         actions = torch.LongTensor(np.array(memory.actions)).cuda()
         rewards = torch.FloatTensor(np.array(memory.rewards)).cuda()
         log_probs_old = torch.FloatTensor(memory.log_probs).cuda()
-        done_flags = torch.FloatTensor(np.array(memory.done)).cuda()
+        done_flags = torch.tensor(memory.done, dtype=torch.bool).cuda()
 
         # Calculate discounted rewards considering `done` flags
         discounted_rewards = []
@@ -52,6 +52,12 @@ class PPOAgent:
             discounted_rewards.insert(0, G)
         discounted_rewards = torch.FloatTensor(discounted_rewards).view(-1, 1).cuda()
 
+        # Normalize advantages
+        with torch.no_grad():
+            state_values = self.policy(states)[1]  # Assumes policy returns (logits, state_values)
+            advantages = discounted_rewards - state_values
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
         # PPO update for K epochs
         for _ in range(self.K_epochs):
             logits, state_values = self.policy(states)
@@ -61,7 +67,6 @@ class PPOAgent:
             ratios = torch.exp(log_probs - log_probs_old)
 
             # Clipped Surrogate Loss
-            advantages = discounted_rewards - state_values.squeeze()
             surr1 = ratios * advantages
             surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * advantages
             loss = -torch.min(surr1, surr2) + 0.5 * nn.MSELoss()(state_values, discounted_rewards) - 0.05 * entropy
