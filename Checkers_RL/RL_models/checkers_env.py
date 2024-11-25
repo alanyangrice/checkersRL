@@ -104,6 +104,14 @@ class CheckersEnv(gym.Env):
             done = True
             reward += 0  # Neutral reward for tie
 
+        # Update observation and return results
+        observation = self.get_board_state()
+        info = {
+            "legal_moves": legal_moves,
+            "turn": self.game.turn,
+            "winner": winner if winner else "None"
+        }
+
         # Calculate reward for best opponent move
         if not done:
             # Switch turns to play as the opponent
@@ -162,14 +170,6 @@ class CheckersEnv(gym.Env):
 
             # Switch turn back to the current player
             self.game.switch_turn()
-
-        # Update observation and return results
-        observation = self.get_board_state()
-        info = {
-            "legal_moves": legal_moves,
-            "turn": self.game.turn,
-            "winner": winner if winner else "None"
-        }
 
         return observation, reward, done, info
 
