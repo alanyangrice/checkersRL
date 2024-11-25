@@ -101,11 +101,11 @@ for epoch in range(num_epochs):
                     if random.random() < epsilon:
                         action = random.choice(range(len(legal_moves)))
                         log_prob = 1
-                elif len(legal_moves) == 0:
+                    else:
+                        action, log_prob, _ = agent.select_action(state, len(legal_moves))
+                else:
                     action = 0
                     log_prob = 1
-                else:
-                    action, log_prob, _ = agent.select_action(state, len(legal_moves))
 
             # Make sure move is within range of legal_moves
             if action >= len(legal_moves) and len(legal_moves) != 0:
