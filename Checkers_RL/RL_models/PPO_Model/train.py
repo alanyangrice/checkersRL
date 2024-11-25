@@ -149,7 +149,7 @@ for epoch in range(num_epochs):
         # Save detailed data for this episode
         with open(detailed_csv_file_path, mode='a', newline='') as file:
             writer = csv.writer(file)
-            writer.writerow([epoch * num_episodes + episode, epoch + 1, episode + 1, 1 if winner == BLUE else 0, 1 if winner == RED else 0, ", ".join(env.game.moves)])
+            writer.writerow([epoch * num_episodes + episode + 1, epoch + 1, episode + 1, 1 if winner == BLUE else 0, 1 if winner == RED else 0, ", ".join(env.game.moves)])
         
         # Store episode data
         total_steps += episode_steps
