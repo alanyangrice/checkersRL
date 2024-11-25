@@ -9,6 +9,7 @@ from util import get_action_index
 
 import torch
 import pandas as pd
+import numpy as np
 from datetime import datetime
 import random
 import csv
@@ -90,7 +91,7 @@ for epoch in range(num_epochs):
             # Diversify the first move
             if first_move and epoch < 50:
                 action = random.choice(range(len(legal_moves)))
-                log_prob = 1
+                log_prob = np.log(1 / len(legal_moves))
                 first_move_count += 1
 
                 if first_move_count > 10:
@@ -100,7 +101,7 @@ for epoch in range(num_epochs):
                     epsilon = max(0.03, 1 - epoch / 50)
                     if random.random() < epsilon:
                         action = random.choice(range(len(legal_moves)))
-                        log_prob = 1
+                        log_prob = np.log(1 / len(legal_moves))
                     else:
                         action, log_prob, _ = agent.select_action(state, len(legal_moves))
                 else:

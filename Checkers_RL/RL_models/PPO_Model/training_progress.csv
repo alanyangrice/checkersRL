@@ -1,2 +1,1 @@
 epoch,average_epoch_reward,average_episode_length,win_rate_blue,win_rate_red,tie_rate,max_move_reward
-1,-189.9598,58.5924,0.3166,0.3278,0.3556,218.0
