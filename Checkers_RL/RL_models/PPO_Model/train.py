@@ -81,17 +81,27 @@ for epoch in range(num_epochs):
                 
         episode_reward, episode_steps, max_episode_move_reward = 0, 0, 0
         first_move = True  # Track if it's the first move of the game
+        first_move_count = 0
 
         while not done:
             legal_moves = env.game.get_all_possible_moves()  # Get legal moves for the current player
 
             # Diversify the first move
-            if first_move and epoch < 300:
+            if first_move and epoch < 100:
                 action = random.choice(range(len(legal_moves)))
-                first_move = False
                 log_prob = 1
+                first_move_count += 1
+
+                if first_move_count > 10:
+                    first_move = False
             else:
-                action, log_prob, _ = agent.select_action(state, len(legal_moves))
+                if len(legal_moves) != 0:
+                    epsilon = max(0.03, 1 - epoch / 100)
+                    if random.random() < epsilon:
+                        action = random.choice(range(len(legal_moves)))
+                        log_prob = 1
+                else:
+                    action, log_prob, _ = agent.select_action(state, len(legal_moves))
 
             # Step the environment
             next_state, reward, done, info = env.step(action, legal_moves)
