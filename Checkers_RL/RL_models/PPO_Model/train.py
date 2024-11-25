@@ -133,6 +133,7 @@ for epoch in range(num_epochs):
                     "episode": episode + 1,
                     "turn": env.game.turn,
                     "move": info["legal_moves"][action][0] if len(legal_moves) != 0 else "No Legal Move",
+                    "log_prob": log_prob,
                     "reward": reward,
                     "winner": info["winner"]
                 })
