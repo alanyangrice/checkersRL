@@ -91,7 +91,7 @@ for epoch in range(num_epochs):
             # Diversify the first move
             if first_move and epoch < 50:
                 action = random.choice(range(len(legal_moves)))
-                log_prob = np.log(1 / len(legal_moves))
+                log_prob = np.log(1 / len(legal_moves)) if len(legal_moves) != 0 else 1
                 first_move_count += 1
 
                 if first_move_count > 10:
@@ -111,7 +111,7 @@ for epoch in range(num_epochs):
             # Make sure move is within range of legal_moves
             if action >= len(legal_moves) and len(legal_moves) != 0:
                 action = random.choice(range(len(legal_moves)))
-                log_prob = 1
+                log_prob = np.log(1 / len(legal_moves))
 
             # Step the environment
             next_state, reward, done, info = env.step(action, legal_moves)
