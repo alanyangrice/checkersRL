@@ -46,10 +46,10 @@ with open(csv_file_path, mode='w', newline='') as file:
     writer.writerow(headers)
 
 # Specify the path for the detailed CSV file
-detailed_csv_file_path = "C:/Users/Alan Yang/Downloads/checkersRL/Checkers_RL/RL_models/PPO_Model/detailed_training_progress.csv"
+detailed_csv_file_path = "C:/Users/Alan Yang/Downloads/checkersRL/Checkers_RL/RL_models/PPO_Model/training_progress_detailed.csv"
 
 # Define headers for the detailed CSV
-detailed_headers = ["epoch", "episode", "blue_win", "red_win", "moves"]
+detailed_headers = ["game_number", "epoch", "episode", "blue_win", "red_win", "moves"]
 
 # Create the CSV file and write headers (only if it doesn't exist already)
 with open(detailed_csv_file_path, mode='w', newline='') as file:
@@ -66,12 +66,12 @@ save_interval = 1  # Save model every epoch (can adjust)
 for epoch in range(num_epochs):
     print(f"Epoch: {epoch + 1}")
     total_rewards, total_steps, blue_wins, red_wins, ties, max_move_reward = 0, 0, 0, 0, 0, 0
+    blue_memory, red_memory = Memory(), Memory()  # Memory for the agent playing as BLUE and RED
 
     for episode in range(num_episodes):
         print(f"Episode: {episode + 1}")
         state = env.reset()  # Reset environment for each episode
         done = False  # Flag to check if game is over
-        blue_memory, red_memory = Memory(), Memory()  # Memory for the agent playing as BLUE and RED
         
         # Track game info if sampling condition is met
         game_info = [] if random.random() < 0.005 else None  # Log moves for ~0.5% of games
@@ -149,7 +149,7 @@ for epoch in range(num_epochs):
         # Save detailed data for this episode
         with open(detailed_csv_file_path, mode='a', newline='') as file:
             writer = csv.writer(file)
-            writer.writerow([epoch + 1, episode + 1, 1 if winner == BLUE else 0, 1 if winner == RED else 0, ", ".join(env.game.moves)])
+            writer.writerow([epoch * num_episodes + episode, epoch + 1, episode + 1, 1 if winner == BLUE else 0, 1 if winner == RED else 0, ", ".join(env.game.moves)])
         
         # Store episode data
         total_steps += episode_steps

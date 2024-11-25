@@ -63,7 +63,7 @@ class CheckersEnv(gym.Env):
 
             print("Forced Draw")
             self.render()
-            
+
             return self.get_board_state(), reward, done, info
 
         # Record the current game state for comparison
@@ -76,6 +76,8 @@ class CheckersEnv(gym.Env):
         chosen_move = legal_moves[action][0]
         new_board = legal_moves[action][1]
         self.game.board = copy.deepcopy(new_board)
+
+        self.game.moves.append(chosen_move)
 
         # Reward for promoting a king
         if self.king_promoted(old_board):
