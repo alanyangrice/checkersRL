@@ -28,11 +28,6 @@ model_dir = "C:/Users/Alan Yang/Downloads/checkersRL/Checkers_RL/RL_models/PPO_M
 if not os.path.exists(model_dir):
     os.makedirs(model_dir)
 
-# Directory for saving random games
-game_info_dir = "C:/Users/Alan Yang/Downloads/checkersRL/Checkers_RL/RL_models/PPO_Model/saved_games"
-if not os.path.exists(game_info_dir):
-    os.makedirs(game_info_dir)
-
 # Specify the path for the CSV file
 csv_file_path = "C:/Users/Alan Yang/Downloads/checkersRL/Checkers_RL/RL_models/PPO_Model/training_progress.csv"
 
@@ -47,22 +42,19 @@ with open(csv_file_path, mode='w', newline='') as file:
     writer = csv.writer(file)
     writer.writerow(headers)
 
-# Specify the path for the detailed CSV file
-detailed_csv_file_path = "C:/Users/Alan Yang/Downloads/checkersRL/Checkers_RL/RL_models/PPO_Model/training_progress_detailed.csv"
+# Directory for saving game moves
+detailed_csv_folder_path = "C:/Users/Alan Yang/Downloads/checkersRL/Checkers_RL/RL_models/PPO_Model/training_progress_detailed"
+if not os.path.exists(detailed_csv_folder_path):
+    os.makedirs(detailed_csv_folder_path)
 
 # Define headers for the detailed CSV
-detailed_headers = ["game_number", "epoch", "episode", "blue_win", "red_win", "reward", "time", "moves"]
-
-# Create the CSV file and write headers (only if it doesn't exist already)
-with open(detailed_csv_file_path, mode='w', newline='') as file:
-    writer = csv.writer(file)
-    writer.writerow(detailed_headers)
+detailed_headers = ["game_number", "epoch", "episode", "blue_win", "red_win", "reward", "time", "moves", "log_probs"]
 
 # Training parameters
 num_epochs = 1000  # Number of epochs for training
 num_episodes = 5000  # Number of episodes per epoch
 batch_size = 100  # Number of episodes per batch
-save_interval = 1  # Save model every epoch (can adjust)
+save_interval = 1  # Save model every epoch
 
 # Main training loop
 for epoch in range(num_epochs):
@@ -70,20 +62,26 @@ for epoch in range(num_epochs):
     total_rewards, total_steps, blue_wins, red_wins, ties, max_move_reward = 0, 0, 0, 0, 0, 0
     blue_memory, red_memory = Memory(), Memory()  # Memory for the agent playing as BLUE and RED
 
+    # Path for the detailed CSV file for this epoch
+    detailed_csv_file_path = os.path.join(detailed_csv_folder_path, f"detailed_games_epoch_{epoch + 1}.csv")
+
+    # Create the CSV file for the epoch and write headers
+    with open(detailed_csv_file_path, mode='w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(detailed_headers)
+
     for episode in range(num_episodes):
         print(f"Episode: {episode + 1}")
         state = env.reset()  # Reset environment for each episode
         done = False  # Flag to check if game is over
         
-        # Track game info if sampling condition is met
-        game_info = [] if random.random() < 0.005 else None  # Log moves for ~0.5% of games
-        
         # Randomly choose which side starts first
         current_side = random.choice([BLUE, RED])
                 
         episode_reward, episode_steps, max_episode_move_reward = 0, 0, 0
-        first_move = True  # Track if it's the first move of the game
+        first_move = True  # Track if it's the first moves of the game
         first_move_count = 0
+        log_prob_list = []
 
         while not done:
             legal_moves = env.game.get_all_possible_moves()  # Get legal moves for the current player
@@ -127,24 +125,13 @@ for epoch in range(num_epochs):
                 if max_episode_move_reward > max_move_reward:
                     max_move_reward = max_episode_move_reward
 
-            # Save selected games stats
-            if game_info is not None:
-                game_info.append({
-                    "epoch": epoch + 1,
-                    "episode": episode + 1,
-                    "turn": env.game.turn,
-                    "move": info["legal_moves"][action][0] if len(legal_moves) != 0 else "No Legal Move",
-                    "log_prob": log_prob,
-                    "reward": reward,
-                    "winner": info["winner"]
-                })
-
             # Record in memory based on the current side
             action_index = get_action_index(action)
             if current_side == BLUE:
                 blue_memory.add(state, action_index, reward, log_prob, done)
             else:
                 red_memory.add(state, action_index, reward, log_prob, done)
+            log_prob_list.append(log_prob)
 
             # Track win/loss for the current side
             if done:
@@ -162,16 +149,21 @@ for epoch in range(num_epochs):
             # Switch sides
             env.game.switch_turn()
         
-        # Save game information if sampled
-        if game_info:
-            game_info_df = pd.DataFrame(game_info)
-            game_info_df.to_csv(f"{game_info_dir}/game_info_epoch_{epoch}_episode_{episode}.csv", index=False)
-        
-        # Save detailed data for this episode
+        # Write the episodes data to the epoch's detailed CSV file
         with open(detailed_csv_file_path, mode='a', newline='') as file:
             writer = csv.writer(file)
-            writer.writerow([epoch * num_episodes + episode + 1, epoch + 1, episode + 1, 1 if winner == BLUE else 0, 1 if winner == RED else 0, episode_reward, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), ", ".join(env.game.moves)])
-        
+            writer.writerow([
+                epoch * num_episodes + episode + 1,
+                epoch + 1,
+                episode + 1,
+                1 if winner == BLUE else 0,
+                1 if winner == RED else 0,
+                episode_reward,
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                ", ".join(env.game.moves),
+                ", ".join(log_prob_list)
+            ])
+
         # Store episode data
         total_steps += episode_steps
         
@@ -181,7 +173,6 @@ for epoch in range(num_epochs):
             agent.update(blue_memory)
             agent.update(red_memory)
             blue_memory.clear()
-            red_memory.clear()
 
     # Calculate averages and other metrics after the epoch
     avg_reward = total_rewards / num_episodes
