@@ -14,6 +14,14 @@ from datetime import datetime
 import random
 import csv
 import os
+import zipfile
+
+def zip_csv_file(csv_file_path, zip_file_path):
+    # Create a zip file and add the CSV to it
+    with zipfile.ZipFile(zip_file_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        zipf.write(csv_file_path, arcname=os.path.basename(csv_file_path))
+    # Optionally, delete the original CSV file to save space
+    os.remove(csv_file_path)
 
 # Initialize environment and agents
 env = CheckersEnv()
@@ -161,7 +169,7 @@ for epoch in range(num_epochs):
                 episode_reward,
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 ", ".join(env.game.moves),
-                ", ".join(log_prob_list)
+                ", ".join([str(prob) for prob in log_prob_list])
             ])
 
         # Store episode data
@@ -180,6 +188,10 @@ for epoch in range(num_epochs):
     blue_win_rate = blue_wins / num_episodes
     red_win_rate = red_wins / num_episodes
     tie_rate = ties / num_episodes
+
+    # Zip the CSV file to save space
+    epoch_zip_file_path = os.path.join(detailed_csv_folder_path, f"detailed_games_epoch_{epoch + 1}.zip")
+    zip_csv_file(detailed_csv_file_path, epoch_zip_file_path)
 
     # Write data for this epoch as a new row in the CSV file
     with open(csv_file_path, mode='a', newline='') as file:
