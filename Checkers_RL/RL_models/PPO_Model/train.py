@@ -181,6 +181,7 @@ for epoch in range(num_epochs):
             agent.update(blue_memory)
             agent.update(red_memory)
             blue_memory.clear()
+            red_memory.clear()
 
     # Calculate averages and other metrics after the epoch
     avg_reward = total_rewards / num_episodes
