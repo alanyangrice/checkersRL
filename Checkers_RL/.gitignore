@@ -1,6 +1,6 @@
 # Ignore folders
-RL_models/PPO_Model/saved_games/
-
+RL_models/PPO_Model/training_progress_detailed/
+RL_models/PPO_Model/PPO_saved_models/
 # Ignore files
 RL_models/PPO_Model/training_progress_detailed.csv
 
