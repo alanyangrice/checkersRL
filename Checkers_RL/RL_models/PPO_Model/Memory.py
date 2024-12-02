@@ -20,3 +20,6 @@ class Memory:
         self.rewards = []
         self.log_probs = []
         self.done = []
+
+    def update_last_done(self):
+        self.done[-1] = True

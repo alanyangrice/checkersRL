@@ -1,5 +1,5 @@
 import sys
-sys.path.append(r"C:\Users\Alan Yang\Downloads\checkersRL\Checkers_RL")
+sys.path.append(r"/Users/alanyang/Downloads/checkersRL/Checkers_RL")
 
 from RL_models.checkers_env import CheckersEnv
 from RL_models.PPO_Model.Agent import PPOAgent
@@ -32,12 +32,12 @@ n_actions = env.action_space.n
 agent = PPOAgent(input_shape, n_actions)
 
 # Directory for saving models
-model_dir = "C:/Users/Alan Yang/Downloads/checkersRL/Checkers_RL/RL_models/PPO_Model/PPO_saved_models"
+model_dir = "/Users/alanyang/Downloads/checkersRL/Checkers_RL/RL_models/PPO_Model/PPO_saved_models"
 if not os.path.exists(model_dir):
     os.makedirs(model_dir)
 
 # Specify the path for the CSV file
-csv_file_path = "C:/Users/Alan Yang/Downloads/checkersRL/Checkers_RL/RL_models/PPO_Model/training_progress.csv"
+csv_file_path = "/Users/alanyang/Downloads/checkersRL/Checkers_RL/RL_models/PPO_Model/training_progress.csv"
 
 # Define CSV headers
 headers = [
@@ -51,17 +51,17 @@ with open(csv_file_path, mode='w', newline='') as file:
     writer.writerow(headers)
 
 # Directory for saving game moves
-detailed_csv_folder_path = "C:/Users/Alan Yang/Downloads/checkersRL/Checkers_RL/RL_models/PPO_Model/training_progress_detailed"
+detailed_csv_folder_path = "/Users/alanyang/Downloads/checkersRL/Checkers_RL/RL_models/PPO_Model/training_progress_detailed"
 if not os.path.exists(detailed_csv_folder_path):
     os.makedirs(detailed_csv_folder_path)
 
 # Define headers for the detailed CSV
-detailed_headers = ["game_number", "epoch", "episode", "blue_win", "red_win", "reward", "time", "moves", "log_probs"]
+detailed_headers = ["game_number", "epoch", "episode", "blue_win", "red_win", "total_reward", "time", "moves", "log_probs", "reward_list"]
 
 # Training parameters
 num_epochs = 1000  # Number of epochs for training
-num_episodes = 5000  # Number of episodes per epoch
-batch_size = 100  # Number of episodes per batch
+num_episodes = 1000  # Number of episodes per epoch
+batch_size = 50  # Number of episodes per batch
 save_interval = 1  # Save model every epoch
 
 # Main training loop
@@ -82,37 +82,35 @@ for epoch in range(num_epochs):
         print(f"Episode: {episode + 1}")
         state = env.reset()  # Reset environment for each episode
         done = False  # Flag to check if game is over
-        
-        # Randomly choose which side starts first
-        current_side = random.choice([BLUE, RED])
                 
         episode_reward, episode_steps, max_episode_move_reward = 0, 0, 0
         first_move = True  # Track if it's the first moves of the game
         first_move_count = 0
         log_prob_list = []
+        reward_list = []
 
         while not done:
             legal_moves = env.game.get_all_possible_moves()  # Get legal moves for the current player
 
-            # Diversify the first move
-            if first_move and epoch < 50:
-                action = random.choice(range(len(legal_moves)))
-                log_prob = np.log(1 / len(legal_moves)) if len(legal_moves) != 0 else 1
-                first_move_count += 1
-
-                if first_move_count > 10:
-                    first_move = False
+            if len(legal_moves) == 0:
+                action = 0
+                log_prob = 1
             else:
-                if len(legal_moves) != 0:
+                # Diversify the first move
+                if first_move and epoch < 50:
+                    action = random.choice(range(len(legal_moves)))
+                    log_prob = np.log(1 / len(legal_moves)) if len(legal_moves) != 0 else 1
+                    first_move_count += 1
+
+                    if first_move_count > 10:
+                        first_move = False
+                else:
                     epsilon = max(0.03, 1 - epoch / 50)
                     if random.random() < epsilon:
                         action = random.choice(range(len(legal_moves)))
                         log_prob = np.log(1 / len(legal_moves))
                     else:
                         action, log_prob, _ = agent.select_action(state, len(legal_moves))
-                else:
-                    action = 0
-                    log_prob = 1
 
             # Make sure move is within range of legal_moves
             if action >= len(legal_moves) and len(legal_moves) != 0:
@@ -135,11 +133,16 @@ for epoch in range(num_epochs):
 
             # Record in memory based on the current side
             action_index = get_action_index(action)
-            if current_side == BLUE:
+            if env.game.turn == BLUE:
                 blue_memory.add(state, action_index, reward, log_prob, done)
+                if done:
+                    red_memory.update_last_done()
             else:
                 red_memory.add(state, action_index, reward, log_prob, done)
+                if done:
+                    blue_memory.update_last_done()
             log_prob_list.append(log_prob)
+            reward_list.append(reward)
 
             # Track win/loss for the current side
             if done:
@@ -169,7 +172,8 @@ for epoch in range(num_epochs):
                 episode_reward,
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 ", ".join(env.game.moves),
-                ", ".join([str(prob) for prob in log_prob_list])
+                ", ".join([str(prob) for prob in log_prob_list]),
+                ", ".join([str(rew) for rew in reward_list])
             ])
 
         # Store episode data
@@ -180,6 +184,8 @@ for epoch in range(num_epochs):
             print(f"Updating agent with batch of {batch_size} episodes")
             agent.update(blue_memory)
             agent.update(red_memory)
+            print(f"blue memory: {len(blue_memory.states)}")
+            print(f"red memory: {len(red_memory.states)}")
             blue_memory.clear()
             red_memory.clear()
 

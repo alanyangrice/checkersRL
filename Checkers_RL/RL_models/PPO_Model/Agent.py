@@ -1,5 +1,5 @@
 import sys
-sys.path.append(r"C:\Users\Alan Yang\Downloads\checkersRL\Checkers_RL")
+sys.path.append(r"/Users/alanyang/Downloads/checkersRL/Checkers_RL")
 
 import torch
 import torch.nn as nn
@@ -9,25 +9,25 @@ from torch.distributions import Categorical
 from RL_models.PPO_Model.PolicyNetwork import PPOPolicyNetwork
 
 class PPOAgent:
-    def __init__(self, input_shape, n_actions, lr=1e-5, gamma=0.99, eps_clip=0.2, K_epochs=4):
-        self.policy = PPOPolicyNetwork(input_shape, n_actions).cuda()
+    def __init__(self, input_shape, n_actions, lr=3e-4, gamma=0.95, eps_clip=0.2, K_epochs=4):
+        self.policy = PPOPolicyNetwork(input_shape, n_actions)#.cuda()
         self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
         self.gamma = gamma
         self.eps_clip = eps_clip
         self.K_epochs = K_epochs
 
     def select_action(self, state, num_legal_moves):
-        state = torch.FloatTensor(state).unsqueeze(0).cuda()
+        state = torch.FloatTensor(state).unsqueeze(0)#.cuda()
 
         # Get logits for all actions from the policy network
         logits, _ = self.policy(state)
 
         # Create a mask to set all invalid actions to a large negative value
-        mask = torch.full(logits.size(), -1e10).cuda()
+        mask = torch.full(logits.size(), -1e10)#.cuda()
         mask[0, :num_legal_moves] = 0  # Allow only the first `num_legal_moves` actions
 
         # Apply the mask to logits to zero out invalid action probabilities
-        temp = 0.5
+        temp = 0.7
         masked_logits = logits + mask
         probs = Categorical(logits=masked_logits / temp)
         action = probs.sample()
@@ -36,11 +36,11 @@ class PPOAgent:
 
     def update(self, memory):
         # Convert memory to tensors and move to GPU
-        states = torch.FloatTensor(np.array(memory.states)).cuda()
-        actions = torch.LongTensor(np.array(memory.actions)).cuda()
-        rewards = torch.FloatTensor(np.array(memory.rewards)).cuda()
-        log_probs_old = torch.FloatTensor(memory.log_probs).cuda()
-        done_flags = torch.tensor(memory.done, dtype=torch.bool).cuda()
+        states = torch.FloatTensor(np.array(memory.states))#.cuda()
+        actions = torch.LongTensor(np.array(memory.actions))#.cuda()
+        rewards = torch.FloatTensor(np.array(memory.rewards))#.cuda()
+        log_probs_old = torch.FloatTensor(memory.log_probs)#.cuda()
+        done_flags = torch.tensor(memory.done, dtype=torch.bool)#.cuda()
 
         # Calculate discounted rewards considering `done` flags
         discounted_rewards = []
@@ -50,7 +50,7 @@ class PPOAgent:
                 G = 0
             G = reward + self.gamma * G
             discounted_rewards.insert(0, G)
-        discounted_rewards = torch.FloatTensor(discounted_rewards).view(-1, 1).cuda()
+        discounted_rewards = torch.FloatTensor(discounted_rewards).view(-1, 1)#.cuda()
 
         # Normalize advantages
         with torch.no_grad():

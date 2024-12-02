@@ -54,7 +54,7 @@ class CheckersEnv(gym.Env):
 
         if len(legal_moves) == 0:  # No legal moves, the game ends
             done = True
-            reward += 200
+            reward += 30 + self.remaining_diff(self.game.board.board)
             info = {
                 "legal_moves": legal_moves,
                 "turn": self.game.turn,
@@ -81,28 +81,28 @@ class CheckersEnv(gym.Env):
 
         # Reward for promoting a king
         if self.king_promoted(old_board):
-            reward += 40
+            reward += 20
 
         # Reward for capturing opponent's pieces
         if "x" in chosen_move:
             num_captures = len(chosen_move.split('x')) - 1
-            reward += 30 * num_captures
+            reward += 10 * num_captures
 
         # Punish leaving pieces undefended
         new_undefended = self.enemy_capture()
-        reward -= new_undefended * 30  # Penalize undefended pieces
+        reward -= new_undefended * 5  # Penalize undefended pieces
 
         # Reward defending pieces
-        reward += max(old_undefended - new_undefended, 0) * 30
+        reward += max(old_undefended - new_undefended, 0) * 5
 
         # End-of-game outcomes
         winner = self.game.check_winner()
         if winner == self.game.turn:  # Current player wins
             done = True
-            reward += 500
+            reward += 100
         elif winner == "Tie":
             done = True
-            reward += 0  # Neutral reward for tie
+            reward += self.remaining_diff(self.game.board.board)  # Small reward for tie
 
         # Update observation and return results
         observation = self.get_board_state()
@@ -136,26 +136,26 @@ class CheckersEnv(gym.Env):
 
                     # Reward for promoting a king
                     if self.king_promoted(opp_old_board):
-                        opp_reward += 40
+                        opp_reward += 10
 
                     # Reward for capturing opponent's pieces
                     if "x" in opp_move[0]:
                         opp_num_captures = len(opp_move[0].split('x')) - 1
-                        opp_reward += 30 * opp_num_captures
+                        opp_reward += 10 * opp_num_captures
 
                     # Punish leaving pieces undefended
                     opp_new_undefended = self.enemy_capture()
-                    opp_reward -= opp_new_undefended * 40  # Penalize undefended pieces
+                    opp_reward -= opp_new_undefended * 5  # Penalize undefended pieces
 
                     # Reward defending pieces
-                    opp_reward += max(opp_old_undefended - opp_new_undefended, 0) * 30
+                    opp_reward += max(opp_old_undefended - opp_new_undefended, 0) * 5
 
                     # End-of-game outcomes
                     winner = self.game.check_winner()
                     if winner == self.game.turn:
-                        opp_reward += 500
+                        opp_reward += 100
                     elif winner == "Tie":
-                        opp_reward += 0  # Neutral reward for tie
+                        opp_reward += self.remaining_diff(self.game.board.board) # Reward for tie
 
                     # Update best reward
                     best_opponent_reward = max(best_opponent_reward, opp_reward)
@@ -163,16 +163,28 @@ class CheckersEnv(gym.Env):
                 # Revert board to original
                 self.game.board = copy.deepcopy(new_board)
             else:
-                best_opponent_reward = 200
+                best_opponent_reward = 30 + self.remaining_diff(self.game.board.board)
 
             # Penalize the current player if it leads to a strong opponent move
-            reward -= 0.7 * best_opponent_reward
+            reward -= 0.5 * best_opponent_reward
 
             # Switch turn back to the current player
             self.game.switch_turn()
 
         return observation, reward, done, info
+    
+    def remaining_diff(self, board):
+        blue_king = sum(1 for row in board for piece in row if piece != 0 and piece.color == BLUE and piece.king)
+        blue_piece = sum(1 for row in board for piece in row if piece != 0 and piece.color == BLUE and not piece.king)
+        red_king = sum(1 for row in board for piece in row if piece != 0 and piece.color == RED and piece.king)
+        red_piece = sum(1 for row in board for piece in row if piece != 0 and piece.color == RED and not piece.king)
 
+        point_diff = (blue_king - red_king) * 5 + (blue_piece - red_piece) * 1
+        if self.game.turn == BLUE:
+            return point_diff
+        else:
+            return -point_diff
+        
     def king_promoted(self, old_board):
         prev_num_king = sum(1 for row in old_board for piece in row if piece != 0 and piece.color == self.game.turn and piece.king)
         new_num_king = sum(1 for row in self.game.board.board for piece in row if piece != 0 and piece.color == self.game.turn and piece.king)

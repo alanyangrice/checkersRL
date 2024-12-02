@@ -1,5 +1,5 @@
 import sys
-sys.path.append(r"C:\Users\Alan Yang\Downloads\checkersRL\Checkers_RL")
+sys.path.append(r"/Users/alanyang/Downloads/checkersRL/Checkers_RL")
 
 from checkers_game.piece import Piece  # Checkers Pieces
 from checkers_game.constants import ROWS, COLS, SQUARE_SIZE, RED, BLUE, WHITE, GREEN, BLACK, font

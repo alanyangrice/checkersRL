@@ -16,7 +16,7 @@ screen = pygame.display.set_mode((WIDTH, HEIGHT))
 pygame.display.set_caption("Checkers Game - Play Against AI")
 
 # Path to the saved model
-model_path = "/Users/alanyang/Downloads/checkersRL/Checkers_RL/RL_models/PPO_Model/PPO_saved_models/agent1_epoch_129.pt"
+model_path = "/Users/alanyang/Downloads/checkersRL/Checkers_RL/RL_models/PPO_Model/PPO_saved_models/agent_epoch_104.pt"
 
 # Load the trained agent
 input_shape = (4, 8, 8)  # 4 channels, 8x8 board
@@ -24,7 +24,7 @@ n_actions = 50
 
 # Create Agents 1 and 2 to play checkers
 agent = PPOAgent(input_shape, n_actions)
-agent.policy.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))  # Load model parameters
+agent.policy.load_state_dict(torch.load(model_path, map_location=torch.device('cpu'))["model_state_dict"])  # Load model parameters
 agent.policy.eval()  # Set model to evaluation mode
 
 def play_agent():
@@ -68,7 +68,7 @@ def play_agent():
             print("legal_moves", legal_moves)
             print("Action:", legal_moves[action][0])
 
-            next_state, reward, done, info = env.step(action)  # Apply AI move
+            next_state, reward, done, info = env.step(action, legal_moves)  # Apply AI move
             env.game.moves.append(legal_moves[action][0])  # Record AI move
             
             env.game.update_board(screen)

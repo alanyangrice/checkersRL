@@ -1,5 +1,5 @@
 import sys
-sys.path.append(r"C:\Users\Alan Yang\Downloads\checkersRL\Checkers_RL")
+sys.path.append(r"/Users/alanyang/Downloads/checkersRL/Checkers_RL")
 
 import pygame
 from checkers_game.constants import WIDTH, HEIGHT
