@@ -1,8 +1,8 @@
 # Ignore folders
 RL_models/PPO_Model/training_progress_detailed/
 RL_models/PPO_Model/PPO_saved_models/
-# Ignore files
-RL_models/PPO_Model/training_progress_detailed.csv
+RL_models/PPO_Model/training_progress_detailed_parallel/
+RL_models/PPO_Model/PPO_saved_models_parallel/
 
 # Ignore Python cache
 __pycache__/

@@ -20,6 +20,13 @@ class Memory:
         self.rewards = []
         self.log_probs = []
         self.done = []
+    
+    def extend(self, other_memory):
+        self.states.extend(other_memory.states)
+        self.actions.extend(other_memory.actions)
+        self.rewards.extend(other_memory.rewards)
+        self.log_probs.extend(other_memory.log_probs)
+        self.done.extend(other_memory.done)
 
     def update_last_done(self):
         self.done[-1] = True

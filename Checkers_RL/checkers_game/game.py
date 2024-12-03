@@ -238,7 +238,7 @@ class Game:
 
     def check_winner(self):
         """Checks for a winner or tie."""
-        # Move countx
+        # Move count
         if len(self.move_chain) > 1:
             self.num_moves += 1
 
@@ -251,15 +251,24 @@ class Game:
         if self.board_states[board_hash] >= 3:  # Tie by repitition
             return "Tie"
 
-        # Count pieces
-        red_pieces = sum([1 for row in self.board.board for piece in row if isinstance(piece, Piece) and piece.color == RED])
-        blue_pieces = sum([1 for row in self.board.board for piece in row if isinstance(piece, Piece) and piece.color == BLUE])
-
-        if red_pieces == 0:
+        # Check for presence of pieces for each color, exit early if one is empty
+        red_pieces_found, blue_pieces_found = False, False
+        for row in self.board.board:
+            for piece in row:
+                if isinstance(piece, Piece):
+                    if piece.color == RED:
+                        red_pieces_found = True
+                    elif piece.color == BLUE:
+                        blue_pieces_found = True
+                # Exit early if both colors are found
+                if red_pieces_found and blue_pieces_found:
+                    return None
+                
+        # Determine the winner
+        if not red_pieces_found:
             return BLUE
-        elif blue_pieces == 0:
+        if not blue_pieces_found:
             return RED
-        return None
     
     def get_all_piece_moves(self, row, col):
         """Returns a list of all possible moves for a specific piece on the board and resulting board states."""

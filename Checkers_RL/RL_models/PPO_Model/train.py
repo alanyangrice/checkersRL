@@ -5,7 +5,6 @@ from RL_models.checkers_env import CheckersEnv
 from RL_models.PPO_Model.Agent import PPOAgent
 from RL_models.PPO_Model.Memory import Memory
 from checkers_game.constants import BLUE, RED
-from util import get_action_index
 
 import torch
 import pandas as pd
@@ -27,7 +26,7 @@ def zip_csv_file(csv_file_path, zip_file_path):
 env = CheckersEnv()
 input_shape = (4, 8, 8)  # 4 channels, 8x8 board
 n_actions = env.action_space.n
-resume_training = False
+resume_training = True
 
 # Create Agent to play checkers
 agent = PPOAgent(input_shape, n_actions)
@@ -52,7 +51,7 @@ if not os.path.exists(detailed_csv_folder_path):
     os.makedirs(detailed_csv_folder_path)
 
 # Define headers for the detailed CSV
-detailed_headers = ["game_number", "epoch", "episode", "blue_win", "red_win", "total_reward", "time", "moves", "log_probs", "reward_list"]
+detailed_headers = ["game_number", "epoch", "episode", "blue_win", "red_win", "total_reward", "blue_reward", "red_reward", "time", "moves", "log_probs", "reward_list"]
 
 # Training parameters
 num_epochs = 1000  # Number of epochs for training
@@ -63,7 +62,7 @@ start_epoch = 0
 
 if resume_training:
     # Path to the checkpoint file
-    checkpoint_path = os.path.join(model_dir, "agent_epoch_63.pt")  # Replace with your desired checkpoint file
+    checkpoint_path = os.path.join(model_dir, "agent_epoch_38.pt")  # Replace with your desired checkpoint file
 
     if os.path.exists(checkpoint_path):
         print(f"Loading checkpoint from {checkpoint_path}...")
@@ -104,13 +103,16 @@ for epoch in range(start_epoch, num_epochs):
         first_move_count = 0
         log_prob_list = []
         reward_list = []
+        blue_reward = []
+        red_reward = []
 
         while not done:
             legal_moves = env.game.get_all_possible_moves()  # Get legal moves for the current player
 
             if len(legal_moves) == 0:
-                action = 0
-                log_prob = 1
+                action = 49
+                log_prob = 0
+                done = True
             else:
                 # Diversify the first move
                 if first_move and epoch < 50:
@@ -135,7 +137,7 @@ for epoch in range(start_epoch, num_epochs):
 
             # Step the environment
             next_state, reward, done, info = env.step(action, legal_moves)
-
+            
             # Track rewards
             episode_reward += reward
             total_rewards += reward
@@ -148,13 +150,14 @@ for epoch in range(start_epoch, num_epochs):
                     max_move_reward = max_episode_move_reward
 
             # Record in memory based on the current side
-            action_index = get_action_index(action)
             if env.game.turn == BLUE:
-                blue_memory.add(state, action_index, reward, log_prob, done)
+                blue_memory.add(state, action, reward, log_prob, done)
+                blue_reward.append(reward)
                 if done:
                     red_memory.update_last_done()
             else:
-                red_memory.add(state, action_index, reward, log_prob, done)
+                red_memory.add(state, action, reward, log_prob, done)
+                red_reward.append(reward)
                 if done:
                     blue_memory.update_last_done()
             log_prob_list.append(log_prob)
@@ -186,6 +189,8 @@ for epoch in range(start_epoch, num_epochs):
                 1 if winner == BLUE else 0,
                 1 if winner == RED else 0,
                 episode_reward,
+                sum(blue_reward),
+                sum(red_reward),
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 ", ".join(env.game.moves),
                 ", ".join([str(prob) for prob in log_prob_list]),
@@ -232,6 +237,6 @@ for epoch in range(start_epoch, num_epochs):
             'win_rate_blue': blue_win_rate,
             'win_rate_red': red_win_rate,
         }, os.path.join(model_dir, f"agent_epoch_{epoch + 1}.pt"))
-
+    
 print("Training complete.")
 env.close()
