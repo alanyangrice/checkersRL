@@ -1,5 +1,5 @@
 import sys
-sys.path.append(r"/Users/alanyang/Downloads/checkersRL/Checkers_RL")
+sys.path.append(r"C:\Users\Alan Yang\Downloads\checkersRL\Checkers_RL")
 
 from RL_models.checkers_env import CheckersEnv
 from RL_models.PPO_Model.Agent import PPOAgent
@@ -27,17 +27,18 @@ def zip_csv_file(csv_file_path, zip_file_path):
 env = CheckersEnv()
 input_shape = (4, 8, 8)  # 4 channels, 8x8 board
 n_actions = env.action_space.n
+resume_training = False
 
-# Create Agents 1 and 2 to play checkers
+# Create Agent to play checkers
 agent = PPOAgent(input_shape, n_actions)
 
 # Directory for saving models
-model_dir = "/Users/alanyang/Downloads/checkersRL/Checkers_RL/RL_models/PPO_Model/PPO_saved_models"
+model_dir = r"C:\Users\Alan Yang\Downloads\checkersRL\Checkers_RL\RL_models\PPO_Model\PPO_saved_models"
 if not os.path.exists(model_dir):
     os.makedirs(model_dir)
 
 # Specify the path for the CSV file
-csv_file_path = "/Users/alanyang/Downloads/checkersRL/Checkers_RL/RL_models/PPO_Model/training_progress.csv"
+csv_file_path = r"C:\Users\Alan Yang\Downloads\checkersRL\Checkers_RL\RL_models\PPO_Model\training_progress.csv"
 
 # Define CSV headers
 headers = [
@@ -45,13 +46,8 @@ headers = [
     "tie_rate", "max_move_reward"
 ]
 
-# Create the CSV file and write headers (only if it doesn't exist already)
-with open(csv_file_path, mode='w', newline='') as file:
-    writer = csv.writer(file)
-    writer.writerow(headers)
-
 # Directory for saving game moves
-detailed_csv_folder_path = "/Users/alanyang/Downloads/checkersRL/Checkers_RL/RL_models/PPO_Model/training_progress_detailed"
+detailed_csv_folder_path = r"C:\Users\Alan Yang\Downloads\checkersRL\Checkers_RL\RL_models\PPO_Model\training_progress_detailed"
 if not os.path.exists(detailed_csv_folder_path):
     os.makedirs(detailed_csv_folder_path)
 
@@ -60,12 +56,32 @@ detailed_headers = ["game_number", "epoch", "episode", "blue_win", "red_win", "t
 
 # Training parameters
 num_epochs = 1000  # Number of epochs for training
-num_episodes = 1000  # Number of episodes per epoch
-batch_size = 50  # Number of episodes per batch
+num_episodes = 2500  # Number of episodes per epoch
+batch_size = 100  # Number of episodes per batch
 save_interval = 1  # Save model every epoch
+start_epoch = 0
+
+if resume_training:
+    # Path to the checkpoint file
+    checkpoint_path = os.path.join(model_dir, "agent_epoch_63.pt")  # Replace with your desired checkpoint file
+
+    if os.path.exists(checkpoint_path):
+        print(f"Loading checkpoint from {checkpoint_path}...")
+        checkpoint = torch.load(checkpoint_path)
+        agent.policy.load_state_dict(checkpoint['model_state_dict'])
+        agent.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_epoch = checkpoint['epoch']  # Start from the saved epoch
+        print(f"Checkpoint loaded. Resuming from epoch {start_epoch}.")
+    else:
+        print("No checkpoint found. Starting from scratch.")
+else:
+    # Create the CSV file and write headers (only if it doesn't exist already)
+    with open(csv_file_path, mode='w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(headers)
 
 # Main training loop
-for epoch in range(num_epochs):
+for epoch in range(start_epoch, num_epochs):
     print(f"Epoch: {epoch + 1}")
     total_rewards, total_steps, blue_wins, red_wins, ties, max_move_reward = 0, 0, 0, 0, 0, 0
     blue_memory, red_memory = Memory(), Memory()  # Memory for the agent playing as BLUE and RED
@@ -184,8 +200,6 @@ for epoch in range(num_epochs):
             print(f"Updating agent with batch of {batch_size} episodes")
             agent.update(blue_memory)
             agent.update(red_memory)
-            print(f"blue memory: {len(blue_memory.states)}")
-            print(f"red memory: {len(red_memory.states)}")
             blue_memory.clear()
             red_memory.clear()
 
