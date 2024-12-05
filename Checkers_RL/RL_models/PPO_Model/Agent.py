@@ -9,7 +9,7 @@ from torch.distributions import Categorical
 from RL_models.PPO_Model.PolicyNetwork import PPOPolicyNetwork
 
 class PPOAgent:
-    def __init__(self, input_shape, n_actions, lr=3e-4, gamma=0.95, eps_clip=0.2, K_epochs=4):
+    def __init__(self, input_shape, n_actions, lr=1e-4, gamma=0.95, eps_clip=0.2, K_epochs=4):
         self.policy = PPOPolicyNetwork(input_shape, n_actions).cuda()
         self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
         self.gamma = gamma
@@ -17,7 +17,7 @@ class PPOAgent:
         self.K_epochs = K_epochs
 
     def select_action(self, state, num_legal_moves):
-        state = torch.FloatTensor(state).unsqueeze(0).cuda()
+        state = torch.FloatTensor(state).unsqueeze(0).cuda()    
 
         # Get logits for all actions from the policy network
         logits, _ = self.policy(state)

@@ -64,14 +64,14 @@ def play_game(n_actions, game_id, epoch, temp_model_path):
             done = True
         else:
             # Diversify the first move
-            if first_move and epoch < 50:
+            if first_move: #and epoch < 100:
                 action = random.choice(range(len(legal_moves)))
                 log_prob = np.log(1 / len(legal_moves)) if len(legal_moves) != 0 else 1
                 first_move_count += 1
-                if first_move_count > 10:
+                if first_move_count > 1:
                     first_move = False
             else:
-                epsilon = max(0.03, 1 - epoch / 50)
+                epsilon = max(0.08, 1 - epoch / 100)  # Increased epsilon from 0.03 -> 0.08 -> 0.15 -> 0.08
                 if random.random() < epsilon:
                     action = random.choice(range(len(legal_moves)))
                     log_prob = np.log(1 / len(legal_moves))
@@ -140,7 +140,7 @@ def play_game(n_actions, game_id, epoch, temp_model_path):
     }
 
 
-def train_parallel(num_epochs=10, num_games=1000, batch_size=5000, n_actions=50):
+def train_parallel(num_epochs=10, num_games=2500, batch_size=250, n_actions=50):
     """Parallelized training loop for the Checkers PPO agent."""
     input_shape = (4, 8, 8)
     agent = PPOAgent(input_shape, n_actions)
@@ -148,7 +148,7 @@ def train_parallel(num_epochs=10, num_games=1000, batch_size=5000, n_actions=50)
     # Checkpoint directory
     model_dir = r"C:\Users\Alan Yang\Downloads\checkersRL\Checkers_RL\RL_models\PPO_Model\PPO_saved_models_parallel"
     os.makedirs(model_dir, exist_ok=True)
-    checkpoint_path = ""  # os.path.join(model_dir, "agent_epoch_latest.pt")
+    checkpoint_path =  os.path.join(model_dir, "agent_epoch_210.pt")
     start_epoch = 0
 
     if os.path.exists(checkpoint_path):
@@ -156,6 +156,7 @@ def train_parallel(num_epochs=10, num_games=1000, batch_size=5000, n_actions=50)
         agent.policy.load_state_dict(checkpoint['model_state_dict'])
         agent.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_epoch = checkpoint['epoch']
+        print(f"Resuming training from epoch: {start_epoch}")
 
     # CSV directories
     detailed_csv_folder_path = r"C:\Users\Alan Yang\Downloads\checkersRL\Checkers_RL\RL_models\PPO_Model\training_progress_detailed_parallel"
@@ -267,4 +268,4 @@ def train_parallel(num_epochs=10, num_games=1000, batch_size=5000, n_actions=50)
 
 
 if __name__ == "__main__":
-    train_parallel(num_epochs=1000, num_games=100)
+    train_parallel(num_epochs=1000, num_games=5000)

@@ -60,7 +60,7 @@ class CheckersEnv(gym.Env):
     def step(self, action, legal_moves):
         if len(legal_moves) == 0:  # No legal moves, the game ends
             done = True
-            reward = 30 + self.remaining_diff(self.game.board.board)
+            reward = 20 + self.remaining_diff(self.game.board.board)
             info = {
                 "legal_moves": legal_moves,
                 "turn": self.game.turn,
@@ -169,7 +169,7 @@ class CheckersEnv(gym.Env):
 
         back_row_blue = 0
         back_row_red = 7
-        central_positions = {(3, 2), (3, 4), (4, 3), (4, 5)}
+        central_positions = {(3, 4), (4, 3)}
 
         for row in range(ROWS):
             for col in range(COLS):
@@ -253,7 +253,7 @@ class CheckersEnv(gym.Env):
         if winner == self.game.turn:  # Current player wins
             return 100, True, copy.deepcopy(self.game.turn)
         elif winner == "Tie":
-            return -10 - self.remaining_diff(self.game.board.board), True, "Tie"
+            return -20 - self.remaining_diff(self.game.board.board), True, "Tie"
         else:
             return -np.sqrt(len(self.game.moves)) / 10, False, None  # Punishment for longer games
 
@@ -314,7 +314,7 @@ class CheckersEnv(gym.Env):
 
             self.game.board = new_board  # Revert to original board state
         else:
-            best_opponent_reward = 30 + self.remaining_diff(self.game.board.board)
+            best_opponent_reward = 20 + self.remaining_diff(self.game.board.board)
 
         self.game.switch_turn()  # Switch back to the current turn
         return -0.5 * best_opponent_reward

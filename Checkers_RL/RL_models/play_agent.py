@@ -16,7 +16,7 @@ screen = pygame.display.set_mode((WIDTH, HEIGHT))
 pygame.display.set_caption("Checkers Game - Play Against AI")
 
 # Path to the saved model
-model_path = r"C:\Users\Alan Yang\Downloads\checkersRL\Checkers_RL\RL_models\PPO_Model\PPO_saved_models\agent_epoch_63.pt"
+model_path = r"C:\Users\Alan Yang\Downloads\checkersRL\Checkers_RL\RL_models\PPO_Model\PPO_saved_models_parallel\agent_epoch_210.pt"
 
 # Load the trained agent
 input_shape = (4, 8, 8)  # 4 channels, 8x8 board
