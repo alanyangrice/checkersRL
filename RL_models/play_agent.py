@@ -3,9 +3,10 @@ import sys
 import random
 
 import torch
+import numpy as np
 import pygame
 
-from checkers_game.constants import WIDTH, HEIGHT, BLUE, RED
+from checkers_game.constants import WIDTH, HEIGHT, BLUE, RED, NUM_ACTIONS
 from RL_models.PPO_Model.Agent import PPOAgent
 from RL_models.checkers_env import CheckersEnv
 
@@ -17,7 +18,7 @@ def play_agent():
 
     # Load the trained agent
     input_shape = (4, 8, 8)
-    n_actions = 50
+    n_actions = NUM_ACTIONS
     agent = PPOAgent(input_shape, n_actions)
 
     # Look for the latest saved model
@@ -25,7 +26,6 @@ def play_agent():
     model_dir = os.path.join(base_dir, "PPO_Model", "PPO_saved_models_parallel")
 
     if not os.path.exists(model_dir):
-        # Fall back to sequential training models
         model_dir = os.path.join(base_dir, "PPO_Model", "PPO_saved_models")
 
     if os.path.exists(model_dir):
@@ -58,6 +58,7 @@ def play_agent():
 
     while not done:
         if env.game.turn == player_color:
+            # Human player's turn -- handled by the interactive GUI
             turn_complete = env.game.player_action(screen)
 
             if turn_complete:
@@ -69,34 +70,40 @@ def play_agent():
                     display_winner(winner, player_color, ai_color)
                     break
 
+                # Sync env state after human move
                 state = env.get_board_state()
                 env.game.switch_turn()
-                env._legal_moves = env.game.get_all_possible_moves()
-        else:
-            # AI's turn
-            legal_moves = env.legal_moves
+                env._update_action_mask()
 
-            if len(legal_moves) == 0:
+        else:
+            # AI's turn -- use semantic action mask
+            action_mask = env.get_action_mask()
+
+            if action_mask.sum() == 0:
+                # AI has no legal moves -- player wins
                 done = True
                 display_winner(player_color, player_color, ai_color)
                 break
 
-            action, _, _ = agent.select_action(state, len(legal_moves))
-
-            if action >= len(legal_moves):
-                action = random.choice(range(len(legal_moves)))
+            action, _, _ = agent.select_action(state, action_mask)
 
             next_state, reward, done, _, info = env.step(action)
             env.game.update_board(screen)
+
+            turn_complete = info.get("turn_complete", True)
 
             if done:
                 winner = info.get("winner", "Tie")
                 display_winner(winner, player_color, ai_color)
                 break
 
+            if not turn_complete:
+                # AI is mid-capture chain -- keep acting on same turn
+                state = next_state
+                continue
+
+            # Turn complete -- state is now from the next player's perspective
             state = next_state
-            env.game.switch_turn()
-            env._legal_moves = env.game.get_all_possible_moves()
 
     print(f"Game moves: {env.game.moves}")
 
