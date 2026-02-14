@@ -21,6 +21,21 @@ def zip_csv_file(csv_file_path, zip_file_path):
     os.remove(csv_file_path)
 
 
+def get_curriculum_options(epoch):
+    """Return env.reset() options for the current curriculum phase.
+
+    Phase 1 (epochs 0-49):   Endgame practice, 2-5 pieces per side.
+    Phase 2 (epochs 50-149): Mid-game, 4-9 pieces per side.
+    Phase 3 (epochs 150+):   Full game, 12 pieces per side (standard).
+    """
+    if epoch < 50:
+        return {"num_pieces": random.randint(2, 5)}
+    elif epoch < 150:
+        return {"num_pieces": random.randint(4, 9)}
+    else:
+        return None  # standard 12v12
+
+
 def random_action_from_mask(mask):
     """Sample a random valid action from the action mask."""
     valid = np.where(mask > 0)[0]
@@ -143,7 +158,8 @@ def main():
             writer.writerow(detailed_headers)
 
         for episode in range(num_episodes):
-            state, _ = env.reset()
+            curriculum_opts = get_curriculum_options(epoch)
+            state, _ = env.reset(options=curriculum_opts)
             done = False
 
             # Decide whether to use an opponent from the pool for this episode

@@ -1,3 +1,5 @@
+import random as _random
+
 from checkers_game.piece import Piece
 from checkers_game.constants import ROWS, COLS, SQUARE_SIZE, RED, BLUE, WHITE, GREEN, BLACK, font
 import pygame
@@ -137,6 +139,56 @@ class Board:
                         if target_piece != 0 and target_piece.color != piece.color and landing_spot == 0:
                             moves[(r + d, c + dc)] = (r, c)  # Capture move
         return moves
+
+    def create_random_board(self, num_pieces_per_side, king_prob=0.15):
+        """Create a board with random piece placement for curriculum learning.
+
+        Args:
+            num_pieces_per_side: Number of pieces each side gets (1-12).
+            king_prob: Probability that a piece placed outside its home rows is a king.
+
+        Blue pieces are placed on rows 0-4 (top half + middle).
+        Red pieces are placed on rows 3-7 (bottom half + middle).
+        Overlap zone (rows 3-4) can contain either color.
+        """
+        num_pieces_per_side = max(1, min(12, num_pieces_per_side))
+
+        # Clear the board
+        self.board = []
+        for row in range(ROWS):
+            self.board.append([0] * COLS)
+
+        # Collect all dark squares
+        all_dark = [(r, c) for r in range(ROWS) for c in range(COLS) if (r + c) % 2 == 1]
+
+        # Blue placement candidates: rows 0-4
+        blue_candidates = [(r, c) for r, c in all_dark if r <= 4]
+        # Red placement candidates: rows 3-7
+        red_candidates = [(r, c) for r, c in all_dark if r >= 3]
+
+        # Place Blue pieces
+        _random.shuffle(blue_candidates)
+        blue_positions = blue_candidates[:num_pieces_per_side]
+
+        # Place Red pieces (avoid squares already taken by Blue)
+        blue_set = set(blue_positions)
+        red_available = [pos for pos in red_candidates if pos not in blue_set]
+        _random.shuffle(red_available)
+        red_positions = red_available[:num_pieces_per_side]
+
+        for row, col in blue_positions:
+            piece = Piece(row, col, BLUE)
+            # Promote to king if in opponent's territory or middle with some probability
+            if row >= 3 and _random.random() < king_prob:
+                piece.make_king()
+            self.board[row][col] = piece
+
+        for row, col in red_positions:
+            piece = Piece(row, col, RED)
+            # Promote to king if in opponent's territory or middle with some probability
+            if row <= 4 and _random.random() < king_prob:
+                piece.make_king()
+            self.board[row][col] = piece
 
     def has_legal_moves(self, turn):
         """Returns True if the given player has any legal moves available."""

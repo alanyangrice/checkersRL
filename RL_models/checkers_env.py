@@ -51,9 +51,25 @@ class CheckersEnv(gym.Env):
     # ------------------------------------------------------------------
 
     def reset(self, seed=None, options=None):
-        """Reset the game to initial state."""
+        """Reset the game to initial state.
+
+        Options (via the `options` dict):
+            num_pieces (int): Number of pieces per side for curriculum learning.
+                              If omitted or 12, uses the standard starting position.
+                              Values 1-11 create a random board with that many pieces per side.
+            king_prob (float): Probability of promoting pieces placed in mid-board (default 0.15).
+        """
         super().reset(seed=seed)
         self.game = Game()
+
+        # Curriculum: optionally use a random board with fewer pieces
+        if options and options.get("num_pieces") is not None:
+            num_pieces = options["num_pieces"]
+            if 1 <= num_pieces < 12:
+                king_prob = options.get("king_prob", 0.15)
+                from checkers_game.board import Board
+                self.game.board = Board()
+                self.game.board.create_random_board(num_pieces, king_prob=king_prob)
 
         self._capture_in_progress = False
         self._capturing_piece_sq = None

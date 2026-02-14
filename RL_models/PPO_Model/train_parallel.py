@@ -55,6 +55,21 @@ def uniform_log_prob(mask):
     return float(np.log(1.0 / n))
 
 
+def get_curriculum_options(epoch):
+    """Return env.reset() options for the current curriculum phase.
+
+    Phase 1 (epochs 0-49):   Endgame practice, 2-5 pieces per side.
+    Phase 2 (epochs 50-149): Mid-game, 4-9 pieces per side.
+    Phase 3 (epochs 150+):   Full game, 12 pieces per side (standard).
+    """
+    if epoch < 50:
+        return {"num_pieces": random.randint(2, 5)}
+    elif epoch < 150:
+        return {"num_pieces": random.randint(4, 9)}
+    else:
+        return None
+
+
 def play_game(n_actions, game_id, epoch, temp_model_path, opponent_model_path=None):
     """Simulate a single game of Checkers with training logic.
 
@@ -76,7 +91,8 @@ def play_game(n_actions, game_id, epoch, temp_model_path, opponent_model_path=No
         opponent_color = BLUE if random.random() < 0.5 else RED
 
     blue_memory, red_memory = Memory(), Memory()
-    state, _ = env.reset()
+    curriculum_opts = get_curriculum_options(epoch)
+    state, _ = env.reset(options=curriculum_opts)
     done = False
 
     episode_reward, episode_steps, max_episode_move_reward = 0, 0, 0
