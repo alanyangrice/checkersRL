@@ -17,29 +17,30 @@ A fully playable checkers game with a reinforcement learning agent trained via *
 | **Pygame** | Game rendering & user input |
 | **PyTorch** | Neural network (CNN) for the PPO agent |
 | **NumPy** | Board state encoding & array operations |
-| **OpenAI Gym** | RL environment interface |
+| **Gymnasium** | RL environment interface |
 
 ## Project Structure
 
 ```
 checkersRL/
-├── checkers_game/              # Core game implementation
-│   ├── main.py                 # Entry point for human vs human play
-│   ├── game.py                 # Game logic, turn management, win/tie detection
-│   ├── board.py                # Board state, move validation, captures
-│   ├── piece.py                # Piece class (regular & king)
-│   ├── constants.py            # Colors, dimensions, board position mapping
-│   └── MoveNode.py             # Tree structure for multi-capture sequences
+├── requirements.txt                # Python dependencies
+├── checkers_game/                  # Core game implementation
+│   ├── main.py                     # Entry point for human vs human play
+│   ├── game.py                     # Game logic, turn management, win/tie detection
+│   ├── board.py                    # Board state, move validation, captures
+│   ├── piece.py                    # Piece class (regular & king)
+│   ├── constants.py                # Colors, dimensions, board position mapping
+│   └── MoveNode.py                 # Tree structure for multi-capture sequences
 │
-├── RL_models/                  # Reinforcement learning components
-│   ├── checkers_env.py         # Gym environment wrapper for checkers
-│   ├── play_agent.py           # Play against a trained agent
-│   └── PPO_Model/              # PPO implementation
-│       ├── Agent.py            # PPO agent with action masking
-│       ├── PolicyNetwork.py    # CNN policy/value network
-│       ├── Memory.py           # Experience replay buffer
-│       ├── train.py            # Sequential self-play training
-│       └── train_parallel.py   # Parallel self-play training
+├── RL_models/                      # Reinforcement learning components
+│   ├── checkers_env.py             # Gymnasium environment wrapper for checkers
+│   ├── play_agent.py               # Play against a trained agent
+│   └── PPO_Model/                  # PPO implementation
+│       ├── Agent.py                # PPO agent with GAE and action masking
+│       ├── PolicyNetwork.py        # CNN policy/value network with batch norm
+│       ├── Memory.py               # Experience replay buffer
+│       ├── train.py                # Sequential self-play training
+│       └── train_parallel.py       # Parallel self-play training
 ```
 
 ## Game Rules
@@ -50,41 +51,44 @@ Standard American checkers:
 - Pieces move diagonally forward; kings move diagonally in any direction
 - Captures are mandatory when available, including multi-jump chains
 - Pieces promote to kings upon reaching the opposite end of the board
-- Win by capturing all opponent pieces; ties after 250+ moves or 3 repeated board states
+- Win by capturing all opponent pieces or leaving them with no legal moves
+- Ties after 250+ moves or 3 repeated board states
 
 ## How It Works
 
 ### Neural Network Architecture
 
 The agent uses a **convolutional neural network** with:
-- **Input**: 4-channel 8x8 board (red regular, red king, blue regular, blue king)
-- **Backbone**: 4 convolutional layers (32 → 64 → 128 → 256 filters)
-- **Heads**: Fully connected layers for policy (action probabilities) and value estimation
+- **Input**: 4-channel 8x8 board (current player regular, current player king, opponent regular, opponent king)
+- **Backbone**: 4 convolutional layers (32 → 64 → 128 → 256 filters) with batch normalization
+- **Policy Head**: 4 fully connected layers with dropout for action probabilities
+- **Value Head**: 3 fully connected layers for state value estimation
 - **Action masking**: Invalid moves are masked out before sampling
 
-### Reward Shaping
+### Observation Normalization
 
-The agent receives shaped rewards to guide learning:
+The board state is always presented from the **current player's perspective** — channels represent "my pieces" and "opponent pieces" rather than fixed colors. When playing as Red, the board is flipped vertically so the agent always sees pieces moving in the same direction.
+
+### Training Algorithm
+
+**PPO with Generalized Advantage Estimation (GAE):**
+- GAE (lambda=0.95) for lower-variance advantage estimates
+- Cosine annealing learning rate scheduler
+- Gradient clipping (max norm 0.5) for stability
+- Epsilon-greedy exploration with decay
+
+### Reward Shaping
 
 | Signal | Reward |
 |---|---|
 | Win | +100 |
+| Loss | -100 |
 | King promotion | +15 |
 | Capture | +10 per piece |
 | Center control | +0.5 |
 | Back row defense | +0.5 |
 | Tie | -20 |
 | Undefended pieces | -5 |
-
-### Training
-
-Training is done via **self-play** — the agent plays as both Blue and Red, learning from both perspectives. Key hyperparameters:
-
-- Learning rate: 1e-4
-- Discount factor (γ): 0.95
-- PPO clip: 0.2
-- K epochs: 4
-- Epsilon-greedy exploration with decay
 
 ## Getting Started
 
@@ -98,32 +102,30 @@ Training is done via **self-play** — the agent plays as both Blue and Red, lea
 ```bash
 git clone https://github.com/your-username/checkersRL.git
 cd checkersRL
-pip install pygame torch numpy gym
+pip install -r requirements.txt
 ```
 
 ### Play Human vs Human
 
 ```bash
-python checkers_game/main.py
+python -m checkers_game.main
 ```
 
 ### Train the Agent
 
 ```bash
 # Sequential training
-python RL_models/PPO_Model/train.py
+python -m RL_models.PPO_Model.train
 
 # Parallel training (faster)
-python RL_models/PPO_Model/train_parallel.py
+python -m RL_models.PPO_Model.train_parallel
 ```
 
 ### Play Against the Agent
 
 ```bash
-python RL_models/play_agent.py
+python -m RL_models.play_agent
 ```
-
-> **Note:** You may need to update the model checkpoint path in `play_agent.py` to point to your saved model file.
 
 ## License
 

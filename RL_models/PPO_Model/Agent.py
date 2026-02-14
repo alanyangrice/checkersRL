@@ -1,6 +1,3 @@
-import sys
-sys.path.append(r"C:\Users\Alan Yang\Downloads\checkersRL\Checkers_RL")
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -8,25 +5,38 @@ import numpy as np
 from torch.distributions import Categorical
 from RL_models.PPO_Model.PolicyNetwork import PPOPolicyNetwork
 
+
+def get_device():
+    """Returns the best available device (CUDA, MPS, or CPU)."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
 class PPOAgent:
-    def __init__(self, input_shape, n_actions, lr=1e-4, gamma=0.95, eps_clip=0.2, K_epochs=4):
-        self.policy = PPOPolicyNetwork(input_shape, n_actions).cuda()
+    def __init__(self, input_shape, n_actions, lr=1e-4, gamma=0.95, eps_clip=0.2,
+                 K_epochs=4, gae_lambda=0.95, device=None):
+        self.device = device or get_device()
+        self.policy = PPOPolicyNetwork(input_shape, n_actions).to(self.device)
         self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
+        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=500, eta_min=1e-6)
         self.gamma = gamma
         self.eps_clip = eps_clip
         self.K_epochs = K_epochs
+        self.gae_lambda = gae_lambda
 
     def select_action(self, state, num_legal_moves):
-        state = torch.FloatTensor(state).unsqueeze(0).cuda()    
+        state = torch.FloatTensor(state).unsqueeze(0).to(self.device)
 
-        # Get logits for all actions from the policy network
-        logits, _ = self.policy(state)
+        with torch.no_grad():
+            logits, _ = self.policy(state)
 
-        # Create a mask to set all invalid actions to a large negative value
-        mask = torch.full(logits.size(), -1e10).cuda()
-        mask[0, :num_legal_moves] = 0  # Allow only the first `num_legal_moves` actions
+        # Mask invalid actions
+        mask = torch.full(logits.size(), -1e10, device=self.device)
+        mask[0, :num_legal_moves] = 0
 
-        # Apply the mask to logits to zero out invalid action probabilities
         temp = 0.7
         masked_logits = logits + mask
         probs = Categorical(logits=masked_logits / temp)
@@ -35,32 +45,42 @@ class PPOAgent:
         return action.item(), probs.log_prob(action), probs.entropy()
 
     def update(self, memory):
-        # Convert memory to tensors and move to GPU
-        states = torch.FloatTensor(np.array(memory.states)).cuda()
-        actions = torch.LongTensor(np.array(memory.actions)).cuda()
-        rewards = torch.FloatTensor(np.array(memory.rewards)).cuda()
-        log_probs_old = torch.FloatTensor(memory.log_probs).cuda()
-        done_flags = torch.tensor(memory.done, dtype=torch.bool).cuda()
+        """PPO update with Generalized Advantage Estimation (GAE)."""
+        states = torch.FloatTensor(np.array(memory.states)).to(self.device)
+        actions = torch.LongTensor(np.array(memory.actions)).to(self.device)
+        rewards = torch.FloatTensor(np.array(memory.rewards)).to(self.device)
+        log_probs_old = torch.FloatTensor(np.array(memory.log_probs)).to(self.device)
+        done_flags = torch.tensor(memory.done, dtype=torch.bool).to(self.device)
 
-        # Calculate discounted rewards considering `done` flags
-        discounted_rewards = []
-        G = 0
-        for reward, done in zip(reversed(rewards), reversed(done_flags)):
-            if done:  # Reset G if the episode has ended
-                G = 0
-            G = reward + self.gamma * G
-            discounted_rewards.insert(0, G)
-        discounted_rewards = torch.FloatTensor(discounted_rewards).view(-1, 1).cuda()
+        # Compute state values for GAE
+        with torch.no_grad():
+            _, state_values = self.policy(states)
+            state_values = state_values.squeeze(-1)
+
+        # GAE computation
+        advantages = torch.zeros_like(rewards)
+        returns = torch.zeros_like(rewards)
+        gae = 0
+        n = len(rewards)
+
+        for t in reversed(range(n)):
+            if done_flags[t] or t == n - 1:
+                next_value = 0.0
+            else:
+                next_value = state_values[t + 1]
+
+            delta = rewards[t] + self.gamma * next_value - state_values[t]
+            gae = delta + self.gamma * self.gae_lambda * (0 if done_flags[t] else 1) * gae
+            advantages[t] = gae
+            returns[t] = gae + state_values[t]
 
         # Normalize advantages
-        with torch.no_grad():
-            state_values = self.policy(states)[1]  # Assumes policy returns (logits, state_values)
-            advantages = discounted_rewards - state_values
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        returns = returns.unsqueeze(-1)
 
         # PPO update for K epochs
         for _ in range(self.K_epochs):
-            logits, state_values = self.policy(states)
+            logits, current_values = self.policy(states)
             probs = Categorical(logits=logits)
             log_probs = probs.log_prob(actions)
             entropy = probs.entropy()
@@ -69,9 +89,18 @@ class PPOAgent:
             # Clipped Surrogate Loss
             surr1 = ratios * advantages
             surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * advantages
-            loss = -torch.min(surr1, surr2) + 0.5 * nn.MSELoss()(state_values, discounted_rewards) - 0.05 * entropy
+            policy_loss = -torch.min(surr1, surr2).mean()
+            value_loss = 0.5 * nn.MSELoss()(current_values, returns)
+            entropy_bonus = -0.05 * entropy.mean()
 
-            # Perform optimization step
+            loss = policy_loss + value_loss + entropy_bonus
+
             self.optimizer.zero_grad()
-            loss.mean().backward()
+            loss.backward()
+            # Gradient clipping for stability
+            nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5)
             self.optimizer.step()
+
+    def step_scheduler(self):
+        """Step the learning rate scheduler. Call once per epoch."""
+        self.scheduler.step()

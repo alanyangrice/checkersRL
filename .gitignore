@@ -8,3 +8,10 @@ RL_models/PPO_Model/PPO_saved_models_parallel/
 __pycache__/
 *.pyc
 *.pyo
+
+# Environment / IDE
+.env
+.venv/
+*.egg-info/
+dist/
+build/
