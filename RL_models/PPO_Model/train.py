@@ -10,7 +10,7 @@ import numpy as np
 from RL_models.checkers_env import CheckersEnv
 from RL_models.PPO_Model.Agent import PPOAgent
 from RL_models.PPO_Model.Memory import Memory
-from checkers_game.constants import BLUE, RED
+from checkers_game.constants import BLUE, RED, NUM_ACTIONS
 
 
 def zip_csv_file(csv_file_path, zip_file_path):
@@ -20,16 +20,33 @@ def zip_csv_file(csv_file_path, zip_file_path):
     os.remove(csv_file_path)
 
 
+def random_action_from_mask(mask):
+    """Sample a random valid action from the action mask."""
+    valid = np.where(mask > 0)[0]
+    if len(valid) == 0:
+        return 0  # fallback; step() will handle no-legal-moves
+    choice = np.random.choice(valid)
+    return int(choice)
+
+
+def uniform_log_prob(mask):
+    """Log probability for a uniform random choice over valid actions."""
+    n = int(mask.sum())
+    if n <= 0:
+        return 0.0
+    return float(np.log(1.0 / n))
+
+
 def main():
     # Initialize environment and agent
     env = CheckersEnv()
     input_shape = (4, 8, 8)
-    n_actions = env.action_space.n
+    n_actions = NUM_ACTIONS
     resume_training = True
 
     agent = PPOAgent(input_shape, n_actions)
 
-    # Directories (relative to project root)
+    # Directories (relative to script location)
     base_dir = os.path.dirname(os.path.abspath(__file__))
     model_dir = os.path.join(base_dir, "PPO_saved_models")
     os.makedirs(model_dir, exist_ok=True)
@@ -57,7 +74,6 @@ def main():
     start_epoch = 0
 
     if resume_training:
-        # Find the latest checkpoint
         checkpoints = [f for f in os.listdir(model_dir) if f.startswith("agent_epoch_") and f.endswith(".pt")]
         if checkpoints:
             latest = max(checkpoints, key=lambda f: int(f.split("_")[-1].split(".")[0]))
@@ -100,39 +116,51 @@ def main():
             reward_list = []
             blue_reward = []
             red_reward = []
+            winner = "None"
 
             while not done:
-                legal_moves = env.legal_moves
+                action_mask = env.get_action_mask()
 
-                if len(legal_moves) == 0:
-                    action = 49
-                    log_prob = 0
-                    done = True
-                else:
-                    # Diversify the first move
-                    if first_move and epoch < 50:
-                        action = random.choice(range(len(legal_moves)))
-                        log_prob = np.log(1 / len(legal_moves)) if len(legal_moves) != 0 else 1
-                        first_move_count += 1
-                        if first_move_count > 10:
-                            first_move = False
-                    else:
-                        epsilon = max(0.03, 1 - epoch / 50)
-                        if random.random() < epsilon:
-                            action = random.choice(range(len(legal_moves)))
-                            log_prob = np.log(1 / len(legal_moves))
+                # No legal actions -- step will handle game-over
+                if action_mask.sum() == 0:
+                    next_state, reward, done, _, info = env.step(0)
+                    episode_reward += reward
+                    total_rewards += reward
+                    episode_steps += 1
+                    reward_list.append(reward)
+                    log_prob_list.append(0.0)
+
+                    if done:
+                        winner = info["winner"]
+                        if winner == BLUE:
+                            blue_wins += 1
+                        elif winner == RED:
+                            red_wins += 1
                         else:
-                            action, log_prob, _ = agent.select_action(state, len(legal_moves))
+                            ties += 1
 
-                # Make sure action is in range
-                if action >= len(legal_moves) and len(legal_moves) != 0:
-                    action = random.choice(range(len(legal_moves)))
-                    log_prob = np.log(1 / len(legal_moves))
+                    state = next_state
+                    continue
+
+                # Select action: exploration vs exploitation
+                if first_move and epoch < 50:
+                    action = random_action_from_mask(action_mask)
+                    log_prob = uniform_log_prob(action_mask)
+                    first_move_count += 1
+                    if first_move_count > 10:
+                        first_move = False
+                else:
+                    epsilon = max(0.03, 1 - epoch / 50)
+                    if random.random() < epsilon:
+                        action = random_action_from_mask(action_mask)
+                        log_prob = uniform_log_prob(action_mask)
+                    else:
+                        action, log_prob, _ = agent.select_action(state, action_mask)
 
                 if isinstance(log_prob, torch.Tensor):
                     log_prob = log_prob.item()
 
-                # Step the environment
+                # Step the environment (env handles turn switching internally)
                 next_state, reward, done, _, info = env.step(action)
 
                 episode_reward += reward
@@ -144,8 +172,19 @@ def main():
                     if max_episode_move_reward > max_move_reward:
                         max_move_reward = max_episode_move_reward
 
-                # Record in memory based on current side
-                if env.game.turn == BLUE:
+                # Record in memory based on whose turn it was BEFORE env switched
+                # During capture chains (turn_complete=False), turn hasn't switched
+                # At turn completion, env already switched, so we check the PREVIOUS turn
+                turn_complete = info.get("turn_complete", True)
+
+                if turn_complete:
+                    # Turn switched inside env.step(); the PREVIOUS player was the opposite
+                    acting_color = RED if env.game.turn == BLUE else BLUE
+                else:
+                    # Mid-capture chain; turn hasn't switched yet
+                    acting_color = env.game.turn
+
+                if acting_color == BLUE:
                     blue_memory.add(state, action, reward, log_prob, done)
                     blue_reward.append(reward)
                     if done:
@@ -169,11 +208,6 @@ def main():
                         ties += 1
 
                 state = next_state
-                env.game.switch_turn()
-
-                # Refresh legal moves after switching turns
-                if not done:
-                    env._legal_moves = env.game.get_all_possible_moves()
 
             # Write detailed data
             with open(detailed_csv_file_path, mode='a', newline='') as file:
@@ -189,8 +223,8 @@ def main():
                     sum(red_reward),
                     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     ", ".join(env.game.moves),
-                    ", ".join([str(prob) for prob in log_prob_list]),
-                    ", ".join([str(rew) for rew in reward_list])
+                    ", ".join([str(p) for p in log_prob_list]),
+                    ", ".join([str(r) for r in reward_list])
                 ])
 
             total_steps += episode_steps
