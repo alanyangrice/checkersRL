@@ -11,7 +11,7 @@ import numpy as np
 from RL_models.checkers_env import CheckersEnv
 from RL_models.PPO_Model.Agent import PPOAgent
 from RL_models.PPO_Model.Memory import Memory
-from checkers_game.constants import BLUE, RED
+from checkers_game.constants import BLUE, RED, NUM_ACTIONS
 
 
 def zip_csv_file(csv_file_path, zip_file_path):
@@ -40,6 +40,22 @@ def write_detailed_csv(file_path, results, batch_start, epoch, num_games):
             ])
 
 
+def random_action_from_mask(mask):
+    """Sample a random valid action from the action mask."""
+    valid = np.where(mask > 0)[0]
+    if len(valid) == 0:
+        return 0
+    return int(np.random.choice(valid))
+
+
+def uniform_log_prob(mask):
+    """Log probability for a uniform random choice over valid actions."""
+    n = int(mask.sum())
+    if n <= 0:
+        return 0.0
+    return float(np.log(1.0 / n))
+
+
 def play_game(n_actions, game_id, epoch, temp_model_path):
     """Simulate a single game of Checkers with training logic."""
     env = CheckersEnv()
@@ -57,34 +73,45 @@ def play_game(n_actions, game_id, epoch, temp_model_path):
     blue_win, red_win = 0, 0
 
     while not done:
-        legal_moves = env.legal_moves
+        action_mask = env.get_action_mask()
 
-        if len(legal_moves) == 0:
-            action = 49
-            log_prob = 0
-            done = True
+        # No legal actions -- step will handle game-over
+        if action_mask.sum() == 0:
+            next_state, reward, done, _, info = env.step(0)
+            episode_reward += reward
+            episode_steps += 1
+            reward_list.append(reward)
+            log_prob_list.append(0.0)
+
+            if done:
+                winner = info["winner"]
+                if winner == BLUE:
+                    blue_win = 1
+                elif winner == RED:
+                    red_win = 1
+
+            state = next_state
+            continue
+
+        # Select action: exploration vs exploitation
+        if first_move:
+            action = random_action_from_mask(action_mask)
+            log_prob = uniform_log_prob(action_mask)
+            first_move_count += 1
+            if first_move_count > 1:
+                first_move = False
         else:
-            if first_move:
-                action = random.choice(range(len(legal_moves)))
-                log_prob = np.log(1 / len(legal_moves)) if len(legal_moves) != 0 else 1
-                first_move_count += 1
-                if first_move_count > 1:
-                    first_move = False
+            epsilon = max(0.08, 1 - epoch / 100)
+            if random.random() < epsilon:
+                action = random_action_from_mask(action_mask)
+                log_prob = uniform_log_prob(action_mask)
             else:
-                epsilon = max(0.08, 1 - epoch / 100)
-                if random.random() < epsilon:
-                    action = random.choice(range(len(legal_moves)))
-                    log_prob = np.log(1 / len(legal_moves))
-                else:
-                    action, log_prob, _ = agent.select_action(state, len(legal_moves))
-
-        if action >= len(legal_moves) and len(legal_moves) != 0:
-            action = random.choice(range(len(legal_moves)))
-            log_prob = np.log(1 / len(legal_moves))
+                action, log_prob, _ = agent.select_action(state, action_mask)
 
         if isinstance(log_prob, torch.Tensor):
             log_prob = log_prob.item()
 
+        # Step the environment (env handles turn switching internally)
         next_state, reward, done, _, info = env.step(action)
 
         episode_reward += reward
@@ -93,7 +120,14 @@ def play_game(n_actions, game_id, epoch, temp_model_path):
         if reward > max_episode_move_reward and not done:
             max_episode_move_reward = reward
 
-        if env.game.turn == BLUE:
+        # Route to correct memory based on who acted
+        turn_complete = info.get("turn_complete", True)
+        if turn_complete:
+            acting_color = RED if env.game.turn == BLUE else BLUE
+        else:
+            acting_color = env.game.turn
+
+        if acting_color == BLUE:
             blue_memory.add(state, action, reward, log_prob, done)
             blue_reward.append(reward)
             if done:
@@ -115,10 +149,6 @@ def play_game(n_actions, game_id, epoch, temp_model_path):
                 red_win = 1
 
         state = next_state
-        env.game.switch_turn()
-
-        if not done:
-            env._legal_moves = env.game.get_all_possible_moves()
 
     return {
         "blue_memory": blue_memory,
@@ -135,7 +165,7 @@ def play_game(n_actions, game_id, epoch, temp_model_path):
     }
 
 
-def train_parallel(num_epochs=1000, num_games=2500, batch_size=250, n_actions=50):
+def train_parallel(num_epochs=1000, num_games=2500, batch_size=250, n_actions=NUM_ACTIONS):
     """Parallelized training loop for the Checkers PPO agent."""
     input_shape = (4, 8, 8)
     agent = PPOAgent(input_shape, n_actions)
@@ -207,7 +237,7 @@ def train_parallel(num_epochs=1000, num_games=2500, batch_size=250, n_actions=50
             for result in results:
                 total_rewards["blue"] += result["rewards"]["blue"]
                 total_rewards["red"] += result["rewards"]["red"]
-                total_steps += len(result["moves"])
+                total_steps += result["episode_steps"]
                 blue_wins += result["blue_win"]
                 red_wins += result["red_win"]
                 ties += 1 - (result["blue_win"] or result["red_win"])
