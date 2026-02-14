@@ -34,13 +34,18 @@ checkersRL/
 │
 ├── RL_models/                      # Reinforcement learning components
 │   ├── checkers_env.py             # Gymnasium environment wrapper for checkers
-│   ├── play_agent.py               # Play against a trained agent
-│   └── PPO_Model/                  # PPO implementation
-│       ├── Agent.py                # PPO agent with GAE and action masking
-│       ├── PolicyNetwork.py        # CNN policy/value network with batch norm
-│       ├── Memory.py               # Experience replay buffer
-│       ├── train.py                # Sequential self-play training
-│       └── train_parallel.py       # Parallel self-play training
+│   ├── play_agent.py               # Play against a trained agent (--mcts flag for MCTS)
+│   ├── PPO_Model/                  # PPO implementation
+│   │   ├── Agent.py                # PPO agent with GAE, action masking, noise augmentation
+│   │   ├── PolicyNetwork.py        # ResNet policy/value network (AlphaZero-style)
+│   │   ├── Memory.py               # Experience replay buffer
+│   │   ├── OpponentPool.py         # Past-version opponent pool for diverse training
+│   │   ├── train.py                # Sequential self-play training with curriculum
+│   │   └── train_parallel.py       # Parallel self-play training with curriculum
+│   └── MCTS/                       # AlphaZero-style MCTS training
+│       ├── mcts_node.py            # MCTS tree node with PUCT scoring
+│       ├── mcts_search.py          # MCTS search algorithm (select/expand/evaluate/backup)
+│       └── alphazero_trainer.py    # Full AlphaZero training loop (self-play + supervised)
 ```
 
 ## Game Rules
@@ -70,16 +75,27 @@ The agent uses an **AlphaZero-inspired residual CNN** with:
 
 The board state is always presented from the **current player's perspective** — channels represent "my pieces" and "opponent pieces" rather than fixed colors. When playing as Red, the board is flipped vertically so the agent always sees pieces moving in the same direction.
 
-### Training Algorithm
+### Training Modes
 
-**PPO with Generalized Advantage Estimation (GAE):**
+The project supports two training approaches:
+
+**1. PPO with Generalized Advantage Estimation (GAE):**
 - GAE (lambda=0.95) for lower-variance advantage estimates
 - Cosine annealing learning rate scheduler
 - Gradient clipping (max norm 0.5) for stability
 - Epsilon-greedy exploration with decay
 - Random noise data augmentation (DrAC-style) for observation robustness
+- Opponent pool: 30% of games played against random past model versions
+- Curriculum learning: endgame (2-5 pieces) -> mid-game (4-9) -> full game (12)
 
-### Reward Shaping
+**2. AlphaZero-style MCTS Training:**
+- Monte Carlo Tree Search (MCTS) with PUCT exploration for action selection
+- Self-play generates (state, MCTS policy, game outcome) training data
+- Network trained via supervised learning: cross-entropy (policy) + MSE (value)
+- Circular replay buffer of recent positions for mini-batch updates
+- Temperature-controlled exploration: high early in game, low later
+
+### Reward Shaping (PPO mode)
 
 | Signal | Reward |
 |---|---|
@@ -116,17 +132,24 @@ python -m checkers_game.main
 ### Train the Agent
 
 ```bash
-# Sequential training
+# PPO: Sequential training
 python -m RL_models.PPO_Model.train
 
-# Parallel training (faster)
+# PPO: Parallel training (faster)
 python -m RL_models.PPO_Model.train_parallel
+
+# AlphaZero: MCTS self-play training
+python -m RL_models.MCTS.alphazero_trainer
 ```
 
 ### Play Against the Agent
 
 ```bash
+# Direct policy (fast)
 python -m RL_models.play_agent
+
+# With MCTS search (stronger but slower)
+python -m RL_models.play_agent --mcts --simulations 200
 ```
 
 ## References
@@ -147,6 +170,12 @@ This project draws on techniques from the following papers:
 
 5. **Raileanu, R., Goldstein, M., Yarats, D., Kostrikov, I., & Fergus, R.** (2021). *Automatic Data Augmentation for Generalization in Reinforcement Learning.* NeurIPS 2021. [[paper]](https://arxiv.org/abs/2006.12862)
    - DrAC (Data-regularized Actor-Critic): random noise augmentation applied to observations during PPO updates.
+
+6. **Coulom, R.** (2006). *Efficient Selectivity and Backup Operators in Monte-Carlo Tree Search.* Computers and Games, 72-83. [[paper]](https://link.springer.com/chapter/10.1007/978-3-540-75538-8_7)
+   - Foundational MCTS algorithm with UCT (Upper Confidence bounds for Trees).
+
+7. **Rosin, C. D.** (2011). *Multi-armed Bandits with Episode Context.* Annals of Mathematics and Artificial Intelligence, 61(3), 203-230.
+   - PUCT (Predictor + UCB applied to Trees) selection formula used in AlphaZero-style MCTS.
 
 ## License
 

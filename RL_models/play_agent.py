@@ -1,6 +1,7 @@
 import os
 import sys
 import random
+import argparse
 
 import torch
 import numpy as np
@@ -8,40 +9,64 @@ import pygame
 
 from checkers_game.constants import WIDTH, HEIGHT, BLUE, RED, NUM_ACTIONS
 from RL_models.PPO_Model.Agent import PPOAgent
+from RL_models.PPO_Model.PolicyNetwork import PPOPolicyNetwork
+from RL_models.MCTS.mcts_search import MCTSSearch
 from RL_models.checkers_env import CheckersEnv
 
 
-def play_agent():
+def load_network(device):
+    """Load the best available model (AlphaZero > PPO parallel > PPO sequential).
+
+    Returns (network, mode_name) where network is a PPOPolicyNetwork on the device.
+    """
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    input_shape = (4, 8, 8)
+    network = PPOPolicyNetwork(input_shape, NUM_ACTIONS).to(device)
+
+    # Priority order for loading checkpoints
+    search_dirs = [
+        (os.path.join(base_dir, "MCTS", "alphazero_checkpoints"), "az_epoch_", "AlphaZero"),
+        (os.path.join(base_dir, "PPO_Model", "PPO_saved_models_parallel"), "agent_epoch_", "PPO-parallel"),
+        (os.path.join(base_dir, "PPO_Model", "PPO_saved_models"), "agent_epoch_", "PPO"),
+    ]
+
+    for model_dir, prefix, mode_name in search_dirs:
+        if os.path.exists(model_dir):
+            checkpoints = [f for f in os.listdir(model_dir) if f.startswith(prefix) and f.endswith(".pt")]
+            if checkpoints:
+                latest = max(checkpoints, key=lambda f: int(f.split("_")[-1].split(".")[0]))
+                model_path = os.path.join(model_dir, latest)
+                print(f"Loading {mode_name} model: {model_path}")
+                checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+                network.load_state_dict(checkpoint["model_state_dict"])
+                return network, mode_name
+
+    print("No model checkpoints found. The AI will play randomly.")
+    return network, "random"
+
+
+def play_agent(use_mcts=False, num_simulations=100):
     pygame.init()
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
     pygame.display.set_caption("Checkers Game - Play Against AI")
 
-    # Load the trained agent
-    input_shape = (4, 8, 8)
-    n_actions = NUM_ACTIONS
-    agent = PPOAgent(input_shape, n_actions)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    network, mode_name = load_network(device)
+    network.eval()
 
-    # Look for the latest saved model
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    model_dir = os.path.join(base_dir, "PPO_Model", "PPO_saved_models_parallel")
-
-    if not os.path.exists(model_dir):
-        model_dir = os.path.join(base_dir, "PPO_Model", "PPO_saved_models")
-
-    if os.path.exists(model_dir):
-        checkpoints = [f for f in os.listdir(model_dir) if f.startswith("agent_epoch_") and f.endswith(".pt")]
-        if checkpoints:
-            latest = max(checkpoints, key=lambda f: int(f.split("_")[-1].split(".")[0]))
-            model_path = os.path.join(model_dir, latest)
-            print(f"Loading model: {model_path}")
-            checkpoint = torch.load(model_path, map_location=agent.device, weights_only=False)
-            agent.policy.load_state_dict(checkpoint['model_state_dict'])
-        else:
-            print("No model checkpoints found. The AI will play randomly.")
+    # Set up the AI action selector
+    mcts = None
+    if use_mcts:
+        mcts = MCTSSearch(network, num_simulations=num_simulations, device=device)
+        print(f"AI mode: MCTS ({num_simulations} simulations/move)")
     else:
-        print(f"Model directory not found: {model_dir}. The AI will play randomly.")
+        print(f"AI mode: direct policy ({mode_name})")
 
-    agent.policy.eval()
+    # Wrap in PPOAgent for direct policy mode
+    agent = None
+    if not use_mcts:
+        agent = PPOAgent((4, 8, 8), NUM_ACTIONS, device=device)
+        agent.policy = network
 
     env = CheckersEnv()
     state, _ = env.reset()
@@ -58,7 +83,7 @@ def play_agent():
 
     while not done:
         if env.game.turn == player_color:
-            # Human player's turn -- handled by the interactive GUI
+            # Human player's turn
             turn_complete = env.game.player_action(screen)
 
             if turn_complete:
@@ -70,22 +95,25 @@ def play_agent():
                     display_winner(winner, player_color, ai_color)
                     break
 
-                # Sync env state after human move
                 state = env.get_board_state()
                 env.game.switch_turn()
                 env._update_action_mask()
 
         else:
-            # AI's turn -- use semantic action mask
+            # AI's turn
             action_mask = env.get_action_mask()
 
             if action_mask.sum() == 0:
-                # AI has no legal moves -- player wins
                 done = True
                 display_winner(player_color, player_color, ai_color)
                 break
 
-            action, _, _ = agent.select_action(state, action_mask)
+            if use_mcts:
+                # MCTS: run full search (handles capture chains internally via env copies)
+                action, _ = mcts.select_action(env, temperature=0.1)
+            else:
+                # Direct policy
+                action, _, _ = agent.select_action(state, action_mask)
 
             next_state, reward, done, _, info = env.step(action)
             env.game.update_board(screen)
@@ -98,16 +126,14 @@ def play_agent():
                 break
 
             if not turn_complete:
-                # AI is mid-capture chain -- keep acting on same turn
                 state = next_state
                 continue
 
-            # Turn complete -- state is now from the next player's perspective
             state = next_state
 
     print(f"Game moves: {env.game.moves}")
 
-    # Keep window open until user closes it
+    # Keep window open until user closes
     waiting = True
     while waiting:
         for event in pygame.event.get():
@@ -128,4 +154,9 @@ def display_winner(winner, player_color, ai_color):
 
 
 if __name__ == "__main__":
-    play_agent()
+    parser = argparse.ArgumentParser(description="Play checkers against the AI")
+    parser.add_argument("--mcts", action="store_true", help="Use MCTS for AI moves (stronger but slower)")
+    parser.add_argument("--simulations", type=int, default=100, help="MCTS simulations per move (default: 100)")
+    args = parser.parse_args()
+
+    play_agent(use_mcts=args.mcts, num_simulations=args.simulations)
