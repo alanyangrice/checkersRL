@@ -27,18 +27,26 @@ class PPOAgent:
         self.K_epochs = K_epochs
         self.gae_lambda = gae_lambda
 
-    def select_action(self, state, num_legal_moves):
-        state = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+    def select_action(self, state, action_mask):
+        """Select an action using the policy network and a semantic action mask.
+
+        Args:
+            state: Board observation array (4, 8, 8).
+            action_mask: numpy array of shape (NUM_ACTIONS,) where 1.0 = valid, 0.0 = invalid.
+
+        Returns:
+            (action_index, log_prob, entropy)
+        """
+        state_t = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+        mask_t = torch.FloatTensor(action_mask).unsqueeze(0).to(self.device)
 
         with torch.no_grad():
-            logits, _ = self.policy(state)
+            logits, _ = self.policy(state_t)
 
-        # Mask invalid actions
-        mask = torch.full(logits.size(), -1e10, device=self.device)
-        mask[0, :num_legal_moves] = 0
+        # Apply semantic mask: -inf for invalid actions, 0 for valid
+        masked_logits = logits + torch.where(mask_t > 0, 0.0, torch.tensor(-1e10, device=self.device))
 
         temp = 0.7
-        masked_logits = logits + mask
         probs = Categorical(logits=masked_logits / temp)
         action = probs.sample()
 
