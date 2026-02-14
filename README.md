@@ -58,12 +58,13 @@ Standard American checkers:
 
 ### Neural Network Architecture
 
-The agent uses a **convolutional neural network** with:
+The agent uses an **AlphaZero-inspired residual CNN** with:
 - **Input**: 4-channel 8x8 board (current player regular, current player king, opponent regular, opponent king)
-- **Backbone**: 4 convolutional layers (32 → 64 → 128 → 256 filters) with batch normalization
-- **Policy Head**: 4 fully connected layers with dropout for action probabilities
-- **Value Head**: 3 fully connected layers for state value estimation
-- **Action masking**: Invalid moves are masked out before sampling
+- **Backbone**: Initial conv layer + 5 residual blocks (256 channels each) with batch normalization and skip connections
+- **Policy Head**: 1x1 conv (256 to 2 channels) + flatten + linear to 170 semantic actions
+- **Value Head**: 1x1 conv (256 to 1 channel) + flatten + 2-layer MLP to scalar value
+- **Action Space**: 170 fixed (from_square, to_square) single-step actions with invalid-move masking
+- **~3.6M parameters** with efficient 1x1 conv heads (no FC bottleneck)
 
 ### Observation Normalization
 
@@ -76,6 +77,7 @@ The board state is always presented from the **current player's perspective** �
 - Cosine annealing learning rate scheduler
 - Gradient clipping (max norm 0.5) for stability
 - Epsilon-greedy exploration with decay
+- Random noise data augmentation (DrAC-style) for observation robustness
 
 ### Reward Shaping
 

@@ -17,7 +17,8 @@ def get_device():
 
 class PPOAgent:
     def __init__(self, input_shape, n_actions, lr=1e-4, gamma=0.95, eps_clip=0.2,
-                 K_epochs=4, gae_lambda=0.95, device=None):
+                 K_epochs=4, gae_lambda=0.95, device=None, augment=True,
+                 augment_noise=0.05):
         self.device = device or get_device()
         self.policy = PPOPolicyNetwork(input_shape, n_actions).to(self.device)
         self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
@@ -26,6 +27,8 @@ class PPOAgent:
         self.eps_clip = eps_clip
         self.K_epochs = K_epochs
         self.gae_lambda = gae_lambda
+        self.augment = augment
+        self.augment_noise = augment_noise
 
     def select_action(self, state, action_mask):
         """Select an action using the policy network and a semantic action mask.
@@ -53,19 +56,27 @@ class PPOAgent:
         return action.item(), probs.log_prob(action), probs.entropy()
 
     def update(self, memory):
-        """PPO update with Generalized Advantage Estimation (GAE)."""
+        """PPO update with GAE and optional random noise data augmentation.
+
+        When augment=True, an additional noisy copy of all states is included
+        in the PPO batch. The noisy copy shares the same actions, rewards, and
+        advantages as the originals but forces the network to be robust to small
+        observation perturbations (similar to DrAC / RAD in RL literature).
+        """
+        if len(memory.states) == 0:
+            return
+
         states = torch.FloatTensor(np.array(memory.states)).to(self.device)
         actions = torch.LongTensor(np.array(memory.actions)).to(self.device)
         rewards = torch.FloatTensor(np.array(memory.rewards)).to(self.device)
         log_probs_old = torch.FloatTensor(np.array(memory.log_probs)).to(self.device)
         done_flags = torch.tensor(memory.done, dtype=torch.bool).to(self.device)
 
-        # Compute state values for GAE
+        # --- GAE on original data ----------------------------------------
         with torch.no_grad():
             _, state_values = self.policy(states)
             state_values = state_values.squeeze(-1)
 
-        # GAE computation
         advantages = torch.zeros_like(rewards)
         returns = torch.zeros_like(rewards)
         gae = 0
@@ -82,11 +93,29 @@ class PPOAgent:
             advantages[t] = gae
             returns[t] = gae + state_values[t]
 
-        # Normalize advantages
+        # --- Augment with noisy copies ----------------------------------
+        if self.augment:
+            noise = torch.randn_like(states) * self.augment_noise
+            states_noisy = torch.clamp(states + noise, 0.0, 1.0)
+
+            # Compute surrogate old log-probs for noisy states
+            with torch.no_grad():
+                logits_noisy, _ = self.policy(states_noisy)
+                probs_noisy = Categorical(logits=logits_noisy)
+                log_probs_old_noisy = probs_noisy.log_prob(actions)
+
+            # Concatenate original + noisy
+            states = torch.cat([states, states_noisy], dim=0)
+            actions = torch.cat([actions, actions.clone()], dim=0)
+            log_probs_old = torch.cat([log_probs_old, log_probs_old_noisy], dim=0)
+            advantages = torch.cat([advantages, advantages.clone()], dim=0)
+            returns = torch.cat([returns, returns.clone()], dim=0)
+
+        # Normalize advantages over the full (augmented) batch
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         returns = returns.unsqueeze(-1)
 
-        # PPO update for K epochs
+        # --- PPO update for K epochs ------------------------------------
         for _ in range(self.K_epochs):
             logits, current_values = self.policy(states)
             probs = Categorical(logits=logits)
@@ -105,7 +134,6 @@ class PPOAgent:
 
             self.optimizer.zero_grad()
             loss.backward()
-            # Gradient clipping for stability
             nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5)
             self.optimizer.step()
 

@@ -23,17 +23,17 @@ class PPOPolicyNetwork(nn.Module):
     """AlphaZero-inspired policy/value network with residual backbone and 1x1 conv heads.
 
     Architecture:
-        Backbone: initial conv(in→128) + 3 residual blocks (128 channels)
-        Policy head: 1x1 conv(128→2) + flatten(128) + linear(128→n_actions)
-        Value head: 1x1 conv(128→1) + flatten(64) + linear(64→128) + linear(128→1)
+        Backbone: initial conv(in→256) + 5 residual blocks (256 channels)
+        Policy head: 1x1 conv(256→2) + flatten(128) + linear(128→n_actions)
+        Value head: 1x1 conv(256→1) + flatten(64) + linear(64→256) + linear(256→1)
 
-    ~900K params (vs ~8.85M in the previous plain CNN with FC bottleneck).
+    ~3.6M params with deeper backbone and wider channels for stronger feature learning.
     """
 
-    BACKBONE_CHANNELS = 128
+    BACKBONE_CHANNELS = 256
     POLICY_HEAD_CHANNELS = 2
     VALUE_HEAD_CHANNELS = 1
-    NUM_RES_BLOCKS = 3
+    NUM_RES_BLOCKS = 5
 
     def __init__(self, input_shape, n_actions):
         super(PPOPolicyNetwork, self).__init__()
