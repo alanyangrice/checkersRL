@@ -129,6 +129,25 @@ python -m RL_models.PPO_Model.train_parallel
 python -m RL_models.play_agent
 ```
 
+## References
+
+This project draws on techniques from the following papers:
+
+1. **Schulman, J., Wolski, F., Dhariwal, P., Radford, A., & Klimov, O.** (2017). *Proximal Policy Optimization Algorithms.* arXiv:1707.06347. [[paper]](https://arxiv.org/abs/1707.06347)
+   - Core training algorithm (PPO with clipped surrogate objective).
+
+2. **Schulman, J., Moritz, P., Levine, S., Jordan, M., & Abbeel, P.** (2015). *High-Dimensional Continuous Control Using Generalized Advantage Estimation.* arXiv:1506.02438. [[paper]](https://arxiv.org/abs/1506.02438)
+   - Generalized Advantage Estimation (GAE) for lower-variance policy gradient updates.
+
+3. **Silver, D., Hubert, T., Schrittwieser, J., et al.** (2018). *A General Reinforcement Learning Algorithm that Masters Chess, Shogi, and Go Through Self-Play.* Science, 362(6419), 1140-1144. [[paper]](https://arxiv.org/abs/1712.01815)
+   - AlphaZero: inspiration for the residual CNN architecture, 1x1 conv heads, and self-play training framework.
+
+4. **He, K., Zhang, X., Ren, S., & Sun, J.** (2016). *Deep Residual Learning for Image Recognition.* CVPR 2016. [[paper]](https://arxiv.org/abs/1512.03385)
+   - Residual blocks with skip connections used in the policy/value network backbone.
+
+5. **Raileanu, R., Goldstein, M., Yarats, D., Kostrikov, I., & Fergus, R.** (2021). *Automatic Data Augmentation for Generalization in Reinforcement Learning.* NeurIPS 2021. [[paper]](https://arxiv.org/abs/2006.12862)
+   - DrAC (Data-regularized Actor-Critic): random noise augmentation applied to observations during PPO updates.
+
 ## License
 
 This project is open source. Feel free to use, modify, and distribute.
