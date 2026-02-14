@@ -10,6 +10,7 @@ import numpy as np
 from RL_models.checkers_env import CheckersEnv
 from RL_models.PPO_Model.Agent import PPOAgent
 from RL_models.PPO_Model.Memory import Memory
+from RL_models.PPO_Model.OpponentPool import OpponentPool
 from checkers_game.constants import BLUE, RED, NUM_ACTIONS
 
 
@@ -24,9 +25,8 @@ def random_action_from_mask(mask):
     """Sample a random valid action from the action mask."""
     valid = np.where(mask > 0)[0]
     if len(valid) == 0:
-        return 0  # fallback; step() will handle no-legal-moves
-    choice = np.random.choice(valid)
-    return int(choice)
+        return 0
+    return int(np.random.choice(valid))
 
 
 def uniform_log_prob(mask):
@@ -35,6 +35,37 @@ def uniform_log_prob(mask):
     if n <= 0:
         return 0.0
     return float(np.log(1.0 / n))
+
+
+def select_action_for_agent(agent, state, action_mask, epoch, first_move, first_move_count):
+    """Select an action using exploration/exploitation strategy."""
+    if first_move and epoch < 50:
+        action = random_action_from_mask(action_mask)
+        log_prob = uniform_log_prob(action_mask)
+        first_move_count += 1
+        if first_move_count > 10:
+            first_move = False
+    else:
+        epsilon = max(0.03, 1 - epoch / 50)
+        if random.random() < epsilon:
+            action = random_action_from_mask(action_mask)
+            log_prob = uniform_log_prob(action_mask)
+        else:
+            action, log_prob, _ = agent.select_action(state, action_mask)
+
+    if isinstance(log_prob, torch.Tensor):
+        log_prob = log_prob.item()
+
+    return action, log_prob, first_move, first_move_count
+
+
+def select_action_for_opponent(opponent, state, action_mask):
+    """Select an action for a pool opponent (no exploration, no gradient)."""
+    with torch.no_grad():
+        action, log_prob, _ = opponent.select_action(state, action_mask)
+    if isinstance(log_prob, torch.Tensor):
+        log_prob = log_prob.item()
+    return action, log_prob
 
 
 def main():
@@ -46,10 +77,16 @@ def main():
 
     agent = PPOAgent(input_shape, n_actions)
 
-    # Directories (relative to script location)
+    # Directories
     base_dir = os.path.dirname(os.path.abspath(__file__))
     model_dir = os.path.join(base_dir, "PPO_saved_models")
     os.makedirs(model_dir, exist_ok=True)
+
+    # Opponent pool
+    pool_dir = os.path.join(base_dir, "opponent_pool")
+    pool = OpponentPool(pool_dir, max_size=20)
+    pool_save_interval = 10  # Save to pool every N epochs
+    pool_opponent_prob = 0.3  # 30% chance of using a pool opponent
 
     csv_file_path = os.path.join(base_dir, "training_progress.csv")
 
@@ -95,7 +132,7 @@ def main():
 
     # Main training loop
     for epoch in range(start_epoch, num_epochs):
-        print(f"Epoch: {epoch + 1}")
+        print(f"Epoch: {epoch + 1} (pool size: {pool.size})")
         total_rewards, total_steps, blue_wins, red_wins, ties, max_move_reward = 0, 0, 0, 0, 0, 0
         blue_memory, red_memory = Memory(), Memory()
 
@@ -109,6 +146,21 @@ def main():
             state, _ = env.reset()
             done = False
 
+            # Decide whether to use an opponent from the pool for this episode
+            use_opponent = pool.should_use_opponent(prob=pool_opponent_prob)
+            opponent = None
+            opponent_color = None
+
+            if use_opponent:
+                opp_path = pool.sample()
+                if opp_path:
+                    opponent = PPOAgent(input_shape, n_actions, device=agent.device)
+                    opp_state_dict = torch.load(opp_path, map_location=agent.device, weights_only=False)
+                    opponent.policy.load_state_dict(opp_state_dict)
+                    opponent.policy.eval()
+                    # Randomly assign opponent to Blue or Red
+                    opponent_color = BLUE if random.random() < 0.5 else RED
+
             episode_reward, episode_steps, max_episode_move_reward = 0, 0, 0
             first_move = True
             first_move_count = 0
@@ -121,7 +173,6 @@ def main():
             while not done:
                 action_mask = env.get_action_mask()
 
-                # No legal actions -- step will handle game-over
                 if action_mask.sum() == 0:
                     next_state, reward, done, _, info = env.step(0)
                     episode_reward += reward
@@ -142,25 +193,17 @@ def main():
                     state = next_state
                     continue
 
-                # Select action: exploration vs exploitation
-                if first_move and epoch < 50:
-                    action = random_action_from_mask(action_mask)
-                    log_prob = uniform_log_prob(action_mask)
-                    first_move_count += 1
-                    if first_move_count > 10:
-                        first_move = False
+                # Determine who is acting: current agent or pool opponent
+                is_opponent_turn = (opponent is not None and env.game.turn == opponent_color)
+
+                if is_opponent_turn:
+                    action, log_prob = select_action_for_opponent(opponent, state, action_mask)
                 else:
-                    epsilon = max(0.03, 1 - epoch / 50)
-                    if random.random() < epsilon:
-                        action = random_action_from_mask(action_mask)
-                        log_prob = uniform_log_prob(action_mask)
-                    else:
-                        action, log_prob, _ = agent.select_action(state, action_mask)
+                    action, log_prob, first_move, first_move_count = select_action_for_agent(
+                        agent, state, action_mask, epoch, first_move, first_move_count
+                    )
 
-                if isinstance(log_prob, torch.Tensor):
-                    log_prob = log_prob.item()
-
-                # Step the environment (env handles turn switching internally)
+                # Step the environment
                 next_state, reward, done, _, info = env.step(action)
 
                 episode_reward += reward
@@ -172,28 +215,34 @@ def main():
                     if max_episode_move_reward > max_move_reward:
                         max_move_reward = max_episode_move_reward
 
-                # Record in memory based on whose turn it was BEFORE env switched
-                # During capture chains (turn_complete=False), turn hasn't switched
-                # At turn completion, env already switched, so we check the PREVIOUS turn
+                # Memory routing: only store current agent's experiences
                 turn_complete = info.get("turn_complete", True)
-
                 if turn_complete:
-                    # Turn switched inside env.step(); the PREVIOUS player was the opposite
                     acting_color = RED if env.game.turn == BLUE else BLUE
                 else:
-                    # Mid-capture chain; turn hasn't switched yet
                     acting_color = env.game.turn
 
-                if acting_color == BLUE:
-                    blue_memory.add(state, action, reward, log_prob, done)
-                    blue_reward.append(reward)
-                    if done:
-                        red_memory.update_last_done()
+                is_opponent_acting = (opponent is not None and acting_color == opponent_color)
+
+                if not is_opponent_acting:
+                    # Store in the appropriate memory for the current agent
+                    if acting_color == BLUE:
+                        blue_memory.add(state, action, reward, log_prob, done)
+                        blue_reward.append(reward)
+                        if done:
+                            red_memory.update_last_done()
+                    else:
+                        red_memory.add(state, action, reward, log_prob, done)
+                        red_reward.append(reward)
+                        if done:
+                            blue_memory.update_last_done()
                 else:
-                    red_memory.add(state, action, reward, log_prob, done)
-                    red_reward.append(reward)
+                    # Opponent's turn -- still update done flags if game ended
                     if done:
-                        blue_memory.update_last_done()
+                        if acting_color == BLUE:
+                            red_memory.update_last_done()
+                        else:
+                            blue_memory.update_last_done()
 
                 log_prob_list.append(log_prob)
                 reward_list.append(reward)
@@ -246,6 +295,11 @@ def main():
 
         # Step the learning rate scheduler
         agent.step_scheduler()
+
+        # Save to opponent pool periodically
+        if (epoch + 1) % pool_save_interval == 0:
+            pool.save(agent.policy.state_dict(), epoch + 1)
+            print(f"  Saved to opponent pool (size: {pool.size})")
 
         # Zip detailed CSV
         epoch_zip_file_path = os.path.join(detailed_csv_folder_path, f"detailed_games_epoch_{epoch + 1}.zip")

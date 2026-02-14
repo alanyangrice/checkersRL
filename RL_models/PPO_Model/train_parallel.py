@@ -11,6 +11,7 @@ import numpy as np
 from RL_models.checkers_env import CheckersEnv
 from RL_models.PPO_Model.Agent import PPOAgent
 from RL_models.PPO_Model.Memory import Memory
+from RL_models.PPO_Model.OpponentPool import OpponentPool
 from checkers_game.constants import BLUE, RED, NUM_ACTIONS
 
 
@@ -41,7 +42,6 @@ def write_detailed_csv(file_path, results, batch_start, epoch, num_games):
 
 
 def random_action_from_mask(mask):
-    """Sample a random valid action from the action mask."""
     valid = np.where(mask > 0)[0]
     if len(valid) == 0:
         return 0
@@ -49,19 +49,31 @@ def random_action_from_mask(mask):
 
 
 def uniform_log_prob(mask):
-    """Log probability for a uniform random choice over valid actions."""
     n = int(mask.sum())
     if n <= 0:
         return 0.0
     return float(np.log(1.0 / n))
 
 
-def play_game(n_actions, game_id, epoch, temp_model_path):
-    """Simulate a single game of Checkers with training logic."""
+def play_game(n_actions, game_id, epoch, temp_model_path, opponent_model_path=None):
+    """Simulate a single game of Checkers with training logic.
+
+    If opponent_model_path is provided, a past opponent plays one side (randomly
+    chosen). Only the current agent's experiences are recorded in memory.
+    """
     env = CheckersEnv()
-    # Workers always run on CPU for multiprocessing
     agent = PPOAgent((4, 8, 8), n_actions, device=torch.device("cpu"))
     agent.policy.load_state_dict(torch.load(temp_model_path, map_location='cpu', weights_only=False))
+
+    # Optionally load a pool opponent
+    opponent = None
+    opponent_color = None
+    if opponent_model_path is not None:
+        opponent = PPOAgent((4, 8, 8), n_actions, device=torch.device("cpu"))
+        opp_state_dict = torch.load(opponent_model_path, map_location='cpu', weights_only=False)
+        opponent.policy.load_state_dict(opp_state_dict)
+        opponent.policy.eval()
+        opponent_color = BLUE if random.random() < 0.5 else RED
 
     blue_memory, red_memory = Memory(), Memory()
     state, _ = env.reset()
@@ -75,7 +87,6 @@ def play_game(n_actions, game_id, epoch, temp_model_path):
     while not done:
         action_mask = env.get_action_mask()
 
-        # No legal actions -- step will handle game-over
         if action_mask.sum() == 0:
             next_state, reward, done, _, info = env.step(0)
             episode_reward += reward
@@ -93,25 +104,32 @@ def play_game(n_actions, game_id, epoch, temp_model_path):
             state = next_state
             continue
 
-        # Select action: exploration vs exploitation
-        if first_move:
-            action = random_action_from_mask(action_mask)
-            log_prob = uniform_log_prob(action_mask)
-            first_move_count += 1
-            if first_move_count > 1:
-                first_move = False
+        # Determine who acts
+        is_opponent_turn = (opponent is not None and env.game.turn == opponent_color)
+
+        if is_opponent_turn:
+            with torch.no_grad():
+                action, log_prob, _ = opponent.select_action(state, action_mask)
+            if isinstance(log_prob, torch.Tensor):
+                log_prob = log_prob.item()
         else:
-            epsilon = max(0.08, 1 - epoch / 100)
-            if random.random() < epsilon:
+            if first_move:
                 action = random_action_from_mask(action_mask)
                 log_prob = uniform_log_prob(action_mask)
+                first_move_count += 1
+                if first_move_count > 1:
+                    first_move = False
             else:
-                action, log_prob, _ = agent.select_action(state, action_mask)
+                epsilon = max(0.08, 1 - epoch / 100)
+                if random.random() < epsilon:
+                    action = random_action_from_mask(action_mask)
+                    log_prob = uniform_log_prob(action_mask)
+                else:
+                    action, log_prob, _ = agent.select_action(state, action_mask)
 
-        if isinstance(log_prob, torch.Tensor):
-            log_prob = log_prob.item()
+            if isinstance(log_prob, torch.Tensor):
+                log_prob = log_prob.item()
 
-        # Step the environment (env handles turn switching internally)
         next_state, reward, done, _, info = env.step(action)
 
         episode_reward += reward
@@ -120,23 +138,32 @@ def play_game(n_actions, game_id, epoch, temp_model_path):
         if reward > max_episode_move_reward and not done:
             max_episode_move_reward = reward
 
-        # Route to correct memory based on who acted
+        # Memory routing: only store current agent's experiences
         turn_complete = info.get("turn_complete", True)
         if turn_complete:
             acting_color = RED if env.game.turn == BLUE else BLUE
         else:
             acting_color = env.game.turn
 
-        if acting_color == BLUE:
-            blue_memory.add(state, action, reward, log_prob, done)
-            blue_reward.append(reward)
-            if done:
-                red_memory.update_last_done()
+        is_opponent_acting = (opponent is not None and acting_color == opponent_color)
+
+        if not is_opponent_acting:
+            if acting_color == BLUE:
+                blue_memory.add(state, action, reward, log_prob, done)
+                blue_reward.append(reward)
+                if done:
+                    red_memory.update_last_done()
+            else:
+                red_memory.add(state, action, reward, log_prob, done)
+                red_reward.append(reward)
+                if done:
+                    blue_memory.update_last_done()
         else:
-            red_memory.add(state, action, reward, log_prob, done)
-            red_reward.append(reward)
             if done:
-                blue_memory.update_last_done()
+                if acting_color == BLUE:
+                    red_memory.update_last_done()
+                else:
+                    blue_memory.update_last_done()
 
         log_prob_list.append(log_prob)
         reward_list.append(reward)
@@ -174,9 +201,14 @@ def train_parallel(num_epochs=1000, num_games=2500, batch_size=250, n_actions=NU
     model_dir = os.path.join(base_dir, "PPO_saved_models_parallel")
     os.makedirs(model_dir, exist_ok=True)
 
+    # Opponent pool
+    pool_dir = os.path.join(base_dir, "opponent_pool_parallel")
+    pool = OpponentPool(pool_dir, max_size=20)
+    pool_save_interval = 10
+    pool_opponent_prob = 0.3
+
     start_epoch = 0
 
-    # Find and load latest checkpoint
     checkpoints = [f for f in os.listdir(model_dir) if f.startswith("agent_epoch_") and f.endswith(".pt")]
     if checkpoints:
         latest = max(checkpoints, key=lambda f: int(f.split("_")[-1].split(".")[0]))
@@ -187,7 +219,6 @@ def train_parallel(num_epochs=1000, num_games=2500, batch_size=250, n_actions=NU
         start_epoch = checkpoint['epoch']
         print(f"Resuming training from epoch: {start_epoch}")
 
-    # CSV directories
     detailed_csv_folder_path = os.path.join(base_dir, "training_progress_detailed_parallel")
     os.makedirs(detailed_csv_folder_path, exist_ok=True)
     csv_file_path = os.path.join(base_dir, "training_progress_parallel.csv")
@@ -201,9 +232,8 @@ def train_parallel(num_epochs=1000, num_games=2500, batch_size=250, n_actions=NU
             ])
 
     for epoch in range(start_epoch, num_epochs):
-        print(f"Starting epoch {epoch + 1}")
+        print(f"Starting epoch {epoch + 1} (pool size: {pool.size})")
 
-        # Save temporary model for workers
         temp_model_path = os.path.join(model_dir, f'temp_agent_model_epoch_{epoch + 1}.pt')
         torch.save(agent.policy.state_dict(), temp_model_path)
 
@@ -227,11 +257,17 @@ def train_parallel(num_epochs=1000, num_games=2500, batch_size=250, n_actions=NU
         for batch_start in range(0, num_games, batch_size):
             batch_end = min(batch_start + batch_size, num_games)
 
-            with Pool(num_processes) as pool:
-                results = pool.starmap(
-                    play_game,
-                    [(n_actions, game_id, epoch, temp_model_path) for game_id in range(batch_start, batch_end)]
-                )
+            # For each game in the batch, decide whether to use a pool opponent
+            game_args = []
+            for game_id in range(batch_start, batch_end):
+                opp_path = None
+                if pool.should_use_opponent(prob=pool_opponent_prob):
+                    opp_path = pool.sample()
+                game_args.append((n_actions, game_id, epoch, temp_model_path, opp_path))
+
+            with Pool(num_processes) as p:
+                results = p.starmap(play_game, game_args)
+
             write_detailed_csv(detailed_csv_file_path, results, batch_start, epoch, num_games)
 
             for result in results:
@@ -243,7 +279,6 @@ def train_parallel(num_epochs=1000, num_games=2500, batch_size=250, n_actions=NU
                 ties += 1 - (result["blue_win"] or result["red_win"])
                 max_move_reward = max(max_move_reward, result["max_episode_move_reward"])
 
-            # Batch update
             blue_memory, red_memory = Memory(), Memory()
             for result in results:
                 blue_memory.extend(result["blue_memory"])
@@ -253,6 +288,11 @@ def train_parallel(num_epochs=1000, num_games=2500, batch_size=250, n_actions=NU
 
         # Step the learning rate scheduler
         agent.step_scheduler()
+
+        # Save to opponent pool periodically
+        if (epoch + 1) % pool_save_interval == 0:
+            pool.save(agent.policy.state_dict(), epoch + 1)
+            print(f"  Saved to opponent pool (size: {pool.size})")
 
         # Zip detailed CSV
         epoch_zip_file_path = os.path.join(detailed_csv_folder_path, f"detailed_games_epoch_{epoch + 1}.zip")
