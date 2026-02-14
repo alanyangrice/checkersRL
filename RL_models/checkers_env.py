@@ -5,47 +5,273 @@ import gymnasium as gym
 from gymnasium import spaces
 
 from checkers_game.game import Game
-from checkers_game.constants import RED, BLUE, ROWS, COLS
+from checkers_game.constants import (
+    RED, BLUE, ROWS, COLS,
+    NUM_ACTIONS, ALL_ACTIONS, ACTION_TO_INDEX,
+    encode_action, decode_action,
+    board_number_to_position, position_to_board_number,
+)
 
 
 class CheckersEnv(gym.Env):
+    """Checkers environment with a semantic single-step action space.
+
+    Each action is a fixed (from_square, to_square) pair representing one
+    diagonal step (regular move) or one capture jump. Multi-captures are
+    decomposed into sequential single-step actions within the same turn.
+
+    The env handles turn switching internally. Training loops should NOT
+    call game.switch_turn() -- just keep calling step().
+    """
+
     def __init__(self):
         super(CheckersEnv, self).__init__()
 
         self.game = Game()
 
-        # Observation: 4 channels (current_regular, current_king, opponent_regular, opponent_king)
+        # Observation: 4 channels from current player's perspective
         self.observation_space = spaces.Box(low=0, high=1, shape=(4, 8, 8), dtype=np.float32)
 
-        # Action space with fixed max number of actions
-        self.max_actions = 50
-        self.action_space = spaces.Discrete(self.max_actions)
+        # Semantic action space: fixed (from_sq, to_sq) single-step pairs
+        self.action_space = spaces.Discrete(NUM_ACTIONS)
 
-        # Cache legal moves so step() doesn't need them as a parameter
-        self._legal_moves = []
+        # Capture chain tracking
+        self._capture_in_progress = False
+        self._capturing_piece_sq = None      # board number of the piece mid-chain
+        self._visited_squares = set()        # (row, col) visited during chain
+        self._current_move_chain = []        # list of board numbers in this turn
+        self._is_capture_turn = False        # whether this turn involves captures
+        self._turn_start_board = None        # board snapshot before the turn began
+
+        # Action mask (updated after reset/step)
+        self._action_mask = np.zeros(NUM_ACTIONS, dtype=np.float32)
+
+    # ------------------------------------------------------------------
+    # Gym interface
+    # ------------------------------------------------------------------
 
     def reset(self, seed=None, options=None):
-        """Resets the game to the initial state."""
+        """Reset the game to initial state."""
         super().reset(seed=seed)
         self.game = Game()
-        self._legal_moves = self.game.get_all_possible_moves()
-        obs = self.get_board_state()
-        return obs, {}
 
-    @property
-    def legal_moves(self):
-        """Returns the cached list of legal moves for the current player."""
-        return self._legal_moves
+        self._capture_in_progress = False
+        self._capturing_piece_sq = None
+        self._visited_squares = set()
+        self._current_move_chain = []
+        self._is_capture_turn = False
+        self._turn_start_board = None
+
+        self._update_action_mask()
+        return self.get_board_state(), {}
+
+    def step(self, action):
+        """Apply a single-step semantic action.
+
+        Returns standard Gymnasium 5-tuple: (obs, reward, terminated, truncated, info).
+        info["turn_complete"] indicates whether the current player's full turn is done.
+        """
+
+        # Handle no-legal-moves (current player loses)
+        if self._action_mask.sum() == 0:
+            winner = BLUE if self.game.turn == RED else RED
+            reward = -100.0
+            self.game.switch_turn()
+            self._update_action_mask()
+            obs = self.get_board_state()
+            return obs, reward, True, False, {
+                "turn": self.game.turn,
+                "turn_complete": True,
+                "winner": copy.deepcopy(winner),
+            }
+
+        # Validate / fallback for invalid action
+        if self._action_mask[action] == 0:
+            valid_indices = np.where(self._action_mask > 0)[0]
+            action = int(np.random.choice(valid_indices))
+
+        # Decode the semantic action
+        from_sq, to_sq = decode_action(action)
+        from_row, from_col = board_number_to_position(from_sq)
+        to_row, to_col = board_number_to_position(to_sq)
+
+        is_capture = abs(from_row - to_row) == 2
+
+        # --- First hop of a new turn: snapshot the board -----------------
+        if not self._capture_in_progress:
+            self._turn_start_board = copy.deepcopy(self.game.board)
+            self._current_move_chain = [from_sq]
+            self._visited_squares = {(from_row, from_col)}
+            self._is_capture_turn = is_capture
+
+        # --- Apply the single-step move/capture -------------------------
+        if is_capture:
+            self.game.board.capture_piece(from_row, from_col, to_row, to_col)
+        else:
+            self.game.board.move_piece(from_row, from_col, to_row, to_col)
+
+        self._current_move_chain.append(to_sq)
+        self._visited_squares.add((to_row, to_col))
+
+        # --- Check for continuation captures -----------------------------
+        has_continuations = False
+        if is_capture:
+            piece = self.game.board.get_piece(to_row, to_col)
+            if piece != 0:
+                continuations = self.game.board.valid_moves_for_piece(
+                    piece, to_row, to_col, capture_only=True
+                )
+                # Filter out previously visited landing squares
+                continuations = {
+                    k: v for k, v in continuations.items()
+                    if k not in self._visited_squares
+                }
+                if continuations:
+                    has_continuations = True
+
+        # --- Branch: intermediate hop vs turn complete -------------------
+        if has_continuations:
+            # Capture chain continues -- same player acts again
+            self._capture_in_progress = True
+            self._capturing_piece_sq = to_sq
+
+            self._update_action_mask()
+            obs = self.get_board_state()
+
+            return obs, 10.0, False, False, {
+                "turn": self.game.turn,
+                "turn_complete": False,
+                "winner": "None",
+            }
+        else:
+            # Turn is complete
+            return self._finish_turn()
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _finish_turn(self):
+        """Compute full rewards, log the move, switch turns, return step tuple."""
+        old_board = self._turn_start_board
+        new_board = copy.deepcopy(self.game.board)
+
+        # Build move string for logging
+        delimiter = "x" if self._is_capture_turn else "-"
+        move_str = delimiter.join(map(str, self._current_move_chain))
+        self.game.moves.append(move_str)
+
+        # --- Reward computation ------------------------------------------
+        board_stats = self.analyze_board()
+        reward = 0.0
+
+        reward += self.reward_control_center(board_stats)
+        reward += self.reward_protect_rear(board_stats)
+        reward += self.reward_balance(board_stats)
+        reward += self.reward_for_kings(board_stats)
+        reward += self.reward_king_promotion(old_board)
+
+        # +10 for the final capture hop (intermediates already got +10 each)
+        if self._is_capture_turn:
+            reward += 10.0
+
+        reward += self.penalize_undefended_pieces(old_board, new_board)
+
+        end_reward, done, winner = self.reward_end_game()
+        reward += end_reward
+
+        if not done:
+            reward += self.penalize_opponent_advantage(new_board)
+
+        # --- Switch turn ------------------------------------------------
+        self.game.switch_turn()
+
+        # Reset capture chain state
+        self._capture_in_progress = False
+        self._capturing_piece_sq = None
+        self._visited_squares = set()
+        self._current_move_chain = []
+        self._is_capture_turn = False
+        self._turn_start_board = None
+
+        # Update mask for the next player (or empty if done)
+        if not done:
+            self._update_action_mask()
+        else:
+            self._action_mask = np.zeros(NUM_ACTIONS, dtype=np.float32)
+
+        obs = self.get_board_state()
+        info = {
+            "turn": self.game.turn,
+            "turn_complete": True,
+            "winner": copy.deepcopy(winner) if winner else "None",
+        }
+        return obs, reward, done, False, info
+
+    def _update_action_mask(self):
+        """Rebuild the action mask for the current board state."""
+        self._action_mask = np.zeros(NUM_ACTIONS, dtype=np.float32)
+
+        if self._capture_in_progress:
+            # Only continuation captures from the mid-chain piece
+            row, col = board_number_to_position(self._capturing_piece_sq)
+            piece = self.game.board.get_piece(row, col)
+            if piece != 0:
+                captures = self.game.board.valid_moves_for_piece(
+                    piece, row, col, capture_only=True
+                )
+                for (to_row, to_col) in captures:
+                    if (to_row, to_col) not in self._visited_squares:
+                        to_sq = position_to_board_number(to_row, to_col)
+                        if to_sq is not None:
+                            idx = encode_action(self._capturing_piece_sq, to_sq)
+                            if idx >= 0:
+                                self._action_mask[idx] = 1.0
+        else:
+            # All legal single-step moves for current player
+            capture_mandatory = self.game.board.is_capture_possible(self.game.turn)
+            for row in range(ROWS):
+                for col in range(COLS):
+                    piece = self.game.board.get_piece(row, col)
+                    if piece != 0 and piece.color == self.game.turn:
+                        if capture_mandatory:
+                            moves = self.game.board.valid_moves_for_piece(
+                                piece, row, col, capture_only=True
+                            )
+                        else:
+                            moves = self.game.board.valid_moves_for_piece(
+                                piece, row, col, capture_only=False
+                            )
+                        from_sq = position_to_board_number(row, col)
+                        if from_sq is None:
+                            continue
+                        for (to_row, to_col) in moves:
+                            to_sq = position_to_board_number(to_row, to_col)
+                            if to_sq is not None:
+                                idx = encode_action(from_sq, to_sq)
+                                if idx >= 0:
+                                    self._action_mask[idx] = 1.0
+
+    def get_action_mask(self):
+        """Return the current action mask (NUM_ACTIONS float array, 1.0 = valid)."""
+        return self._action_mask.copy()
+
+    # ------------------------------------------------------------------
+    # Observation
+    # ------------------------------------------------------------------
 
     def get_board_state(self):
-        """Returns a normalized 4-channel board state.
-        Channels are always from the current player's perspective:
+        """Return a normalized 4-channel board state from the current player's perspective.
+
+        Channels:
           0: current player regular pieces
           1: current player king pieces
           2: opponent regular pieces
           3: opponent king pieces
-        The board is flipped vertically when it's Red's turn so the agent
-        always sees pieces moving in the same direction."""
+
+        Board is flipped vertically for Red so the agent always sees pieces
+        moving in the same direction.
+        """
         board_state = np.zeros((4, 8, 8), dtype=np.float32)
 
         current_color = self.game.turn
@@ -57,122 +283,40 @@ class CheckersEnv(gym.Env):
                 if piece != 0:
                     if piece.color == current_color:
                         if piece.king:
-                            board_state[1, row, col] = 1  # Current player king
+                            board_state[1, row, col] = 1
                         else:
-                            board_state[0, row, col] = 1  # Current player regular
+                            board_state[0, row, col] = 1
                     elif piece.color == opponent_color:
                         if piece.king:
-                            board_state[3, row, col] = 1  # Opponent king
+                            board_state[3, row, col] = 1
                         else:
-                            board_state[2, row, col] = 1  # Opponent regular
+                            board_state[2, row, col] = 1
 
-        # Flip board for Red so the agent always sees from the same perspective
         if current_color == RED:
             board_state = np.flip(board_state, axis=1).copy()
 
         return board_state
 
     def render(self):
-        """Prints the board to the console."""
         print("Board State")
         print(self.game.board)
 
     def close(self):
-        """Cleanup if necessary."""
         pass
 
-    def step(self, action):
-        """Standard Gym step interface. Uses cached legal_moves."""
-        legal_moves = self._legal_moves
-
-        if len(legal_moves) == 0:
-            done = True
-            reward = 20 + self.remaining_diff(self.game.board.board)
-            info = {
-                "legal_moves": legal_moves,
-                "turn": self.game.turn,
-                "winner": "Tie"
-            }
-            return self.get_board_state(), reward, done, False, info
-
-        # Clamp action to valid range
-        if action >= len(legal_moves):
-            action = np.random.randint(0, len(legal_moves))
-
-        # Apply the action and update the state
-        chosen_move, old_board, new_board = self.update_state(action, legal_moves)
-
-        # Analyze the board once
-        board_stats = self.analyze_board()
-
-        # Add move to move list
-        self.game.moves.append(chosen_move)
-
-        # Calculate reward for this move
-        reward, done, winner = self.calculate_reward(chosen_move, old_board, new_board, board_stats)
-
-        # Update legal moves cache for next turn
-        if not done:
-            self._legal_moves = self.game.get_all_possible_moves()
-        else:
-            self._legal_moves = []
-
-        observation = self.get_board_state()
-        info = {
-            "legal_moves": self._legal_moves,
-            "turn": self.game.turn,
-            "winner": winner if winner else "None"
-        }
-
-        return observation, reward, done, False, info
-
-    def update_state(self, action, legal_moves):
-        chosen_move = legal_moves[action][0]
-        new_board = legal_moves[action][1]
-
-        old_board = copy.deepcopy(self.game.board)
-        self.game.board = copy.deepcopy(new_board)
-
-        return chosen_move, old_board, new_board
-
-    def calculate_reward(self, chosen_move, old_board, new_board, board_stats):
-        """Calculate the total reward for the current step."""
-        reward = 0
-
-        reward += self.reward_control_center(board_stats)
-        reward += self.reward_protect_rear(board_stats)
-        reward += self.reward_balance(board_stats)
-        reward += self.reward_for_kings(board_stats)
-        reward += self.reward_king_promotion(old_board)
-        reward += self.reward_piece_capture(chosen_move)
-        reward += self.penalize_undefended_pieces(old_board, new_board)
-
-        end_reward, done, winner = self.reward_end_game()
-        reward += end_reward
-
-        if done:
-            return reward, done, winner
-        else:
-            reward += self.penalize_opponent_advantage(new_board)
-
-        return reward, done, winner
+    # ------------------------------------------------------------------
+    # Reward helpers
+    # ------------------------------------------------------------------
 
     def analyze_board(self):
         """Precompute useful board statistics."""
         stats = {
-            "blue_pieces": 0,
-            "red_pieces": 0,
-            "blue_kings": 0,
-            "red_kings": 0,
-            "blue_positions": [],
-            "red_positions": [],
-            "blue_back_row": 0,
-            "red_back_row": 0,
+            "blue_pieces": 0, "red_pieces": 0,
+            "blue_kings": 0, "red_kings": 0,
+            "blue_positions": [], "red_positions": [],
+            "blue_back_row": 0, "red_back_row": 0,
             "center_control": 0,
         }
-
-        back_row_blue = 0
-        back_row_red = 7
         central_positions = {(3, 4), (4, 3)}
 
         for row in range(ROWS):
@@ -184,87 +328,61 @@ class CheckersEnv(gym.Env):
                         stats["blue_positions"].append((row, col))
                         if piece.king:
                             stats["blue_kings"] += 1
-                        if row == back_row_blue:
+                        if row == 0:
                             stats["blue_back_row"] += 1
                     elif piece.color == RED:
                         stats["red_pieces"] += 1
                         stats["red_positions"].append((row, col))
                         if piece.king:
                             stats["red_kings"] += 1
-                        if row == back_row_red:
+                        if row == 7:
                             stats["red_back_row"] += 1
-
                     if (row, col) in central_positions:
                         stats["center_control"] += 1 if piece.color == self.game.turn else 0
-
         return stats
 
     def reward_control_center(self, board_stats):
-        """Reward for controlling central positions."""
         return 0.5 * board_stats["center_control"]
 
     def reward_protect_rear(self, board_stats):
-        """Reward for protecting the back row."""
         if self.game.turn == BLUE:
             return 0.5 * board_stats["blue_back_row"]
-        else:
-            return 0.5 * board_stats["red_back_row"]
+        return 0.5 * board_stats["red_back_row"]
 
     def reward_balance(self, board_stats):
-        """Reward for maintaining a balanced distribution of pieces."""
-        if self.game.turn == BLUE:
-            positions = board_stats["blue_positions"]
-        else:
-            positions = board_stats["red_positions"]
-
-        left_half = sum(1 for _, col in positions if col < COLS // 2)
-        right_half = sum(1 for _, col in positions if col >= COLS // 2)
-        imbalance = abs(left_half - right_half)
-        return -0.1 * imbalance
+        positions = board_stats["blue_positions"] if self.game.turn == BLUE else board_stats["red_positions"]
+        left = sum(1 for _, c in positions if c < COLS // 2)
+        right = sum(1 for _, c in positions if c >= COLS // 2)
+        return -0.1 * abs(left - right)
 
     def reward_for_kings(self, board_stats):
-        """Reward for maintaining kings during the game."""
         if self.game.turn == BLUE:
             return board_stats["blue_kings"] * 0.2
-        else:
-            return board_stats["red_kings"] * 0.2
+        return board_stats["red_kings"] * 0.2
 
     def reward_king_promotion(self, old_board):
-        """Reward for promoting a piece to a king."""
-        if self.king_promoted(old_board.board):
+        if self._king_promoted(old_board.board):
             return 15
         return 0
 
-    def reward_piece_capture(self, chosen_move):
-        """Reward for capturing opponent's pieces."""
-        if "x" in chosen_move:
-            num_captures = len(chosen_move.split('x')) - 1
-            return 10 * num_captures
-        return 0
-
     def penalize_undefended_pieces(self, old_board, new_board):
-        """Penalize for leaving pieces undefended."""
         self.game.board = old_board
-        old_undefended = self.enemy_capture()
+        old_undefended = self._enemy_capture_count()
         self.game.board = copy.deepcopy(new_board)
-        new_undefended = self.enemy_capture()
+        new_undefended = self._enemy_capture_count()
         return max(old_undefended - new_undefended, 0) * 5 - new_undefended * 5
 
     def reward_end_game(self):
-        """Reward or penalize based on game-ending conditions."""
         winner = self.game.check_winner()
         if winner == self.game.turn:
             return 100, True, copy.deepcopy(self.game.turn)
         elif winner == "Tie":
-            return -20 - self.remaining_diff(self.game.board.board), True, "Tie"
+            return -20 - self._remaining_diff(self.game.board.board), True, "Tie"
         elif winner is not None:
-            # Opponent wins (current player has no legal moves or no pieces)
             return -100, True, copy.deepcopy(winner)
-        else:
-            return -np.sqrt(len(self.game.moves)) / 10, False, None
+        return -np.sqrt(len(self.game.moves)) / 10, False, None
 
     def penalize_opponent_advantage(self, new_board):
-        """Penalize the agent if it leads to a strong opponent move."""
         self.game.switch_turn()
         opponent_legal_moves = self.game.get_all_possible_moves()
         best_opponent_reward = float('-inf')
@@ -273,7 +391,6 @@ class CheckersEnv(gym.Env):
             opp_old_board = copy.deepcopy(new_board)
             for opp_move in opponent_legal_moves:
                 self.game.board = opp_move[1]
-
                 opp_board_stats = self.analyze_board()
 
                 opp_reward = 0
@@ -282,59 +399,59 @@ class CheckersEnv(gym.Env):
                 opp_reward += self.reward_balance(opp_board_stats)
                 opp_reward += self.reward_for_kings(opp_board_stats)
                 opp_reward += self.reward_king_promotion(opp_old_board)
-                opp_reward += self.reward_piece_capture(opp_move[0])
+
+                # Count captures from the move string
+                if "x" in opp_move[0]:
+                    opp_reward += 10 * (len(opp_move[0].split("x")) - 1)
+
                 opp_reward += self.penalize_undefended_pieces(opp_old_board, self.game.board)
 
                 end_reward, _, _ = self.reward_end_game()
                 opp_reward += end_reward
 
-                # Undo the board hash increment from check_winner
                 board_hash = self.game.board.get_board_hash()
                 if board_hash in self.game.board_states:
                     self.game.board_states[board_hash] -= 1
 
                 best_opponent_reward = max(best_opponent_reward, opp_reward)
-
                 self.game.board = copy.deepcopy(new_board)
 
             self.game.board = new_board
         else:
-            best_opponent_reward = 20 + self.remaining_diff(self.game.board.board)
+            best_opponent_reward = 20 + self._remaining_diff(self.game.board.board)
 
         self.game.switch_turn()
         return -0.5 * best_opponent_reward
 
-    def remaining_diff(self, board):
-        blue_king = sum(1 for row in board for piece in row if piece != 0 and piece.color == BLUE and piece.king)
-        blue_piece = sum(1 for row in board for piece in row if piece != 0 and piece.color == BLUE and not piece.king)
-        red_king = sum(1 for row in board for piece in row if piece != 0 and piece.color == RED and piece.king)
-        red_piece = sum(1 for row in board for piece in row if piece != 0 and piece.color == RED and not piece.king)
+    # ------------------------------------------------------------------
+    # Private utilities
+    # ------------------------------------------------------------------
 
-        point_diff = (blue_king - red_king) * 3 + (blue_piece - red_piece) * 1
-        if self.game.turn == BLUE:
-            return point_diff
-        else:
-            return -point_diff
+    def _remaining_diff(self, board):
+        blue_king = sum(1 for row in board for p in row if p != 0 and p.color == BLUE and p.king)
+        blue_reg = sum(1 for row in board for p in row if p != 0 and p.color == BLUE and not p.king)
+        red_king = sum(1 for row in board for p in row if p != 0 and p.color == RED and p.king)
+        red_reg = sum(1 for row in board for p in row if p != 0 and p.color == RED and not p.king)
+        diff = (blue_king - red_king) * 3 + (blue_reg - red_reg)
+        return diff if self.game.turn == BLUE else -diff
 
-    def king_promoted(self, old_board):
-        prev_num_king = sum(1 for row in old_board for piece in row if piece != 0 and piece.color == self.game.turn and piece.king)
-        new_num_king = sum(1 for row in self.game.board.board for piece in row if piece != 0 and piece.color == self.game.turn and piece.king)
-        return new_num_king - prev_num_king > 0
+    def _king_promoted(self, old_board):
+        prev = sum(1 for row in old_board for p in row if p != 0 and p.color == self.game.turn and p.king)
+        curr = sum(1 for row in self.game.board.board for p in row if p != 0 and p.color == self.game.turn and p.king)
+        return curr > prev
 
-    def enemy_capture(self):
-        """Returns the number of pieces that can be captured."""
-        numCaptures = 0
-        pieceCapture = set()
+    def _enemy_capture_count(self):
+        """Count how many of the current player's pieces the opponent can capture."""
+        count = 0
+        seen = set()
         self.game.switch_turn()
-
         for row in range(ROWS):
             for col in range(COLS):
                 piece = self.game.board.get_piece(row, col)
                 if piece != 0 and piece.color == self.game.turn:
                     captures = self.game.board.valid_moves_for_piece(piece, row, col, capture_only=True)
-                    if captures and piece not in pieceCapture:
-                        pieceCapture.add(piece)
-                        numCaptures += 1
-
+                    if captures and piece not in seen:
+                        seen.add(piece)
+                        count += 1
         self.game.switch_turn()
-        return numCaptures
+        return count
