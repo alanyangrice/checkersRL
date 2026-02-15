@@ -101,15 +101,21 @@ class PPOAgent:
             # Compute surrogate old log-probs for noisy states
             with torch.no_grad():
                 logits_noisy, _ = self.policy(states_noisy)
+
+            # Skip augmentation if network produced NaN (early sign of instability)
+            if torch.isnan(logits_noisy).any():
+                print("Warning: NaN detected in augmentation logits, skipping augmentation this batch")
+            else:
+                logits_noisy = torch.clamp(logits_noisy, -50.0, 50.0)
                 probs_noisy = Categorical(logits=logits_noisy)
                 log_probs_old_noisy = probs_noisy.log_prob(actions)
 
-            # Concatenate original + noisy
-            states = torch.cat([states, states_noisy], dim=0)
-            actions = torch.cat([actions, actions.clone()], dim=0)
-            log_probs_old = torch.cat([log_probs_old, log_probs_old_noisy], dim=0)
-            advantages = torch.cat([advantages, advantages.clone()], dim=0)
-            returns = torch.cat([returns, returns.clone()], dim=0)
+                # Concatenate original + noisy
+                states = torch.cat([states, states_noisy], dim=0)
+                actions = torch.cat([actions, actions.clone()], dim=0)
+                log_probs_old = torch.cat([log_probs_old, log_probs_old_noisy], dim=0)
+                advantages = torch.cat([advantages, advantages.clone()], dim=0)
+                returns = torch.cat([returns, returns.clone()], dim=0)
 
         # Normalize advantages over the full (augmented) batch
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
@@ -118,6 +124,13 @@ class PPOAgent:
         # --- PPO update for K epochs ------------------------------------
         for _ in range(self.K_epochs):
             logits, current_values = self.policy(states)
+
+            # Guard against NaN logits (sign of weight instability)
+            if torch.isnan(logits).any():
+                print("Warning: NaN detected in policy logits, skipping this PPO epoch")
+                continue
+
+            logits = torch.clamp(logits, -50.0, 50.0)
             probs = Categorical(logits=logits)
             log_probs = probs.log_prob(actions)
             entropy = probs.entropy()

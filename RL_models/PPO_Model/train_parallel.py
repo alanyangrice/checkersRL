@@ -284,6 +284,8 @@ def train_parallel(num_epochs=1000, num_games=2500, batch_size=250, n_actions=NU
             with Pool(num_processes) as p:
                 results = p.starmap(play_game, game_args)
 
+            print(f"  Games {batch_start + 1}-{batch_end}/{num_games} finished")
+
             write_detailed_csv(detailed_csv_file_path, results, batch_start, epoch, num_games)
 
             for result in results:

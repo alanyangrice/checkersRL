@@ -29,4 +29,5 @@ class Memory:
         self.done.extend(other_memory.done)
 
     def update_last_done(self):
-        self.done[-1] = True
+        if self.done:
+            self.done[-1] = True
