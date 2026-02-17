@@ -15,6 +15,34 @@ from RL_models.PPO_Model.OpponentPool import OpponentPool
 from checkers_game.constants import BLUE, RED, NUM_ACTIONS
 
 
+# ── Worker-level globals (initialised once per Pool worker) ──────────
+_worker_agent = None          # reused PPOAgent for the current model
+_worker_opponents = {}        # path → PPOAgent cache for pool opponents
+
+
+def _init_worker(n_actions, temp_model_path):
+    """Pool initializer: load the model ONCE per worker process."""
+    global _worker_agent
+    _worker_agent = PPOAgent((4, 8, 8), n_actions, device=torch.device("cpu"))
+    _worker_agent.policy.load_state_dict(
+        torch.load(temp_model_path, map_location="cpu", weights_only=False)
+    )
+    _worker_agent.policy.eval()
+
+
+def _get_opponent(n_actions, opp_path):
+    """Return a cached opponent agent, loading from disk only on first use."""
+    global _worker_opponents
+    if opp_path not in _worker_opponents:
+        opp = PPOAgent((4, 8, 8), n_actions, device=torch.device("cpu"))
+        opp.policy.load_state_dict(
+            torch.load(opp_path, map_location="cpu", weights_only=False)
+        )
+        opp.policy.eval()
+        _worker_opponents[opp_path] = opp
+    return _worker_opponents[opp_path]
+
+
 def zip_csv_file(csv_file_path, zip_file_path):
     """Compress and remove the CSV file."""
     with zipfile.ZipFile(zip_file_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
@@ -35,6 +63,7 @@ def write_detailed_csv(file_path, results, batch_start, epoch, num_games):
                 result["rewards"]["blue"],
                 result["rewards"]["red"],
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                result["opponent"],
                 ", ".join(result["moves"]),
                 ", ".join(map(str, result["log_probs"])),
                 ", ".join(map(str, result["rewards_list"]))
@@ -70,25 +99,27 @@ def get_curriculum_options(epoch):
         return None
 
 
-def play_game(n_actions, game_id, epoch, temp_model_path, opponent_model_path=None):
+def play_game(n_actions, game_id, epoch, opponent_model_path=None):
     """Simulate a single game of Checkers with training logic.
+
+    Uses the worker-level cached agent (loaded once per Pool worker via
+    _init_worker) instead of creating a new one for every game.
 
     If opponent_model_path is provided, a past opponent plays one side (randomly
     chosen). Only the current agent's experiences are recorded in memory.
     """
     env = CheckersEnv()
-    agent = PPOAgent((4, 8, 8), n_actions, device=torch.device("cpu"))
-    agent.policy.load_state_dict(torch.load(temp_model_path, map_location='cpu', weights_only=False))
+    agent = _worker_agent          # reuse the pre-loaded model
 
-    # Optionally load a pool opponent
+    # Optionally load a pool opponent (cached per worker)
     opponent = None
     opponent_color = None
+    opponent_label = "self"
     if opponent_model_path is not None:
-        opponent = PPOAgent((4, 8, 8), n_actions, device=torch.device("cpu"))
-        opp_state_dict = torch.load(opponent_model_path, map_location='cpu', weights_only=False)
-        opponent.policy.load_state_dict(opp_state_dict)
-        opponent.policy.eval()
+        opponent = _get_opponent(n_actions, opponent_model_path)
         opponent_color = BLUE if random.random() < 0.5 else RED
+        # Extract a readable label like "pool_epoch_80"
+        opponent_label = os.path.splitext(os.path.basename(opponent_model_path))[0]
 
     blue_memory, red_memory = Memory(), Memory()
     curriculum_opts = get_curriculum_options(epoch)
@@ -136,7 +167,14 @@ def play_game(n_actions, game_id, epoch, temp_model_path, opponent_model_path=No
                 if first_move_count > 1:
                     first_move = False
             else:
-                epsilon = max(0.08, 1 - epoch / 100)
+                # Reset exploration at each curriculum phase boundary so
+                # the agent can discover strategies for the new game type.
+                if epoch < 50:          # Phase 1: endgame (2-5 pieces)
+                    epsilon = max(0.08, 1.0 - epoch / 50)
+                elif epoch < 150:       # Phase 2: mid-game (4-9 pieces)
+                    epsilon = max(0.08, 0.5 - (epoch - 50) / 200)
+                else:                   # Phase 3: full game (12v12)
+                    epsilon = max(0.08, 0.3 - (epoch - 150) / 300)
                 if random.random() < epsilon:
                     action = random_action_from_mask(action_mask)
                     log_prob = uniform_log_prob(action_mask)
@@ -205,10 +243,11 @@ def play_game(n_actions, game_id, epoch, temp_model_path, opponent_model_path=No
         "episode_reward": episode_reward,
         "episode_steps": episode_steps,
         "max_episode_move_reward": max_episode_move_reward,
+        "opponent": opponent_label,
     }
 
 
-def train_parallel(num_epochs=1000, num_games=2500, batch_size=250, n_actions=NUM_ACTIONS):
+def train_parallel(num_epochs=1000, num_games=2500, batch_size=500, n_actions=NUM_ACTIONS):
     """Parallelized training loop for the Checkers PPO agent."""
     input_shape = (4, 8, 8)
     agent = PPOAgent(input_shape, n_actions)
@@ -247,17 +286,19 @@ def train_parallel(num_epochs=1000, num_games=2500, batch_size=250, n_actions=NU
                 "average_episode_length", "win_rate_blue", "win_rate_red", "tie_rate", "max_move_reward"
             ])
 
+    num_processes = max(2, int(cpu_count() * 0.5))
+
     for epoch in range(start_epoch, num_epochs):
         print(f"Starting epoch {epoch + 1} (pool size: {pool.size})")
 
         temp_model_path = os.path.join(model_dir, f'temp_agent_model_epoch_{epoch + 1}.pt')
         torch.save(agent.policy.state_dict(), temp_model_path)
 
-        num_processes = max(1, int(cpu_count() * 0.25))
         print(f"Using {num_processes} processes for parallel simulation.")
 
         total_rewards = {"blue": 0, "red": 0}
         blue_wins, red_wins, ties, max_move_reward, total_steps = 0, 0, 0, 0, 0
+        pool_games = 0
 
         detailed_csv_file_path = os.path.join(
             detailed_csv_folder_path, f"detailed_games_epoch_{epoch + 1}.csv"
@@ -267,42 +308,48 @@ def train_parallel(num_epochs=1000, num_games=2500, batch_size=250, n_actions=NU
             writer = csv.writer(file)
             writer.writerow([
                 "game_number", "blue_win", "red_win", "total_reward", "blue_reward",
-                "red_reward", "time", "moves", "log_probs", "reward_list"
+                "red_reward", "time", "opponent", "moves", "log_probs", "reward_list"
             ])
 
-        for batch_start in range(0, num_games, batch_size):
-            batch_end = min(batch_start + batch_size, num_games)
+        # Create pool ONCE per epoch with initializer that loads the model
+        # once per worker process (instead of once per game).
+        with Pool(num_processes, initializer=_init_worker,
+                  initargs=(n_actions, temp_model_path)) as p:
 
-            # For each game in the batch, decide whether to use a pool opponent
-            game_args = []
-            for game_id in range(batch_start, batch_end):
-                opp_path = None
-                if pool.should_use_opponent(prob=pool_opponent_prob):
-                    opp_path = pool.sample()
-                game_args.append((n_actions, game_id, epoch, temp_model_path, opp_path))
+            for batch_start in range(0, num_games, batch_size):
+                batch_end = min(batch_start + batch_size, num_games)
 
-            with Pool(num_processes) as p:
+                # For each game in the batch, decide whether to use a pool opponent
+                game_args = []
+                for game_id in range(batch_start, batch_end):
+                    opp_path = None
+                    if pool.should_use_opponent(prob=pool_opponent_prob):
+                        opp_path = pool.sample()
+                    game_args.append((n_actions, game_id, epoch, opp_path))
+
                 results = p.starmap(play_game, game_args)
 
-            print(f"  Games {batch_start + 1}-{batch_end}/{num_games} finished")
+                print(f"  Games {batch_end}/{num_games} finished")
 
-            write_detailed_csv(detailed_csv_file_path, results, batch_start, epoch, num_games)
+                write_detailed_csv(detailed_csv_file_path, results, batch_start, epoch, num_games)
 
-            for result in results:
-                total_rewards["blue"] += result["rewards"]["blue"]
-                total_rewards["red"] += result["rewards"]["red"]
-                total_steps += result["episode_steps"]
-                blue_wins += result["blue_win"]
-                red_wins += result["red_win"]
-                ties += 1 - (result["blue_win"] or result["red_win"])
-                max_move_reward = max(max_move_reward, result["max_episode_move_reward"])
+                for result in results:
+                    total_rewards["blue"] += result["rewards"]["blue"]
+                    total_rewards["red"] += result["rewards"]["red"]
+                    total_steps += result["episode_steps"]
+                    blue_wins += result["blue_win"]
+                    red_wins += result["red_win"]
+                    ties += 1 - (result["blue_win"] or result["red_win"])
+                    max_move_reward = max(max_move_reward, result["max_episode_move_reward"])
+                    if result["opponent"] != "self":
+                        pool_games += 1
 
-            blue_memory, red_memory = Memory(), Memory()
-            for result in results:
-                blue_memory.extend(result["blue_memory"])
-                red_memory.extend(result["red_memory"])
-            agent.update(blue_memory)
-            agent.update(red_memory)
+                # Combine blue + red into ONE memory to avoid doubling GPU work
+                combined_memory = Memory()
+                for result in results:
+                    combined_memory.extend(result["blue_memory"])
+                    combined_memory.extend(result["red_memory"])
+                agent.update(combined_memory)
 
         # Step the learning rate scheduler
         agent.step_scheduler()

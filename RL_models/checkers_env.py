@@ -178,26 +178,35 @@ class CheckersEnv(gym.Env):
         self.game.moves.append(move_str)
 
         # --- Reward computation ------------------------------------------
-        board_stats = self.analyze_board()
-        reward = 0.0
+        # Shaped rewards are scaled down so terminal outcomes (win/loss/tie)
+        # have more relative impact on the learning signal.
+        SHAPING_SCALE = 0.5
 
-        reward += self.reward_control_center(board_stats)
-        reward += self.reward_protect_rear(board_stats)
-        reward += self.reward_balance(board_stats)
-        reward += self.reward_for_kings(board_stats)
-        reward += self.reward_king_promotion(old_board)
+        # Check game-over first (need 'done' flag for opponent penalty guard)
+        end_reward, done, winner = self.reward_end_game()
+
+        board_stats = self.analyze_board()
+        shaped_reward = 0.0
+
+        shaped_reward += self.reward_control_center(board_stats)
+        shaped_reward += self.reward_protect_rear(board_stats)
+        shaped_reward += self.reward_balance(board_stats)
+        shaped_reward += self.reward_for_kings(board_stats)
+        shaped_reward += self.reward_king_promotion(old_board)
 
         # +10 for the final capture hop (intermediates already got +10 each)
         if self._is_capture_turn:
-            reward += 10.0
+            shaped_reward += 10.0
 
-        reward += self.penalize_undefended_pieces(old_board, new_board)
+        shaped_reward += self.penalize_undefended_pieces(old_board, new_board)
 
-        end_reward, done, winner = self.reward_end_game()
-        reward += end_reward
+        # NOTE: penalize_opponent_advantage removed — it was simulating ALL
+        # opponent moves with deep-copies on every turn, consuming ~90% of CPU.
+        # penalize_undefended_pieces already captures the key "don't leave
+        # pieces hanging" signal at a fraction of the cost.
 
-        if not done:
-            reward += self.penalize_opponent_advantage(new_board)
+        # Combine: scaled shaping + full-strength terminal reward
+        reward = shaped_reward * SHAPING_SCALE + end_reward
 
         # --- Switch turn ------------------------------------------------
         self.game.switch_turn()
@@ -384,7 +393,9 @@ class CheckersEnv(gym.Env):
     def penalize_undefended_pieces(self, old_board, new_board):
         self.game.board = old_board
         old_undefended = self._enemy_capture_count()
-        self.game.board = copy.deepcopy(new_board)
+        # new_board is already a deep copy (created in _finish_turn),
+        # so no need to deep copy again.
+        self.game.board = new_board
         new_undefended = self._enemy_capture_count()
         return max(old_undefended - new_undefended, 0) * 5 - new_undefended * 5
 
@@ -393,51 +404,51 @@ class CheckersEnv(gym.Env):
         if winner == self.game.turn:
             return 100, True, copy.deepcopy(self.game.turn)
         elif winner == "Tie":
-            return -20 - self._remaining_diff(self.game.board.board), True, "Tie"
+            return self._tie_reward(), True, "Tie"
         elif winner is not None:
             return -100, True, copy.deepcopy(winner)
         return -np.sqrt(len(self.game.moves)) / 10, False, None
 
-    def penalize_opponent_advantage(self, new_board):
-        self.game.switch_turn()
-        opponent_legal_moves = self.game.get_all_possible_moves()
-        best_opponent_reward = float('-inf')
+    def _tie_reward(self):
+        """Tie penalty that scales with material advantage and total pieces.
 
-        if opponent_legal_moves:
-            opp_old_board = copy.deepcopy(new_board)
-            for opp_move in opponent_legal_moves:
-                self.game.board = opp_move[1]
-                opp_board_stats = self.analyze_board()
+        Three components (all negative):
+        1. Base penalty       – every tie is bad.
+        2. Advantage penalty  – if *you* had more material and still drew,
+           you failed to convert; extra penalty proportional to your edge.
+        3. Stalling penalty   – more total pieces on the board means the game
+           ended prematurely (repetition / move limit) instead of being
+           played out.  Discourages passive play that leads to draws.
 
-                opp_reward = 0
-                opp_reward += self.reward_control_center(opp_board_stats)
-                opp_reward += self.reward_protect_rear(opp_board_stats)
-                opp_reward += self.reward_balance(opp_board_stats)
-                opp_reward += self.reward_for_kings(opp_board_stats)
-                opp_reward += self.reward_king_promotion(opp_old_board)
+        Example outcomes (kings count as 1.5 pieces):
+          Equal material, few pieces  (1v1):   -30 +  0 + -4  = -34
+          Equal material, many pieces (10v10): -30 +  0 + -40 = -70
+          Advantage, many pieces      (10v5):  -30 + -25 + -30 = -85
+          Disadvantage, few pieces    (1v3):   -30 +  0 + -8  = -38
+        """
+        board = self.game.board.board
+        my_color = self.game.turn
+        opp_color = RED if my_color == BLUE else BLUE
 
-                # Count captures from the move string
-                if "x" in opp_move[0]:
-                    opp_reward += 10 * (len(opp_move[0].split("x")) - 1)
+        my_reg = sum(1 for row in board for p in row
+                     if p != 0 and p.color == my_color and not p.king)
+        my_kings = sum(1 for row in board for p in row
+                       if p != 0 and p.color == my_color and p.king)
+        opp_reg = sum(1 for row in board for p in row
+                      if p != 0 and p.color == opp_color and not p.king)
+        opp_kings = sum(1 for row in board for p in row
+                        if p != 0 and p.color == opp_color and p.king)
 
-                opp_reward += self.penalize_undefended_pieces(opp_old_board, self.game.board)
+        my_material = my_reg + my_kings * 1.5
+        opp_material = opp_reg + opp_kings * 1.5
+        total_material = my_material + opp_material
+        advantage = my_material - opp_material   # positive = I had more
 
-                end_reward, _, _ = self.reward_end_game()
-                opp_reward += end_reward
+        base = -30
+        adv_penalty = -5 * max(advantage, 0)     # only the stronger side pays
+        stall_penalty = -2 * total_material       # more pieces left = worse
 
-                board_hash = self.game.board.get_board_hash()
-                if board_hash in self.game.board_states:
-                    self.game.board_states[board_hash] -= 1
-
-                best_opponent_reward = max(best_opponent_reward, opp_reward)
-                self.game.board = copy.deepcopy(new_board)
-
-            self.game.board = new_board
-        else:
-            best_opponent_reward = 20 + self._remaining_diff(self.game.board.board)
-
-        self.game.switch_turn()
-        return -0.5 * best_opponent_reward
+        return base + adv_penalty + stall_penalty
 
     # ------------------------------------------------------------------
     # Private utilities

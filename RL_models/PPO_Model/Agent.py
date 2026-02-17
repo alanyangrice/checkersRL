@@ -18,7 +18,7 @@ def get_device():
 class PPOAgent:
     def __init__(self, input_shape, n_actions, lr=1e-4, gamma=0.95, eps_clip=0.2,
                  K_epochs=4, gae_lambda=0.95, device=None, augment=True,
-                 augment_noise=0.05):
+                 augment_noise=0.05, mini_batch_size=2048):
         self.device = device or get_device()
         self.policy = PPOPolicyNetwork(input_shape, n_actions).to(self.device)
         self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
@@ -29,6 +29,7 @@ class PPOAgent:
         self.gae_lambda = gae_lambda
         self.augment = augment
         self.augment_noise = augment_noise
+        self.mini_batch_size = mini_batch_size
 
     def select_action(self, state, action_mask):
         """Select an action using the policy network and a semantic action mask.
@@ -72,26 +73,38 @@ class PPOAgent:
         log_probs_old = torch.FloatTensor(np.array(memory.log_probs)).to(self.device)
         done_flags = torch.tensor(memory.done, dtype=torch.bool).to(self.device)
 
-        # --- GAE on original data ----------------------------------------
+        # --- GAE on original data -----------------------------------------
+        # Forward pass on GPU to get state values
         with torch.no_grad():
             _, state_values = self.policy(states)
             state_values = state_values.squeeze(-1)
 
-        advantages = torch.zeros_like(rewards)
-        returns = torch.zeros_like(rewards)
-        gae = 0
-        n = len(rewards)
+        # Move to CPU for the GAE scan. The sequential loop does per-element
+        # indexing which triggers a CPU↔GPU sync on every iteration when run
+        # on CUDA tensors.  Doing it on CPU avoids thousands of sync stalls.
+        sv_cpu = state_values.cpu()
+        rw_cpu = rewards.cpu()
+        df_cpu = done_flags.cpu()
 
-        for t in reversed(range(n)):
-            if done_flags[t] or t == n - 1:
-                next_value = 0.0
-            else:
-                next_value = state_values[t + 1]
+        n = len(rw_cpu)
+        next_values = torch.zeros(n)
+        if n > 1:
+            next_values[:-1] = sv_cpu[1:]
+        next_values[df_cpu] = 0.0
+        next_values[-1] = 0.0
 
-            delta = rewards[t] + self.gamma * next_value - state_values[t]
-            gae = delta + self.gamma * self.gae_lambda * (0 if done_flags[t] else 1) * gae
-            advantages[t] = gae
-            returns[t] = gae + state_values[t]
+        deltas = rw_cpu + self.gamma * next_values - sv_cpu
+        not_done = (~df_cpu).float()
+
+        advantages_cpu = torch.zeros(n)
+        gae = 0.0
+        for t in range(n - 1, -1, -1):
+            gae = deltas[t].item() + self.gamma * self.gae_lambda * not_done[t].item() * gae
+            advantages_cpu[t] = gae
+
+        # Move results back to GPU
+        advantages = advantages_cpu.to(self.device)
+        returns = (advantages + state_values)
 
         # --- Augment with noisy copies ----------------------------------
         if self.augment:
@@ -121,34 +134,46 @@ class PPOAgent:
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         returns = returns.unsqueeze(-1)
 
-        # --- PPO update for K epochs ------------------------------------
+        # --- PPO update for K epochs with mini-batches --------------------
+        total = states.size(0)
         for _ in range(self.K_epochs):
-            logits, current_values = self.policy(states)
+            # Shuffle indices each epoch for stochastic mini-batches
+            perm = torch.randperm(total, device=self.device)
 
-            # Guard against NaN logits (sign of weight instability)
-            if torch.isnan(logits).any():
-                print("Warning: NaN detected in policy logits, skipping this PPO epoch")
-                continue
+            for mb_start in range(0, total, self.mini_batch_size):
+                mb_idx = perm[mb_start : mb_start + self.mini_batch_size]
+                mb_states = states[mb_idx]
+                mb_actions = actions[mb_idx]
+                mb_log_probs_old = log_probs_old[mb_idx]
+                mb_advantages = advantages[mb_idx]
+                mb_returns = returns[mb_idx]
 
-            logits = torch.clamp(logits, -50.0, 50.0)
-            probs = Categorical(logits=logits)
-            log_probs = probs.log_prob(actions)
-            entropy = probs.entropy()
-            ratios = torch.exp(log_probs - log_probs_old)
+                logits, current_values = self.policy(mb_states)
 
-            # Clipped Surrogate Loss
-            surr1 = ratios * advantages
-            surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * advantages
-            policy_loss = -torch.min(surr1, surr2).mean()
-            value_loss = 0.5 * nn.MSELoss()(current_values, returns)
-            entropy_bonus = -0.05 * entropy.mean()
+                # Guard against NaN logits (sign of weight instability)
+                if torch.isnan(logits).any():
+                    print("Warning: NaN detected in policy logits, skipping this mini-batch")
+                    continue
 
-            loss = policy_loss + value_loss + entropy_bonus
+                logits = torch.clamp(logits, -50.0, 50.0)
+                probs = Categorical(logits=logits)
+                log_probs = probs.log_prob(mb_actions)
+                entropy = probs.entropy()
+                ratios = torch.exp(log_probs - mb_log_probs_old)
 
-            self.optimizer.zero_grad()
-            loss.backward()
-            nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5)
-            self.optimizer.step()
+                # Clipped Surrogate Loss
+                surr1 = ratios * mb_advantages
+                surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * mb_advantages
+                policy_loss = -torch.min(surr1, surr2).mean()
+                value_loss = 0.5 * nn.MSELoss()(current_values, mb_returns)
+                entropy_bonus = -0.05 * entropy.mean()
+
+                loss = policy_loss + value_loss + entropy_bonus
+
+                self.optimizer.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5)
+                self.optimizer.step()
 
     def step_scheduler(self):
         """Step the learning rate scheduler. Call once per epoch."""
