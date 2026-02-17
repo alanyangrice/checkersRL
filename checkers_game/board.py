@@ -39,8 +39,13 @@ class Board:
                     screen.blit(text, (col * SQUARE_SIZE + 10, row * SQUARE_SIZE + 10))
                     square_number += 1
 
-    def draw(self, screen):
-        """Draw the checkers board."""
+    def draw(self, screen, update=True):
+        """Draw the checkers board.
+
+        Args:
+            screen: The pygame surface to draw on.
+            update: If True (default), call pygame.display.update() after drawing.
+        """
         screen.fill(BLACK)
         self.draw_squares(screen)
         for row in range(ROWS):
@@ -48,7 +53,8 @@ class Board:
                 piece = self.get_piece(row, col)
                 if piece != 0:
                     piece.draw(screen)
-        pygame.display.update()
+        if update:
+            pygame.display.update()
 
     def __str__(self):
         """Returns a string representation of the current board state."""

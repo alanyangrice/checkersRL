@@ -160,26 +160,32 @@ def play_game(n_actions, game_id, epoch, opponent_model_path=None):
             if isinstance(log_prob, torch.Tensor):
                 log_prob = log_prob.item()
         else:
-            if first_move:
+            # Reset exploration at each curriculum phase boundary so
+            # the agent can discover strategies for the new game type.
+            if epoch < 50:          # Phase 1: endgame (2-5 pieces)
+                epsilon = max(0.08, 1.0 - epoch / 50)
+            elif epoch < 150:       # Phase 2: mid-game (4-9 pieces)
+                epsilon = max(0.08, 0.5 - (epoch - 50) / 200)
+            else:                   # Phase 3: full game (12v12)
+                epsilon = max(0.08, 0.3 - (epoch - 150) / 300)
+
+            # Forced random first moves during curriculum (random boards)
+            # to add opening diversity.  Disabled for full games so the
+            # agent can learn proper opening strategy; epsilon already
+            # provides sufficient exploration.
+            use_random_first = first_move and epoch < 150
+
+            if use_random_first:
                 action = random_action_from_mask(action_mask)
                 log_prob = uniform_log_prob(action_mask)
                 first_move_count += 1
                 if first_move_count > 1:
                     first_move = False
+            elif random.random() < epsilon:
+                action = random_action_from_mask(action_mask)
+                log_prob = uniform_log_prob(action_mask)
             else:
-                # Reset exploration at each curriculum phase boundary so
-                # the agent can discover strategies for the new game type.
-                if epoch < 50:          # Phase 1: endgame (2-5 pieces)
-                    epsilon = max(0.08, 1.0 - epoch / 50)
-                elif epoch < 150:       # Phase 2: mid-game (4-9 pieces)
-                    epsilon = max(0.08, 0.5 - (epoch - 50) / 200)
-                else:                   # Phase 3: full game (12v12)
-                    epsilon = max(0.08, 0.3 - (epoch - 150) / 300)
-                if random.random() < epsilon:
-                    action = random_action_from_mask(action_mask)
-                    log_prob = uniform_log_prob(action_mask)
-                else:
-                    action, log_prob, _ = agent.select_action(state, action_mask)
+                action, log_prob, _ = agent.select_action(state, action_mask)
 
             if isinstance(log_prob, torch.Tensor):
                 log_prob = log_prob.item()
@@ -219,6 +225,22 @@ def play_game(n_actions, game_id, epoch, opponent_model_path=None):
                 else:
                     blue_memory.update_last_done()
 
+        # ── Capture penalty for the opponent ──────────────────────────
+        # When a capture completes, retroactively penalise the
+        # opponent's last action — that was the move that left the
+        # piece(s) vulnerable to capture.  The penalty is -10 per
+        # piece taken (symmetric with the +10 capture bonus).
+        if turn_complete:
+            last_move = env.game.moves[-1] if env.game.moves else ""
+            if "x" in last_move:
+                num_captured = last_move.count("x")
+                capture_penalty = -10.0 * num_captured
+                victim_color = BLUE if acting_color == RED else RED
+                if victim_color == BLUE and blue_memory.rewards:
+                    blue_memory.rewards[-1] += capture_penalty
+                elif victim_color == RED and red_memory.rewards:
+                    red_memory.rewards[-1] += capture_penalty
+
         log_prob_list.append(log_prob)
         reward_list.append(reward)
 
@@ -230,6 +252,21 @@ def play_game(n_actions, game_id, epoch, opponent_model_path=None):
                 red_win = 1
 
         state = next_state
+
+    # ── Terminal reward fix ───────────────────────────────────────────
+    # When one side's move ends the game, only the winner's memory gets
+    # the terminal reward (+100 from reward_end_game).  The loser's last
+    # memory entry still has just shaped rewards.  Fix: add -100 to the
+    # loser's last stored reward so the PPO update properly penalises
+    # losing positions.  Also ensure done=True on both sides (handles
+    # edge case when action_mask==0 ends the game without going through
+    # the normal done-flag path).
+    if blue_win == 1 and red_memory.rewards:
+        red_memory.rewards[-1] += -100
+    elif red_win == 1 and blue_memory.rewards:
+        blue_memory.rewards[-1] += -100
+    blue_memory.update_last_done()
+    red_memory.update_last_done()
 
     return {
         "blue_memory": blue_memory,

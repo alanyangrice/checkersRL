@@ -260,6 +260,21 @@ def main():
                         else:
                             blue_memory.update_last_done()
 
+                # ── Capture penalty for the opponent ──────────────────────
+                # When a capture completes, retroactively penalise the
+                # opponent's last action — that was the move that left the
+                # piece(s) vulnerable.  -10 per piece taken.
+                if turn_complete:
+                    last_move = env.game.moves[-1] if env.game.moves else ""
+                    if "x" in last_move:
+                        num_captured = last_move.count("x")
+                        capture_penalty = -10.0 * num_captured
+                        victim_color = BLUE if acting_color == RED else RED
+                        if victim_color == BLUE and blue_memory.rewards:
+                            blue_memory.rewards[-1] += capture_penalty
+                        elif victim_color == RED and red_memory.rewards:
+                            red_memory.rewards[-1] += capture_penalty
+
                 log_prob_list.append(log_prob)
                 reward_list.append(reward)
 
@@ -273,6 +288,17 @@ def main():
                         ties += 1
 
                 state = next_state
+
+            # ── Terminal reward fix ───────────────────────────────────
+            # The loser's last memory entry never received -100.  Fix it.
+            blue_win = 1 if winner == BLUE else 0
+            red_win = 1 if winner == RED else 0
+            if blue_win == 1 and red_memory.rewards:
+                red_memory.rewards[-1] += -100
+            elif red_win == 1 and blue_memory.rewards:
+                blue_memory.rewards[-1] += -100
+            blue_memory.update_last_done()
+            red_memory.update_last_done()
 
             # Write detailed data
             with open(detailed_csv_file_path, mode='a', newline='') as file:

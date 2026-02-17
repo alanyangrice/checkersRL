@@ -37,10 +37,42 @@ class Game:
         """Switches the player's turn."""
         self.turn = BLUE if self.turn == RED else RED
 
+    # Colours for highlighting the last completed move
+    _HIGHLIGHT_FROM = (255, 215, 0)   # Gold  — source square
+    _HIGHLIGHT_TO   = (0, 200, 100)   # Green — destination square
+
     def update_board(self, screen):
-        """Clears the board of previously highlighted selected piece and possible moves."""
-        self.board.draw(screen)
+        """Redraws the board, highlights the last move, then updates the display."""
+        self.board.draw(screen, update=False)
+        self._draw_last_move_highlight(screen)
         pygame.display.update()
+
+    def _draw_last_move_highlight(self, screen):
+        """Draw border highlights on the from/to squares of the most recent move."""
+        if not self.moves:
+            return
+
+        move_str = self.moves[-1]
+        if "x" in move_str:
+            squares = list(map(int, move_str.split("x")))
+        elif "-" in move_str:
+            squares = list(map(int, move_str.split("-")))
+        else:
+            return
+
+        # Highlight source square (gold)
+        fr, fc = board_number_to_position(squares[0])
+        pygame.draw.rect(
+            screen, self._HIGHLIGHT_FROM,
+            (fc * SQUARE_SIZE, fr * SQUARE_SIZE, SQUARE_SIZE, SQUARE_SIZE), 4,
+        )
+
+        # Highlight destination square (green)
+        tr, tc = board_number_to_position(squares[-1])
+        pygame.draw.rect(
+            screen, self._HIGHLIGHT_TO,
+            (tc * SQUARE_SIZE, tr * SQUARE_SIZE, SQUARE_SIZE, SQUARE_SIZE), 4,
+        )
 
     def highlight_piece(self, screen):
         """Highlights the selected piece by drawing a yellow border around it."""

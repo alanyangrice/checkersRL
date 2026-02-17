@@ -407,7 +407,7 @@ class CheckersEnv(gym.Env):
             return self._tie_reward(), True, "Tie"
         elif winner is not None:
             return -100, True, copy.deepcopy(winner)
-        return -np.sqrt(len(self.game.moves)) / 10, False, None
+        return -np.sqrt(len(self.game.moves)) / 5, False, None
 
     # ------------------------------------------------------------------
     # Private utilities
