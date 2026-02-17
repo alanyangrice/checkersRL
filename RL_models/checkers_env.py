@@ -409,6 +409,10 @@ class CheckersEnv(gym.Env):
             return -100, True, copy.deepcopy(winner)
         return -np.sqrt(len(self.game.moves)) / 10, False, None
 
+    # ------------------------------------------------------------------
+    # Private utilities
+    # ------------------------------------------------------------------
+    
     def _tie_reward(self):
         """Tie penalty that scales with material advantage and total pieces.
 
@@ -444,15 +448,11 @@ class CheckersEnv(gym.Env):
         total_material = my_material + opp_material
         advantage = my_material - opp_material   # positive = I had more
 
-        base = -30
-        adv_penalty = -5 * max(advantage, 0)     # only the stronger side pays
+        base = -50
+        adv_penalty = -8 * max(advantage, 0)     # only the stronger side pays
         stall_penalty = -2 * total_material       # more pieces left = worse
 
         return base + adv_penalty + stall_penalty
-
-    # ------------------------------------------------------------------
-    # Private utilities
-    # ------------------------------------------------------------------
 
     def _remaining_diff(self, board):
         blue_king = sum(1 for row in board for p in row if p != 0 and p.color == BLUE and p.king)

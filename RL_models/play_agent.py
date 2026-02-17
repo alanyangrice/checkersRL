@@ -14,14 +14,30 @@ from RL_models.MCTS.mcts_search import MCTSSearch
 from RL_models.checkers_env import CheckersEnv
 
 
-def load_network(device):
-    """Load the best available model (AlphaZero > PPO parallel > PPO sequential).
+def load_network(device, epoch=None):
+    """Load a model checkpoint.
 
-    Returns (network, mode_name) where network is a PPOPolicyNetwork on the device.
+    If *epoch* is given, loads that specific epoch from the PPO parallel folder.
+    Otherwise, loads the latest available model (AlphaZero > PPO parallel > PPO sequential).
+
+    Returns (network, mode_name).
     """
     base_dir = os.path.dirname(os.path.abspath(__file__))
     input_shape = (4, 8, 8)
     network = PPOPolicyNetwork(input_shape, NUM_ACTIONS).to(device)
+
+    # If a specific epoch was requested, go straight to it
+    if epoch is not None:
+        model_path = os.path.join(
+            base_dir, "PPO_Model", "PPO_saved_models_parallel", f"agent_epoch_{epoch}.pt"
+        )
+        if not os.path.exists(model_path):
+            print(f"ERROR: No checkpoint found at {model_path}")
+            sys.exit(1)
+        print(f"Loading PPO-parallel model from epoch {epoch}: {model_path}")
+        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+        network.load_state_dict(checkpoint["model_state_dict"])
+        return network, f"PPO-parallel (epoch {epoch})"
 
     # Priority order for loading checkpoints
     search_dirs = [
@@ -45,13 +61,13 @@ def load_network(device):
     return network, "random"
 
 
-def play_agent(use_mcts=False, num_simulations=100):
+def play_agent(use_mcts=False, num_simulations=100, epoch=None):
     pygame.init()
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
     pygame.display.set_caption("Checkers Game - Play Against AI")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    network, mode_name = load_network(device)
+    network, mode_name = load_network(device, epoch=epoch)
     network.eval()
 
     # Set up the AI action selector
@@ -157,6 +173,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Play checkers against the AI")
     parser.add_argument("--mcts", action="store_true", help="Use MCTS for AI moves (stronger but slower)")
     parser.add_argument("--simulations", type=int, default=100, help="MCTS simulations per move (default: 100)")
+    parser.add_argument("--epoch", type=int, default=None,
+                        help="Load a specific training epoch (e.g. --epoch 230). "
+                             "If omitted, loads the latest checkpoint.")
     args = parser.parse_args()
 
-    play_agent(use_mcts=args.mcts, num_simulations=args.simulations)
+    play_agent(use_mcts=args.mcts, num_simulations=args.simulations, epoch=args.epoch)
