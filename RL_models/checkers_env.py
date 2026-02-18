@@ -90,8 +90,13 @@ class CheckersEnv(gym.Env):
 
         # Handle no-legal-moves (current player loses)
         if self._action_mask.sum() == 0:
-            winner = BLUE if self.game.turn == RED else RED
+            loser_color = self.game.turn
+            winner = BLUE if loser_color == RED else RED
             reward = -100.0
+
+            blue_adj = -100.0 if loser_color == BLUE else 0.0
+            red_adj = -100.0 if loser_color == RED else 0.0
+
             self.game.switch_turn()
             self._update_action_mask()
             obs = self.get_board_state()
@@ -99,6 +104,8 @@ class CheckersEnv(gym.Env):
                 "turn": self.game.turn,
                 "turn_complete": True,
                 "winner": copy.deepcopy(winner),
+                "blue_reward_adjustment": blue_adj,
+                "red_reward_adjustment": red_adj,
             }
 
         # Validate / fallback for invalid action
@@ -158,6 +165,8 @@ class CheckersEnv(gym.Env):
                 "turn": self.game.turn,
                 "turn_complete": False,
                 "winner": "None",
+                "blue_reward_adjustment": 0.0,
+                "red_reward_adjustment": 0.0,
             }
         else:
             # Turn is complete
@@ -208,6 +217,33 @@ class CheckersEnv(gym.Env):
         # Combine: scaled shaping + full-strength terminal reward
         reward = shaped_reward * SHAPING_SCALE + end_reward
 
+        # --- Per-color reward adjustments for the training loop ----------
+        # These are retroactive penalties applied to the *opponent's* last
+        # memory entry, returned via info so the env owns all reward math.
+        acting_color = self.game.turn
+        opponent_color = RED if acting_color == BLUE else BLUE
+        blue_adj, red_adj = 0.0, 0.0
+
+        # Capture penalty: penalise the opponent whose piece(s) were taken
+        # (-10 per piece, symmetric with the +10 capture bonus).
+        if self._is_capture_turn:
+            num_captured = len(self._current_move_chain) - 1
+            if opponent_color == BLUE:
+                blue_adj -= 10.0 * num_captured
+            else:
+                red_adj -= 10.0 * num_captured
+
+        # Terminal loser penalty: when the acting player wins, the opponent
+        # (loser) needs -100.  (If the acting player loses, their -100 is
+        # already in `reward` from reward_end_game.)
+        if done and winner is not None and winner != "Tie":
+            loser_color = RED if winner == BLUE else BLUE
+            if loser_color != acting_color:
+                if loser_color == BLUE:
+                    blue_adj -= 100.0
+                else:
+                    red_adj -= 100.0
+
         # --- Switch turn ------------------------------------------------
         self.game.switch_turn()
 
@@ -230,6 +266,8 @@ class CheckersEnv(gym.Env):
             "turn": self.game.turn,
             "turn_complete": True,
             "winner": copy.deepcopy(winner) if winner else "None",
+            "blue_reward_adjustment": blue_adj,
+            "red_reward_adjustment": red_adj,
         }
         return obs, reward, done, False, info
 

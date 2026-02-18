@@ -181,9 +181,9 @@ def main():
             first_move = True
             first_move_count = 0
             log_prob_list = []
-            reward_list = []
-            blue_reward = []
-            red_reward = []
+            reward_colors = []
+            blue_offset = len(blue_memory.rewards)
+            red_offset = len(red_memory.rewards)
             winner = "None"
 
             while not done:
@@ -194,8 +194,14 @@ def main():
                     episode_reward += reward
                     total_rewards += reward
                     episode_steps += 1
-                    reward_list.append(reward)
                     log_prob_list.append(0.0)
+
+                    blue_adj = info.get("blue_reward_adjustment", 0.0)
+                    red_adj = info.get("red_reward_adjustment", 0.0)
+                    if blue_adj != 0.0 and blue_memory.rewards:
+                        blue_memory.rewards[-1] += blue_adj
+                    if red_adj != 0.0 and red_memory.rewards:
+                        red_memory.rewards[-1] += red_adj
 
                     if done:
                         winner = info["winner"]
@@ -241,15 +247,14 @@ def main():
                 is_opponent_acting = (opponent is not None and acting_color == opponent_color)
 
                 if not is_opponent_acting:
-                    # Store in the appropriate memory for the current agent
                     if acting_color == BLUE:
                         blue_memory.add(state, action, reward, log_prob, done)
-                        blue_reward.append(reward)
+                        reward_colors.append("blue")
                         if done:
                             red_memory.update_last_done()
                     else:
                         red_memory.add(state, action, reward, log_prob, done)
-                        red_reward.append(reward)
+                        reward_colors.append("red")
                         if done:
                             blue_memory.update_last_done()
                 else:
@@ -260,23 +265,15 @@ def main():
                         else:
                             blue_memory.update_last_done()
 
-                # ── Capture penalty for the opponent ──────────────────────
-                # When a capture completes, retroactively penalise the
-                # opponent's last action — that was the move that left the
-                # piece(s) vulnerable.  -10 per piece taken.
-                if turn_complete:
-                    last_move = env.game.moves[-1] if env.game.moves else ""
-                    if "x" in last_move:
-                        num_captured = last_move.count("x")
-                        capture_penalty = -10.0 * num_captured
-                        victim_color = BLUE if acting_color == RED else RED
-                        if victim_color == BLUE and blue_memory.rewards:
-                            blue_memory.rewards[-1] += capture_penalty
-                        elif victim_color == RED and red_memory.rewards:
-                            red_memory.rewards[-1] += capture_penalty
+                # Apply per-color reward adjustments computed by the env
+                blue_adj = info.get("blue_reward_adjustment", 0.0)
+                red_adj = info.get("red_reward_adjustment", 0.0)
+                if blue_adj != 0.0 and blue_memory.rewards:
+                    blue_memory.rewards[-1] += blue_adj
+                if red_adj != 0.0 and red_memory.rewards:
+                    red_memory.rewards[-1] += red_adj
 
                 log_prob_list.append(log_prob)
-                reward_list.append(reward)
 
                 if done:
                     winner = info["winner"]
@@ -289,16 +286,18 @@ def main():
 
                 state = next_state
 
-            # ── Terminal reward fix ───────────────────────────────────
-            # The loser's last memory entry never received -100.  Fix it.
-            blue_win = 1 if winner == BLUE else 0
-            red_win = 1 if winner == RED else 0
-            if blue_win == 1 and red_memory.rewards:
-                red_memory.rewards[-1] += -100
-            elif red_win == 1 and blue_memory.rewards:
-                blue_memory.rewards[-1] += -100
             blue_memory.update_last_done()
             red_memory.update_last_done()
+
+            reward_list = []
+            bi, ri = blue_offset, red_offset
+            for color in reward_colors:
+                if color == "blue":
+                    reward_list.append((color, blue_memory.rewards[bi]))
+                    bi += 1
+                else:
+                    reward_list.append((color, red_memory.rewards[ri]))
+                    ri += 1
 
             # Write detailed data
             with open(detailed_csv_file_path, mode='a', newline='') as file:
@@ -310,12 +309,12 @@ def main():
                     1 if winner == BLUE else 0,
                     1 if winner == RED else 0,
                     episode_reward,
-                    sum(blue_reward),
-                    sum(red_reward),
+                    sum(blue_memory.rewards[blue_offset:]),
+                    sum(red_memory.rewards[red_offset:]),
                     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     ", ".join(env.game.moves),
                     ", ".join([str(p) for p in log_prob_list]),
-                    ", ".join([str(r) for r in reward_list])
+                    ", ".join(f"{c}:{r}" for c, r in reward_list)
                 ])
 
             total_steps += episode_steps

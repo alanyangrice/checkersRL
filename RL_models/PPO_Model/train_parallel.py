@@ -66,7 +66,7 @@ def write_detailed_csv(file_path, results, batch_start, epoch, num_games):
                 result["opponent"],
                 ", ".join(result["moves"]),
                 ", ".join(map(str, result["log_probs"])),
-                ", ".join(map(str, result["rewards_list"]))
+                ", ".join(f"{c}:{r}" for c, r in result["rewards_list"])
             ])
 
 
@@ -128,7 +128,8 @@ def play_game(n_actions, game_id, epoch, opponent_model_path=None):
 
     episode_reward, episode_steps, max_episode_move_reward = 0, 0, 0
     first_move, first_move_count = True, 0
-    log_prob_list, reward_list, blue_reward, red_reward = [], [], [], []
+    log_prob_list = []
+    reward_colors = []
     blue_win, red_win = 0, 0
 
     while not done:
@@ -138,8 +139,14 @@ def play_game(n_actions, game_id, epoch, opponent_model_path=None):
             next_state, reward, done, _, info = env.step(0)
             episode_reward += reward
             episode_steps += 1
-            reward_list.append(reward)
             log_prob_list.append(0.0)
+
+            blue_adj = info.get("blue_reward_adjustment", 0.0)
+            red_adj = info.get("red_reward_adjustment", 0.0)
+            if blue_adj != 0.0 and blue_memory.rewards:
+                blue_memory.rewards[-1] += blue_adj
+            if red_adj != 0.0 and red_memory.rewards:
+                red_memory.rewards[-1] += red_adj
 
             if done:
                 winner = info["winner"]
@@ -210,12 +217,12 @@ def play_game(n_actions, game_id, epoch, opponent_model_path=None):
         if not is_opponent_acting:
             if acting_color == BLUE:
                 blue_memory.add(state, action, reward, log_prob, done)
-                blue_reward.append(reward)
+                reward_colors.append("blue")
                 if done:
                     red_memory.update_last_done()
             else:
                 red_memory.add(state, action, reward, log_prob, done)
-                red_reward.append(reward)
+                reward_colors.append("red")
                 if done:
                     blue_memory.update_last_done()
         else:
@@ -225,24 +232,15 @@ def play_game(n_actions, game_id, epoch, opponent_model_path=None):
                 else:
                     blue_memory.update_last_done()
 
-        # ── Capture penalty for the opponent ──────────────────────────
-        # When a capture completes, retroactively penalise the
-        # opponent's last action — that was the move that left the
-        # piece(s) vulnerable to capture.  The penalty is -10 per
-        # piece taken (symmetric with the +10 capture bonus).
-        if turn_complete:
-            last_move = env.game.moves[-1] if env.game.moves else ""
-            if "x" in last_move:
-                num_captured = last_move.count("x")
-                capture_penalty = -10.0 * num_captured
-                victim_color = BLUE if acting_color == RED else RED
-                if victim_color == BLUE and blue_memory.rewards:
-                    blue_memory.rewards[-1] += capture_penalty
-                elif victim_color == RED and red_memory.rewards:
-                    red_memory.rewards[-1] += capture_penalty
+        # Apply per-color reward adjustments computed by the env
+        blue_adj = info.get("blue_reward_adjustment", 0.0)
+        red_adj = info.get("red_reward_adjustment", 0.0)
+        if blue_adj != 0.0 and blue_memory.rewards:
+            blue_memory.rewards[-1] += blue_adj
+        if red_adj != 0.0 and red_memory.rewards:
+            red_memory.rewards[-1] += red_adj
 
         log_prob_list.append(log_prob)
-        reward_list.append(reward)
 
         if done:
             winner = info["winner"]
@@ -253,25 +251,26 @@ def play_game(n_actions, game_id, epoch, opponent_model_path=None):
 
         state = next_state
 
-    # ── Terminal reward fix ───────────────────────────────────────────
-    # When one side's move ends the game, only the winner's memory gets
-    # the terminal reward (+100 from reward_end_game).  The loser's last
-    # memory entry still has just shaped rewards.  Fix: add -100 to the
-    # loser's last stored reward so the PPO update properly penalises
-    # losing positions.  Also ensure done=True on both sides (handles
-    # edge case when action_mask==0 ends the game without going through
-    # the normal done-flag path).
-    if blue_win == 1 and red_memory.rewards:
-        red_memory.rewards[-1] += -100
-    elif red_win == 1 and blue_memory.rewards:
-        blue_memory.rewards[-1] += -100
     blue_memory.update_last_done()
     red_memory.update_last_done()
+
+    reward_list = []
+    bi, ri = 0, 0
+    for color in reward_colors:
+        if color == "blue":
+            reward_list.append((color, blue_memory.rewards[bi]))
+            bi += 1
+        else:
+            reward_list.append((color, red_memory.rewards[ri]))
+            ri += 1
 
     return {
         "blue_memory": blue_memory,
         "red_memory": red_memory,
-        "rewards": {"blue": sum(blue_reward), "red": sum(red_reward)},
+        "rewards": {
+            "blue": sum(blue_memory.rewards) if blue_memory.rewards else 0,
+            "red": sum(red_memory.rewards) if red_memory.rewards else 0,
+        },
         "blue_win": blue_win,
         "red_win": red_win,
         "moves": env.game.moves,
