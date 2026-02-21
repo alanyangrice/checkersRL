@@ -1,0 +1,856 @@
+"""GPU-accelerated parallel training for the Checkers PPO agent.
+
+Architecture:
+    - Main process hosts a GPU Inference Server thread that batches
+      forward-pass requests from many CPU workers.
+    - CPU worker processes run game simulation (CheckersEnv) and send
+      (state, action_mask) to the server when the current agent needs
+      to act.  Opponent inference stays CPU-local in each worker.
+    - After all games finish, the main process collects memories and
+      runs the standard PPO update on GPU (unchanged from train_parallel).
+
+Run from repo root:
+    python -m RL_models.PPO_Model.train_gpu_parallel
+"""
+
+import os
+import csv
+import random
+import zipfile
+import threading
+import time
+from datetime import datetime
+from multiprocessing import Process, Queue, Event
+from queue import Empty as QueueEmpty
+
+import torch
+import numpy as np
+from torch.distributions import Categorical
+
+from RL_models.checkers_env import CheckersEnv
+from RL_models.PPO_Model.Agent import PPOAgent, get_device
+from RL_models.PPO_Model.Memory import Memory
+from RL_models.PPO_Model.OpponentPool import OpponentPool
+from RL_models.PPO_Model.PolicyNetwork import PPOPolicyNetwork
+from RL_models.PPO_Model import training_config as cfg
+from checkers_game.constants import BLUE, RED, NUM_ACTIONS
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Sentinel values
+# ─────────────────────────────────────────────────────────────────────
+_SHUTDOWN = "SHUTDOWN"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# GPU Inference Server (runs as a thread in the main process)
+# ─────────────────────────────────────────────────────────────────────
+
+class InferenceServer(threading.Thread):
+    """Batches inference requests from workers and runs them on GPU.
+
+    Protocol:
+        request_queue items:  (worker_id, state_np, mask_np)
+        response_queues[wid]: (action_int, log_prob_float, entropy_float)
+    """
+
+    def __init__(self, model, device, request_queue, response_queues,
+                 stop_event, max_batch=64, max_wait_ms=3.0):
+        super().__init__(daemon=True)
+        self.model = model
+        self.device = device
+        self.request_queue = request_queue
+        self.response_queues = response_queues
+        self.stop_event = stop_event
+        self.max_batch = max_batch
+        self.max_wait_s = max_wait_ms / 1000.0
+        # Pre-allocate the mask constant once
+        self._neg_inf = torch.tensor(-1e10, device=device)
+
+    def run(self):
+        self.model.eval()
+        req_q = self.request_queue
+
+        while not self.stop_event.is_set():
+            batch = []
+
+            # Block until at least one request arrives (or timeout)
+            try:
+                item = req_q.get(timeout=0.01)
+                if item == _SHUTDOWN:
+                    break
+                batch.append(item)
+            except QueueEmpty:
+                continue
+
+            # Drain additional pending requests up to max_batch
+            deadline = time.perf_counter() + self.max_wait_s
+            while len(batch) < self.max_batch:
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    break
+                try:
+                    item = req_q.get_nowait()
+                    if item == _SHUTDOWN:
+                        # Put it back so the outer loop sees it
+                        req_q.put(_SHUTDOWN)
+                        break
+                    batch.append(item)
+                except QueueEmpty:
+                    # Brief sleep then try once more before committing
+                    if remaining > 0.0005:
+                        time.sleep(0.0003)
+                    else:
+                        break
+
+            if not batch:
+                continue
+
+            # ── Batched forward pass ──────────────────────────────
+            worker_ids = [b[0] for b in batch]
+            states_np = np.stack([b[1] for b in batch])
+            masks_np = np.stack([b[2] for b in batch])
+
+            states_t = torch.from_numpy(states_np).to(self.device)
+            masks_t = torch.from_numpy(masks_np).to(self.device)
+
+            with torch.no_grad():
+                logits, _ = self.model(states_t)
+
+            masked_logits = logits + torch.where(
+                masks_t > 0, 0.0, self._neg_inf
+            )
+            probs = Categorical(logits=masked_logits)
+            actions = probs.sample()
+            log_probs = probs.log_prob(actions)
+            entropies = probs.entropy()
+
+            # Move results to CPU once
+            actions_cpu = actions.cpu().numpy()
+            log_probs_cpu = log_probs.cpu().numpy()
+            entropies_cpu = entropies.cpu().numpy()
+
+            # ── Dispatch results to per-worker queues ─────────────
+            for i, wid in enumerate(worker_ids):
+                self.response_queues[wid].put((
+                    int(actions_cpu[i]),
+                    float(log_probs_cpu[i]),
+                    float(entropies_cpu[i]),
+                ))
+
+    def update_weights(self, state_dict):
+        """Hot-reload model weights (called from main thread between epochs)."""
+        self.model.load_state_dict(state_dict)
+        self.model.eval()
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Helper functions (shared with workers — must be picklable / top-level)
+# ─────────────────────────────────────────────────────────────────────
+
+def random_action_from_mask(mask):
+    valid = np.where(mask > 0)[0]
+    if len(valid) == 0:
+        return 0
+    return int(np.random.choice(valid))
+
+
+def uniform_log_prob(mask):
+    n = int(mask.sum())
+    if n <= 0:
+        return 0.0
+    return float(np.log(1.0 / n))
+
+
+def get_curriculum_options(epoch):
+    return None  # standard 12v12 for all epochs
+
+
+def zip_csv_file(csv_file_path, zip_file_path):
+    """Compress and remove the CSV file."""
+    with zipfile.ZipFile(zip_file_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        zipf.write(csv_file_path, arcname=os.path.basename(csv_file_path))
+    os.remove(csv_file_path)
+
+
+def write_detailed_csv(file_path, results, batch_start, epoch, num_games):
+    """Write game details to a CSV file."""
+    with open(file_path, mode='a', newline='') as file:
+        writer = csv.writer(file)
+        for game_id, result in enumerate(results, start=batch_start + 1):
+            writer.writerow([
+                game_id + epoch * num_games,
+                result["blue_win"],
+                result["red_win"],
+                sum(result["rewards"].values()),
+                result["rewards"]["blue"],
+                result["rewards"]["red"],
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                result["opponent"],
+                ", ".join(result["moves"]),
+                ", ".join(map(str, result["log_probs"])),
+                ", ".join(f"{c}:{r}" for c, r in result["rewards_list"])
+            ])
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Worker process — plays games, uses GPU server for agent inference
+# ─────────────────────────────────────────────────────────────────────
+
+def _load_opponent(n_actions, opp_path, cache):
+    """Return a cached CPU opponent agent."""
+    if opp_path not in cache:
+        opp = PPOAgent((4, 8, 8), n_actions, device=torch.device("cpu"))
+        checkpoint = torch.load(opp_path, map_location="cpu", weights_only=False)
+        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+            state_dict = checkpoint["model_state_dict"]
+        else:
+            state_dict = checkpoint
+        opp.policy.load_state_dict(state_dict)
+        opp.policy.eval()
+        cache[opp_path] = opp
+    return cache[opp_path]
+
+
+def _play_game(worker_id, request_queue, response_queue,
+               n_actions, epoch, opponent_model_path, opp_cache):
+    """Play one game using the GPU server for agent inference."""
+    env = CheckersEnv()
+
+    # Optionally load a pool opponent (CPU-local, cached)
+    opponent = None
+    opponent_color = None
+    opponent_label = "self"
+    if opponent_model_path is not None:
+        opponent = _load_opponent(n_actions, opponent_model_path, opp_cache)
+        opponent_color = BLUE if random.random() < 0.5 else RED
+        opponent_label = os.path.splitext(os.path.basename(opponent_model_path))[0]
+
+    blue_memory, red_memory = Memory(), Memory()
+    curriculum_opts = get_curriculum_options(epoch)
+    state, _ = env.reset(options=curriculum_opts)
+    done = False
+
+    episode_reward, episode_steps, max_episode_move_reward = 0, 0, 0
+    first_move, first_move_count = True, 0
+    log_prob_list = []
+    reward_colors = []
+    blue_win, red_win = 0, 0
+
+    while not done:
+        action_mask = env.get_action_mask()
+
+        if action_mask.sum() == 0:
+            next_state, reward, done, _, info = env.step(0)
+            episode_reward += reward
+            episode_steps += 1
+            log_prob_list.append(0.0)
+
+            blue_adj = info.get("blue_reward_adjustment", 0.0)
+            red_adj = info.get("red_reward_adjustment", 0.0)
+            if blue_adj != 0.0 and blue_memory.rewards:
+                blue_memory.rewards[-1] += blue_adj
+            if red_adj != 0.0 and red_memory.rewards:
+                red_memory.rewards[-1] += red_adj
+
+            if done:
+                winner = info["winner"]
+                if winner == BLUE:
+                    blue_win = 1
+                elif winner == RED:
+                    red_win = 1
+
+            state = next_state
+            continue
+
+        # Determine who acts
+        is_opponent_turn = (opponent is not None and env.game.turn == opponent_color)
+
+        if is_opponent_turn:
+            if random.random() < cfg.POOL_EPSILON:
+                action = random_action_from_mask(action_mask)
+                log_prob = uniform_log_prob(action_mask)
+            else:
+                with torch.no_grad():
+                    action, log_prob, _ = opponent.select_action(state, action_mask)
+                if isinstance(log_prob, torch.Tensor):
+                    log_prob = log_prob.item()
+        else:
+            # Current agent — use GPU server or random exploration
+            epsilon = cfg.get_epsilon(epoch)
+            use_random_first = False
+
+            if use_random_first:
+                action = random_action_from_mask(action_mask)
+                log_prob = uniform_log_prob(action_mask)
+                first_move_count += 1
+                if first_move_count > 1:
+                    first_move = False
+            elif random.random() < epsilon:
+                action = random_action_from_mask(action_mask)
+                log_prob = uniform_log_prob(action_mask)
+            else:
+                # ── GPU inference via server ──────────────────────
+                request_queue.put((worker_id, state, action_mask))
+                action, log_prob, _ = response_queue.get()
+
+            if isinstance(log_prob, torch.Tensor):
+                log_prob = log_prob.item()
+
+        next_state, reward, done, _, info = env.step(action)
+
+        episode_reward += reward
+        episode_steps += 1
+
+        if reward > max_episode_move_reward and not done:
+            max_episode_move_reward = reward
+
+        # Memory routing: only store current agent's experiences
+        turn_complete = info.get("turn_complete", True)
+        if turn_complete:
+            acting_color = RED if env.game.turn == BLUE else BLUE
+        else:
+            acting_color = env.game.turn
+
+        is_opponent_acting = (opponent is not None and acting_color == opponent_color)
+
+        if not is_opponent_acting:
+            if acting_color == BLUE:
+                blue_memory.add(state, action, reward, log_prob, done, action_mask)
+                reward_colors.append("blue")
+                if done:
+                    red_memory.update_last_done()
+            else:
+                red_memory.add(state, action, reward, log_prob, done, action_mask)
+                reward_colors.append("red")
+                if done:
+                    blue_memory.update_last_done()
+        else:
+            if done:
+                if acting_color == BLUE:
+                    red_memory.update_last_done()
+                else:
+                    blue_memory.update_last_done()
+
+        # Apply per-color reward adjustments computed by the env
+        blue_adj = info.get("blue_reward_adjustment", 0.0)
+        red_adj = info.get("red_reward_adjustment", 0.0)
+        if blue_adj != 0.0 and blue_memory.rewards:
+            blue_memory.rewards[-1] += blue_adj
+        if red_adj != 0.0 and red_memory.rewards:
+            red_memory.rewards[-1] += red_adj
+
+        log_prob_list.append(log_prob)
+
+        if done:
+            winner = info["winner"]
+            if winner == BLUE:
+                blue_win = 1
+            elif winner == RED:
+                red_win = 1
+
+        state = next_state
+
+    blue_memory.update_last_done()
+    red_memory.update_last_done()
+
+    reward_list = []
+    bi, ri = 0, 0
+    for color in reward_colors:
+        if color == "blue":
+            reward_list.append((color, blue_memory.rewards[bi]))
+            bi += 1
+        else:
+            reward_list.append((color, red_memory.rewards[ri]))
+            ri += 1
+
+    return {
+        "blue_memory": blue_memory,
+        "red_memory": red_memory,
+        "rewards": {
+            "blue": sum(blue_memory.rewards) if blue_memory.rewards else 0,
+            "red": sum(red_memory.rewards) if red_memory.rewards else 0,
+        },
+        "blue_win": blue_win,
+        "red_win": red_win,
+        "moves": env.game.moves,
+        "log_probs": log_prob_list,
+        "rewards_list": reward_list,
+        "episode_reward": episode_reward,
+        "episode_steps": episode_steps,
+        "max_episode_move_reward": max_episode_move_reward,
+        "opponent": opponent_label,
+    }
+
+
+def _play_benchmark_game(worker_id, request_queue, response_queue,
+                         n_actions, opponent_type, opponent_model_path, opp_cache):
+    """Play a single benchmark game using GPU server for agent inference."""
+    env = CheckersEnv()
+
+    opponent = None
+    if opponent_type == "model" and opponent_model_path is not None:
+        opponent = _load_opponent(n_actions, opponent_model_path, opp_cache)
+
+    agent_color = BLUE if random.random() < 0.5 else RED
+    opponent_color = RED if agent_color == BLUE else BLUE
+
+    state, _ = env.reset()
+    done = False
+    steps = 0
+
+    while not done:
+        action_mask = env.get_action_mask()
+
+        if action_mask.sum() == 0:
+            _, _, done, _, info = env.step(0)
+            steps += 1
+            if done:
+                break
+            state = env.get_board_state()
+            continue
+
+        current_turn = env.game.turn
+        if current_turn == agent_color:
+            # Agent plays greedily via GPU server
+            request_queue.put((worker_id, state, action_mask))
+            action, _, _ = response_queue.get()
+        elif opponent_type == "random":
+            action = random_action_from_mask(action_mask)
+        else:
+            with torch.no_grad():
+                action, _, _ = opponent.select_action(state, action_mask)
+
+        next_state, _, done, _, info = env.step(action)
+        steps += 1
+        state = next_state
+
+    winner = info.get("winner", "Tie")
+    agent_win = 1 if winner == agent_color else 0
+    opponent_win = 1 if (winner != agent_color and winner != "Tie" and winner != "None") else 0
+    tie = 1 if winner == "Tie" else 0
+
+    return {
+        "agent_color": "BLUE" if agent_color == BLUE else "RED",
+        "agent_win": agent_win,
+        "opponent_win": opponent_win,
+        "tie": tie,
+        "steps": steps,
+    }
+
+
+_TASK_DONE = None  # Sentinel pushed into task_queue to signal workers to exit
+
+
+def worker_fn(worker_id, request_queue, response_queue, results_queue,
+              n_actions, task_queue, progress_queue):
+    """Top-level worker process entry point with dynamic task scheduling.
+
+    Workers pull tasks from a shared task_queue until they receive a sentinel.
+    Each task is a (task_index, task_dict) tuple.  Results are sent back with
+    the original task_index so the main process can reassemble ordering.
+
+    task_dict keys:
+        mode:  "train" or "benchmark"
+        epoch: (train only)
+        opponent_model_path: path or None
+        opponent_type: (benchmark only) "random" or "model"
+    """
+    opp_cache = {}  # per-worker opponent model cache
+    games_played = 0
+
+    while True:
+        item = task_queue.get()
+        if item is _TASK_DONE:
+            break
+
+        task_index, task = item
+
+        if task["mode"] == "train":
+            result = _play_game(
+                worker_id, request_queue, response_queue,
+                n_actions, task["epoch"], task["opponent_model_path"], opp_cache,
+            )
+        else:  # benchmark
+            result = _play_benchmark_game(
+                worker_id, request_queue, response_queue,
+                n_actions, task["opponent_type"],
+                task["opponent_model_path"], opp_cache,
+            )
+
+        results_queue.put((task_index, result))
+        games_played += 1
+
+        if games_played % 100 == 0:
+            progress_queue.put((worker_id, games_played))
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Orchestration helpers
+# ─────────────────────────────────────────────────────────────────────
+
+def _run_games_on_gpu(model, device, n_actions, game_tasks, num_workers,
+                      label="games"):
+    """Spin up workers + inference server, play all game_tasks, return results.
+
+    Uses dynamic task scheduling: a shared task queue that workers pull from
+    as they finish games.  Faster workers automatically get more work, keeping
+    all CPUs busy until the very last game completes (no straggler tail).
+
+    Args:
+        model: PPOPolicyNetwork already on `device` (GPU).
+        game_tasks: list of task dicts (see worker_fn).
+        num_workers: number of CPU worker processes.
+        label: for progress printing.
+
+    Returns:
+        list of result dicts in the original task order.
+    """
+    request_queue = Queue()
+    response_queues = [Queue() for _ in range(num_workers)]
+    results_queue = Queue()
+    progress_queue = Queue()
+    task_queue = Queue()
+    stop_event = threading.Event()
+
+    # Start inference server thread
+    server = InferenceServer(
+        model, device, request_queue, response_queues, stop_event,
+        max_batch=num_workers * 2,
+    )
+    server.start()
+
+    # Fill the shared task queue (workers pull dynamically)
+    for i, task in enumerate(game_tasks):
+        task_queue.put((i, task))
+    # Add sentinel for each worker so they know when to stop
+    for _ in range(num_workers):
+        task_queue.put(_TASK_DONE)
+
+    # Start worker processes
+    workers = []
+    for wid in range(num_workers):
+        p = Process(
+            target=worker_fn,
+            args=(wid, request_queue, response_queues[wid], results_queue,
+                  n_actions, task_queue, progress_queue),
+        )
+        p.start()
+        workers.append(p)
+
+    # Collect results as they arrive
+    total_tasks = len(game_tasks)
+    result_map = {}
+    reported = 0
+    log_interval = 500
+
+    while len(result_map) < total_tasks:
+        try:
+            task_index, result = results_queue.get(timeout=1.0)
+            result_map[task_index] = result
+
+            games_done = len(result_map)
+            if games_done - reported >= log_interval or games_done == total_tasks:
+                alive = sum(1 for p in workers if p.is_alive())
+                print(f"  {label}: {games_done}/{total_tasks} finished "
+                      f"({alive} workers active)")
+                reported = games_done
+        except:
+            pass
+
+    # Stop server
+    stop_event.set()
+    request_queue.put(_SHUTDOWN)
+    server.join(timeout=5)
+
+    # Wait for workers
+    for p in workers:
+        p.join(timeout=5)
+
+    # Reassemble results in original task order
+    return [result_map[i] for i in range(total_tasks)]
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Benchmark
+# ─────────────────────────────────────────────────────────────────────
+
+def run_benchmark(model, device, n_actions, num_workers,
+                  reference_model_path, num_games=200):
+    """Evaluate the agent against random and reference opponents using GPU server."""
+    tasks = []
+
+    # vs Random
+    for _ in range(num_games):
+        tasks.append({
+            "mode": "benchmark",
+            "opponent_type": "random",
+            "opponent_model_path": None,
+        })
+
+    # vs Reference model
+    has_ref = reference_model_path and os.path.exists(reference_model_path)
+    if has_ref:
+        for _ in range(num_games):
+            tasks.append({
+                "mode": "benchmark",
+                "opponent_type": "model",
+                "opponent_model_path": reference_model_path,
+            })
+
+    all_results = _run_games_on_gpu(
+        model, device, n_actions, tasks, num_workers, label="benchmark"
+    )
+
+    results = {}
+    random_results = all_results[:num_games]
+    wins = sum(r["agent_win"] for r in random_results)
+    losses = sum(r["opponent_win"] for r in random_results)
+    ties_count = sum(r["tie"] for r in random_results)
+    avg_steps = sum(r["steps"] for r in random_results) / num_games
+    results["vs_random"] = {
+        "win_rate": wins / num_games,
+        "loss_rate": losses / num_games,
+        "tie_rate": ties_count / num_games,
+        "avg_steps": avg_steps,
+    }
+
+    if has_ref:
+        ref_results = all_results[num_games:]
+        wins = sum(r["agent_win"] for r in ref_results)
+        losses = sum(r["opponent_win"] for r in ref_results)
+        ties_count = sum(r["tie"] for r in ref_results)
+        avg_steps = sum(r["steps"] for r in ref_results) / num_games
+        results["vs_reference"] = {
+            "win_rate": wins / num_games,
+            "loss_rate": losses / num_games,
+            "tie_rate": ties_count / num_games,
+            "avg_steps": avg_steps,
+        }
+
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Main training loop
+# ─────────────────────────────────────────────────────────────────────
+
+def train_gpu_parallel(num_epochs=cfg.NUM_EPOCHS, num_games=cfg.NUM_GAMES,
+                       n_actions=NUM_ACTIONS, num_workers=None):
+    """GPU-accelerated parallelized training loop for the Checkers PPO agent.
+
+    Args:
+        num_workers: Number of CPU worker processes. Defaults to
+                     cfg.GPU_WORKER_FRACTION of cpu_count.
+    """
+    input_shape = (4, 8, 8)
+    device = get_device()
+    agent = PPOAgent(
+        input_shape, n_actions, device=device,
+        lr=cfg.LEARNING_RATE, gamma=cfg.GAMMA, eps_clip=cfg.EPS_CLIP,
+        K_epochs=cfg.K_EPOCHS, gae_lambda=cfg.GAE_LAMBDA,
+        augment=cfg.AUGMENT, augment_noise=cfg.AUGMENT_NOISE,
+        mini_batch_size=cfg.MINI_BATCH_SIZE,
+    )
+
+    print(f"Device: {device}")
+    if device.type == "cuda":
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    model_dir = os.path.join(base_dir, "PPO_saved_models_parallel")
+    os.makedirs(model_dir, exist_ok=True)
+
+    # Opponent pool (shared with train_parallel)
+    pool_dir = os.path.join(base_dir, "opponent_pool_parallel")
+    pool = OpponentPool(pool_dir, max_size=cfg.POOL_MAX_SIZE)
+
+    start_epoch = 0
+
+    checkpoints = [f for f in os.listdir(model_dir)
+                   if f.startswith("agent_epoch_") and f.endswith(".pt")]
+    if checkpoints:
+        latest = max(checkpoints, key=lambda f: int(f.split("_")[-1].split(".")[0]))
+        checkpoint_path = os.path.join(model_dir, latest)
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        agent.policy.load_state_dict(checkpoint['model_state_dict'])
+        agent.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_epoch = checkpoint['epoch']
+        print(f"Resuming training from epoch: {start_epoch}")
+
+    detailed_csv_folder_path = os.path.join(base_dir, "training_progress_detailed_parallel")
+    os.makedirs(detailed_csv_folder_path, exist_ok=True)
+    csv_file_path = os.path.join(base_dir, "training_progress_parallel.csv")
+    benchmark_csv_path = os.path.join(base_dir, "benchmark_parallel.csv")
+
+    # Save the starting model as a permanent reference for benchmarking
+    reference_model_path = os.path.join(model_dir, "reference_model.pt")
+    if not os.path.exists(reference_model_path):
+        torch.save(agent.policy.state_dict(), reference_model_path)
+        print(f"Saved reference model for benchmarking: {reference_model_path}")
+
+    if start_epoch == 0:
+        with open(csv_file_path, mode='w', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow([
+                "epoch", "average_epoch_reward", "average_blue_reward",
+                "average_red_reward", "average_episode_length",
+                "win_rate_blue", "win_rate_red", "tie_rate", "max_move_reward",
+                "epoch_time_s"
+            ])
+
+    if not os.path.exists(benchmark_csv_path):
+        with open(benchmark_csv_path, mode='w', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow([
+                "epoch",
+                "vs_random_win", "vs_random_loss", "vs_random_tie",
+                "vs_random_avg_steps",
+                "vs_reference_win", "vs_reference_loss", "vs_reference_tie",
+                "vs_reference_avg_steps",
+            ])
+
+    if num_workers is None:
+        num_workers = cfg.get_num_workers_gpu()
+
+    for epoch in range(start_epoch, num_epochs):
+        epoch_start = time.perf_counter()
+        print(f"\nStarting epoch {epoch + 1} (pool size: {pool.size})")
+        print(f"Using {num_workers} CPU workers + GPU inference server.")
+
+        # Build task list for this epoch
+        game_tasks = []
+        for game_id in range(num_games):
+            opp_path = None
+            if pool.should_use_opponent(prob=cfg.POOL_OPPONENT_PROB):
+                opp_path = pool.sample()
+            game_tasks.append({
+                "mode": "train",
+                "epoch": epoch,
+                "opponent_model_path": opp_path,
+            })
+
+        # Detailed CSV
+        detailed_csv_file_path = os.path.join(
+            detailed_csv_folder_path, f"detailed_games_epoch_{epoch + 1}.csv"
+        )
+        with open(detailed_csv_file_path, mode='w', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow([
+                "game_number", "blue_win", "red_win", "total_reward",
+                "blue_reward", "red_reward", "time", "opponent", "moves",
+                "log_probs", "reward_list"
+            ])
+
+        # ── Run all games with GPU inference server ───────────────
+        all_results = _run_games_on_gpu(
+            agent.policy, device, n_actions, game_tasks, num_workers,
+            label=f"Epoch {epoch+1}",
+        )
+
+        write_detailed_csv(
+            detailed_csv_file_path, all_results, 0, epoch, num_games
+        )
+
+        # ── Aggregate statistics ──────────────────────────────────
+        total_rewards = {"blue": 0, "red": 0}
+        blue_wins, red_wins, ties, max_move_reward, total_steps = 0, 0, 0, 0, 0
+        pool_games = 0
+
+        for result in all_results:
+            total_rewards["blue"] += result["rewards"]["blue"]
+            total_rewards["red"] += result["rewards"]["red"]
+            total_steps += result["episode_steps"]
+            blue_wins += result["blue_win"]
+            red_wins += result["red_win"]
+            ties += 1 - (result["blue_win"] or result["red_win"])
+            max_move_reward = max(max_move_reward, result["max_episode_move_reward"])
+            if result["opponent"] != "self":
+                pool_games += 1
+
+        # ── PPO update (GPU, unchanged) ───────────────────────────
+        combined_memory = Memory()
+        for result in all_results:
+            combined_memory.extend(result["blue_memory"])
+            combined_memory.extend(result["red_memory"])
+        agent.update(combined_memory)
+
+        # Step the learning rate scheduler
+        agent.step_scheduler()
+
+        # Save to opponent pool periodically
+        if (epoch + 1) % cfg.POOL_SAVE_INTERVAL == 0:
+            pool.save(agent.policy.state_dict(), epoch + 1)
+            print(f"  Saved to opponent pool (size: {pool.size})")
+
+        # Zip detailed CSV
+        epoch_zip_file_path = os.path.join(
+            detailed_csv_folder_path, f"detailed_games_epoch_{epoch + 1}.zip"
+        )
+        zip_csv_file(detailed_csv_file_path, epoch_zip_file_path)
+
+        # Log epoch statistics
+        avg_reward = (total_rewards["blue"] + total_rewards["red"]) / num_games
+        avg_blue_reward = total_rewards["blue"] / num_games
+        avg_red_reward = total_rewards["red"] / num_games
+        avg_steps = total_steps / num_games
+        blue_win_rate = blue_wins / num_games
+        red_win_rate = red_wins / num_games
+        tie_rate = ties / num_games
+        epoch_duration = time.perf_counter() - epoch_start
+
+        with open(csv_file_path, mode='a', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow([
+                epoch + 1, avg_reward, avg_blue_reward, avg_red_reward,
+                avg_steps, blue_win_rate, red_win_rate, tie_rate,
+                max_move_reward, round(epoch_duration, 2)
+            ])
+
+        # Save checkpoint
+        torch.save({
+            'epoch': epoch + 1,
+            'model_state_dict': agent.policy.state_dict(),
+            'optimizer_state_dict': agent.optimizer.state_dict(),
+        }, os.path.join(model_dir, f"agent_epoch_{epoch + 1}.pt"))
+
+        print(f"Epoch {epoch + 1} complete in {epoch_duration:.1f}s. "
+              f"Avg Reward: {avg_reward:.2f}, "
+              f"Blue Win: {blue_win_rate:.2%}, Red Win: {red_win_rate:.2%}, "
+              f"Tie: {tie_rate:.2%}, LR: {agent.scheduler.get_last_lr()[0]:.2e}")
+
+        # ── Benchmark evaluation every N epochs ───────────────────
+        if (epoch + 1) % cfg.BENCHMARK_INTERVAL == 0:
+            print(f"  Running benchmark ({cfg.BENCHMARK_GAMES} games each "
+                  f"vs random & reference)...")
+            bench = run_benchmark(
+                agent.policy, device, n_actions, num_workers,
+                reference_model_path, num_games=cfg.BENCHMARK_GAMES,
+            )
+            vr = bench["vs_random"]
+            print(f"  vs Random:    Win {vr['win_rate']:.1%}  "
+                  f"Loss {vr['loss_rate']:.1%}  "
+                  f"Tie {vr['tie_rate']:.1%}  "
+                  f"AvgSteps {vr['avg_steps']:.0f}")
+
+            vref = bench.get("vs_reference", {})
+            if vref:
+                print(f"  vs Reference: Win {vref['win_rate']:.1%}  "
+                      f"Loss {vref['loss_rate']:.1%}  "
+                      f"Tie {vref['tie_rate']:.1%}  "
+                      f"AvgSteps {vref['avg_steps']:.0f}")
+
+            with open(benchmark_csv_path, mode='a', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow([
+                    epoch + 1,
+                    vr["win_rate"], vr["loss_rate"], vr["tie_rate"],
+                    vr["avg_steps"],
+                    vref.get("win_rate", ""), vref.get("loss_rate", ""),
+                    vref.get("tie_rate", ""), vref.get("avg_steps", ""),
+                ])
+
+
+if __name__ == "__main__":
+    train_gpu_parallel()
+

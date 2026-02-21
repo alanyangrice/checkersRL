@@ -1,9 +1,10 @@
 import os
 import csv
+import time
 import random
 import zipfile
 from datetime import datetime
-from multiprocessing import Pool, cpu_count
+from multiprocessing import Pool
 
 import torch
 import numpy as np
@@ -12,6 +13,7 @@ from RL_models.checkers_env import CheckersEnv
 from RL_models.PPO_Model.Agent import PPOAgent
 from RL_models.PPO_Model.Memory import Memory
 from RL_models.PPO_Model.OpponentPool import OpponentPool
+from RL_models.PPO_Model import training_config as cfg
 from checkers_game.constants import BLUE, RED, NUM_ACTIONS
 
 
@@ -35,9 +37,13 @@ def _get_opponent(n_actions, opp_path):
     global _worker_opponents
     if opp_path not in _worker_opponents:
         opp = PPOAgent((4, 8, 8), n_actions, device=torch.device("cpu"))
-        opp.policy.load_state_dict(
-            torch.load(opp_path, map_location="cpu", weights_only=False)
-        )
+        checkpoint = torch.load(opp_path, map_location="cpu", weights_only=False)
+        # Support both full checkpoints and raw state dicts
+        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+            state_dict = checkpoint["model_state_dict"]
+        else:
+            state_dict = checkpoint
+        opp.policy.load_state_dict(state_dict)
         opp.policy.eval()
         _worker_opponents[opp_path] = opp
     return _worker_opponents[opp_path]
@@ -232,8 +238,7 @@ def play_game(n_actions, game_id, epoch, opponent_model_path=None):
         if is_opponent_turn:
             # Pool opponents get a fixed exploration rate to prevent
             # deterministic loops that trigger 3-fold repetition ties.
-            pool_epsilon = 0.15
-            if random.random() < pool_epsilon:
+            if random.random() < cfg.POOL_EPSILON:
                 action = random_action_from_mask(action_mask)
                 log_prob = uniform_log_prob(action_mask)
             else:
@@ -242,8 +247,7 @@ def play_game(n_actions, game_id, epoch, opponent_model_path=None):
                 if isinstance(log_prob, torch.Tensor):
                     log_prob = log_prob.item()
         else:
-            # Exploration: decay from 100% random to 8% over 100 epochs.
-            epsilon = max(0.08, 1.0 - epoch / 100)
+            epsilon = cfg.get_epsilon(epoch)
 
             # No forced random first moves — full 12v12 from the start,
             # epsilon provides sufficient opening diversity.
@@ -403,10 +407,17 @@ def run_benchmark(agent, n_actions, num_processes, reference_model_path, num_gam
     return results
 
 
-def train_parallel(num_epochs=1000, num_games=2500, batch_size=2500, n_actions=NUM_ACTIONS):
-    """Parallelized training loop for the Checkers PPO agent."""
+def train_parallel(num_epochs=cfg.NUM_EPOCHS, num_games=cfg.NUM_GAMES,
+                   batch_size=cfg.NUM_GAMES, n_actions=NUM_ACTIONS):
+    """Parallelized training loop for the Checkers PPO agent (CPU-only)."""
     input_shape = (4, 8, 8)
-    agent = PPOAgent(input_shape, n_actions)
+    agent = PPOAgent(
+        input_shape, n_actions,
+        lr=cfg.LEARNING_RATE, gamma=cfg.GAMMA, eps_clip=cfg.EPS_CLIP,
+        K_epochs=cfg.K_EPOCHS, gae_lambda=cfg.GAE_LAMBDA,
+        augment=cfg.AUGMENT, augment_noise=cfg.AUGMENT_NOISE,
+        mini_batch_size=cfg.MINI_BATCH_SIZE,
+    )
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
     model_dir = os.path.join(base_dir, "PPO_saved_models_parallel")
@@ -414,11 +425,7 @@ def train_parallel(num_epochs=1000, num_games=2500, batch_size=2500, n_actions=N
 
     # Opponent pool
     pool_dir = os.path.join(base_dir, "opponent_pool_parallel")
-    pool = OpponentPool(pool_dir, max_size=20)
-    pool_save_interval = 10
-    pool_opponent_prob = 0.15
-    benchmark_interval = 10
-    benchmark_games = 500
+    pool = OpponentPool(pool_dir, max_size=cfg.POOL_MAX_SIZE)
 
     start_epoch = 0
 
@@ -448,7 +455,8 @@ def train_parallel(num_epochs=1000, num_games=2500, batch_size=2500, n_actions=N
             writer = csv.writer(file)
             writer.writerow([
                 "epoch", "average_epoch_reward", "average_blue_reward", "average_red_reward",
-                "average_episode_length", "win_rate_blue", "win_rate_red", "tie_rate", "max_move_reward"
+                "average_episode_length", "win_rate_blue", "win_rate_red", "tie_rate", "max_move_reward",
+                "epoch_time_s"
             ])
 
     # Always create benchmark CSV with header if it doesn't exist yet
@@ -461,9 +469,10 @@ def train_parallel(num_epochs=1000, num_games=2500, batch_size=2500, n_actions=N
                 "vs_reference_win", "vs_reference_loss", "vs_reference_tie", "vs_reference_avg_steps",
             ])
 
-    num_processes = max(2, int(cpu_count() * 0.5))
+    num_processes = cfg.get_num_workers_cpu()
 
     for epoch in range(start_epoch, num_epochs):
+        epoch_start = time.perf_counter()
         print(f"Starting epoch {epoch + 1} (pool size: {pool.size})")
 
         temp_model_path = os.path.join(model_dir, f'temp_agent_model_epoch_{epoch + 1}.pt')
@@ -491,6 +500,10 @@ def train_parallel(num_epochs=1000, num_games=2500, batch_size=2500, n_actions=N
         with Pool(num_processes, initializer=_init_worker,
                   initargs=(n_actions, temp_model_path)) as p:
 
+            # Submit all games and collect results, printing progress every 500
+            all_results = []
+            log_interval = 500
+
             for batch_start in range(0, num_games, batch_size):
                 batch_end = min(batch_start + batch_size, num_games)
 
@@ -498,39 +511,43 @@ def train_parallel(num_epochs=1000, num_games=2500, batch_size=2500, n_actions=N
                 game_args = []
                 for game_id in range(batch_start, batch_end):
                     opp_path = None
-                    if pool.should_use_opponent(prob=pool_opponent_prob):
+                    if pool.should_use_opponent(prob=cfg.POOL_OPPONENT_PROB):
                         opp_path = pool.sample()
                     game_args.append((n_actions, game_id, epoch, opp_path))
 
-                results = p.starmap(play_game, game_args)
+                # Process in chunks for progress logging
+                for chunk_start in range(0, len(game_args), log_interval):
+                    chunk_args = game_args[chunk_start : chunk_start + log_interval]
+                    chunk_results = p.starmap(play_game, chunk_args)
+                    all_results.extend(chunk_results)
+                    games_done = batch_start + chunk_start + len(chunk_args)
+                    print(f"  Games {games_done}/{num_games} finished")
 
-                print(f"  Games {batch_end}/{num_games} finished")
+                write_detailed_csv(detailed_csv_file_path, all_results[batch_start:], batch_start, epoch, num_games)
 
-                write_detailed_csv(detailed_csv_file_path, results, batch_start, epoch, num_games)
+            for result in all_results:
+                total_rewards["blue"] += result["rewards"]["blue"]
+                total_rewards["red"] += result["rewards"]["red"]
+                total_steps += result["episode_steps"]
+                blue_wins += result["blue_win"]
+                red_wins += result["red_win"]
+                ties += 1 - (result["blue_win"] or result["red_win"])
+                max_move_reward = max(max_move_reward, result["max_episode_move_reward"])
+                if result["opponent"] != "self":
+                    pool_games += 1
 
-                for result in results:
-                    total_rewards["blue"] += result["rewards"]["blue"]
-                    total_rewards["red"] += result["rewards"]["red"]
-                    total_steps += result["episode_steps"]
-                    blue_wins += result["blue_win"]
-                    red_wins += result["red_win"]
-                    ties += 1 - (result["blue_win"] or result["red_win"])
-                    max_move_reward = max(max_move_reward, result["max_episode_move_reward"])
-                    if result["opponent"] != "self":
-                        pool_games += 1
-
-                # Combine blue + red into ONE memory to avoid doubling GPU work
-                combined_memory = Memory()
-                for result in results:
-                    combined_memory.extend(result["blue_memory"])
-                    combined_memory.extend(result["red_memory"])
-                agent.update(combined_memory)
+            # Combine blue + red into ONE memory to avoid doubling GPU work
+            combined_memory = Memory()
+            for result in all_results:
+                combined_memory.extend(result["blue_memory"])
+                combined_memory.extend(result["red_memory"])
+            agent.update(combined_memory)
 
         # Step the learning rate scheduler
         agent.step_scheduler()
 
         # Save to opponent pool periodically
-        if (epoch + 1) % pool_save_interval == 0:
+        if (epoch + 1) % cfg.POOL_SAVE_INTERVAL == 0:
             pool.save(agent.policy.state_dict(), epoch + 1)
             print(f"  Saved to opponent pool (size: {pool.size})")
 
@@ -543,6 +560,7 @@ def train_parallel(num_epochs=1000, num_games=2500, batch_size=2500, n_actions=N
             os.remove(temp_model_path)
 
         # Log epoch statistics
+        epoch_duration = time.perf_counter() - epoch_start
         avg_reward = (total_rewards["blue"] + total_rewards["red"]) / num_games
         avg_blue_reward = total_rewards["blue"] / num_games
         avg_red_reward = total_rewards["red"] / num_games
@@ -555,7 +573,8 @@ def train_parallel(num_epochs=1000, num_games=2500, batch_size=2500, n_actions=N
             writer = csv.writer(file)
             writer.writerow([
                 epoch + 1, avg_reward, avg_blue_reward, avg_red_reward,
-                avg_steps, blue_win_rate, red_win_rate, tie_rate, max_move_reward
+                avg_steps, blue_win_rate, red_win_rate, tie_rate, max_move_reward,
+                round(epoch_duration, 2)
             ])
 
         # Save checkpoint
@@ -565,16 +584,17 @@ def train_parallel(num_epochs=1000, num_games=2500, batch_size=2500, n_actions=N
             'optimizer_state_dict': agent.optimizer.state_dict(),
         }, os.path.join(model_dir, f"agent_epoch_{epoch + 1}.pt"))
 
-        print(f"Epoch {epoch + 1} complete. Avg Reward: {avg_reward:.2f}, "
+        print(f"Epoch {epoch + 1} complete in {epoch_duration:.1f}s. "
+              f"Avg Reward: {avg_reward:.2f}, "
               f"Blue Win: {blue_win_rate:.2%}, Red Win: {red_win_rate:.2%}, "
               f"Tie: {tie_rate:.2%}, LR: {agent.scheduler.get_last_lr()[0]:.2e}")
 
         # --- Benchmark evaluation every N epochs ---
-        if (epoch + 1) % benchmark_interval == 0:
-            print(f"  Running benchmark ({benchmark_games} games each vs random & reference)...")
+        if (epoch + 1) % cfg.BENCHMARK_INTERVAL == 0:
+            print(f"  Running benchmark ({cfg.BENCHMARK_GAMES} games each vs random & reference)...")
             bench = run_benchmark(
                 agent, n_actions, num_processes,
-                reference_model_path, num_games=benchmark_games,
+                reference_model_path, num_games=cfg.BENCHMARK_GAMES,
             )
             vr = bench["vs_random"]
             print(f"  vs Random:    Win {vr['win_rate']:.1%}  Loss {vr['loss_rate']:.1%}  "
@@ -596,4 +616,4 @@ def train_parallel(num_epochs=1000, num_games=2500, batch_size=2500, n_actions=N
 
 
 if __name__ == "__main__":
-    train_parallel(num_epochs=1000, num_games=5000, batch_size=5000)
+    train_parallel()

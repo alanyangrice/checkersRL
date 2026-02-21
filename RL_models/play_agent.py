@@ -276,6 +276,20 @@ def play_agent(use_mcts=False, num_simulations=100, epoch=None):
                 print(f"  AI    ({label}) [no moves]  reward: {ai_turn_reward_acc:+.2f}  "
                       f"| Blue: {sum(blue_rewards):+.2f}  Red: {sum(red_rewards):+.2f}")
 
+                # Apply terminal adjustments (loser -100, winner +100)
+                blue_adj = info.get("blue_reward_adjustment", 0.0)
+                red_adj = info.get("red_reward_adjustment", 0.0)
+                if blue_adj != 0.0:
+                    blue_rewards.append(blue_adj)
+                    all_reward_list.append(blue_adj)
+                    print(f"  BLUE  [terminal]  adjustment: {blue_adj:+.2f}  "
+                          f"| Blue: {sum(blue_rewards):+.2f}  Red: {sum(red_rewards):+.2f}")
+                if red_adj != 0.0:
+                    red_rewards.append(red_adj)
+                    all_reward_list.append(red_adj)
+                    print(f"  RED   [terminal]  adjustment: {red_adj:+.2f}  "
+                          f"| Blue: {sum(blue_rewards):+.2f}  Red: {sum(red_rewards):+.2f}")
+
                 winner = info.get("winner", player_color)
                 display_winner(winner, player_color, ai_color)
                 ai_turn_reward_acc = 0.0
