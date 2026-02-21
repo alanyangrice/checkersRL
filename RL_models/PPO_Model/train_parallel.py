@@ -283,12 +283,12 @@ def play_game(n_actions, game_id, epoch, opponent_model_path=None):
 
         if not is_opponent_acting:
             if acting_color == BLUE:
-                blue_memory.add(state, action, reward, log_prob, done)
+                blue_memory.add(state, action, reward, log_prob, done, action_mask)
                 reward_colors.append("blue")
                 if done:
                     red_memory.update_last_done()
             else:
-                red_memory.add(state, action, reward, log_prob, done)
+                red_memory.add(state, action, reward, log_prob, done, action_mask)
                 reward_colors.append("red")
                 if done:
                     blue_memory.update_last_done()

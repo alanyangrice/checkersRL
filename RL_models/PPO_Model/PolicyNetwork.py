@@ -23,9 +23,9 @@ class PPOPolicyNetwork(nn.Module):
     """AlphaZero-inspired policy/value network with residual backbone and 1x1 conv heads.
 
     Architecture:
-        Backbone: initial conv(in→256) + 5 residual blocks (256 channels)
-        Policy head: 1x1 conv(256→2) + flatten(128) + linear(128→n_actions)
-        Value head: 1x1 conv(256→1) + flatten(64) + linear(64→256) + linear(256→1)
+        Backbone: initial conv(in->256) + 5 residual blocks (256 channels)
+        Policy head: 1x1 conv(256->2) + flatten(128) + linear(128->n_actions)
+        Value head: 1x1 conv(256->1) + flatten(64) + linear(64->256) + linear(256->1)
 
     ~3.6M params with deeper backbone and wider channels for stronger feature learning.
     """

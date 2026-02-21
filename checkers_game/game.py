@@ -231,7 +231,10 @@ class Game:
         if len(self.move_chain) > 1:
             self.num_moves += 1
 
-        if self.num_moves > 250:
+        # Use the larger of num_moves (GUI) and len(self.moves) (RL env)
+        # so the 250-move limit works in both contexts.
+        move_count = max(self.num_moves, len(self.moves))
+        if move_count > 250:
             return "Tie"
 
         # Check board state repetition

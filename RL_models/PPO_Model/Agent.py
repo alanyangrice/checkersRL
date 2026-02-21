@@ -16,9 +16,9 @@ def get_device():
 
 
 class PPOAgent:
-    def __init__(self, input_shape, n_actions, lr=5e-5, gamma=0.90, eps_clip=0.2,
+    def __init__(self, input_shape, n_actions, lr=1e-4, gamma=0.95, eps_clip=0.2,
                  K_epochs=4, gae_lambda=0.95, device=None, augment=True,
-                 augment_noise=0.05, mini_batch_size=4096):
+                 augment_noise=0.05, mini_batch_size=2048):
         self.device = device or get_device()
         self.policy = PPOPolicyNetwork(input_shape, n_actions).to(self.device)
         self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
@@ -50,8 +50,7 @@ class PPOAgent:
         # Apply semantic mask: -inf for invalid actions, 0 for valid
         masked_logits = logits + torch.where(mask_t > 0, 0.0, torch.tensor(-1e10, device=self.device))
 
-        temp = 0.7
-        probs = Categorical(logits=masked_logits / temp)
+        probs = Categorical(logits=masked_logits)
         action = probs.sample()
 
         return action.item(), probs.log_prob(action), probs.entropy()
@@ -72,6 +71,7 @@ class PPOAgent:
         rewards = torch.FloatTensor(np.array(memory.rewards)).to(self.device)
         log_probs_old = torch.FloatTensor(np.array(memory.log_probs)).to(self.device)
         done_flags = torch.tensor(memory.done, dtype=torch.bool).to(self.device)
+        action_masks = torch.FloatTensor(np.array(memory.action_masks)).to(self.device)
 
         # --- GAE on original data -----------------------------------------
         # Forward pass on GPU to get state values (chunked to avoid OOM)
@@ -127,7 +127,11 @@ class PPOAgent:
                 print("Warning: NaN detected in augmentation logits, skipping augmentation this batch")
             else:
                 logits_noisy = torch.clamp(logits_noisy, -50.0, 50.0)
-                probs_noisy = Categorical(logits=logits_noisy)
+                # Apply action masks so augmented log_probs match the masked distribution
+                masked_logits_noisy = logits_noisy + torch.where(
+                    action_masks > 0, 0.0, torch.tensor(-1e10, device=self.device)
+                )
+                probs_noisy = Categorical(logits=masked_logits_noisy)
                 log_probs_old_noisy = probs_noisy.log_prob(actions)
 
             # Concatenate original + noisy
@@ -136,6 +140,7 @@ class PPOAgent:
             log_probs_old = torch.cat([log_probs_old, log_probs_old_noisy], dim=0)
             advantages = torch.cat([advantages, advantages.clone()], dim=0)
             returns = torch.cat([returns, returns.clone()], dim=0)
+            action_masks = torch.cat([action_masks, action_masks.clone()], dim=0)
 
         # Normalize advantages over the full (augmented) batch
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
@@ -154,6 +159,7 @@ class PPOAgent:
                 mb_log_probs_old = log_probs_old[mb_idx]
                 mb_advantages = advantages[mb_idx]
                 mb_returns = returns[mb_idx]
+                mb_masks = action_masks[mb_idx]
 
                 logits, current_values = self.policy(mb_states)
 
@@ -163,24 +169,27 @@ class PPOAgent:
                     continue
 
                 logits = torch.clamp(logits, -50.0, 50.0)
-            probs = Categorical(logits=logits)
-            log_probs = probs.log_prob(mb_actions)
-            entropy = probs.entropy()
-            ratios = torch.exp(log_probs - mb_log_probs_old)
 
-            # Clipped Surrogate Loss
-            surr1 = ratios * mb_advantages
-            surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * mb_advantages
-            policy_loss = -torch.min(surr1, surr2).mean()
-            value_loss = 0.5 * nn.MSELoss()(current_values, mb_returns)
-            entropy_bonus = -0.01 * entropy.mean()
+                # Apply action masks so the distribution matches collection
+                masked_logits = logits + torch.where(mb_masks > 0, 0.0, torch.tensor(-1e10, device=self.device))
+                probs = Categorical(logits=masked_logits)
+                log_probs = probs.log_prob(mb_actions)
+                entropy = probs.entropy()
+                ratios = torch.exp(log_probs - mb_log_probs_old)
 
-            loss = policy_loss + value_loss + entropy_bonus
+                # Clipped Surrogate Loss
+                surr1 = ratios * mb_advantages
+                surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * mb_advantages
+                policy_loss = -torch.min(surr1, surr2).mean()
+                value_loss = 0.5 * nn.MSELoss()(current_values, mb_returns)
+                entropy_bonus = -0.01 * entropy.mean()
 
-            self.optimizer.zero_grad()
-            loss.backward()
-            nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5)
-            self.optimizer.step()
+                loss = policy_loss + value_loss + entropy_bonus
+
+                self.optimizer.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5)
+                self.optimizer.step()
 
     def step_scheduler(self):
         """Step the learning rate scheduler. Call once per epoch."""
