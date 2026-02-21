@@ -48,9 +48,10 @@ class PPOAgent:
         self.augment_noise = augment_noise
         self.mini_batch_size = mini_batch_size
 
-        # Mixed precision: GradScaler for stable FP16 training on CUDA
-        self._use_amp = (self.device.type == "cuda")
-        self.scaler = torch.amp.GradScaler(enabled=self._use_amp)
+        # Mixed precision: bfloat16 on CUDA (same exponent range as FP32,
+        # no overflow risk, no GradScaler needed — uses tensor cores on Ampere+)
+        self._use_amp = (self.device.type == "cuda" and torch.cuda.is_bf16_supported())
+        self._amp_dtype = torch.bfloat16 if self._use_amp else torch.float32
 
     def select_action(self, state, action_mask):
         """Select an action using the policy network and a semantic action mask.
@@ -96,7 +97,7 @@ class PPOAgent:
 
         # --- GAE on original data -----------------------------------------
         # Forward pass on GPU to get state values (chunked to avoid OOM)
-        with torch.no_grad(), torch.amp.autocast(device_type=self.device.type, enabled=self._use_amp):
+        with torch.no_grad(), torch.amp.autocast(device_type=self.device.type, dtype=self._amp_dtype, enabled=self._use_amp):
             sv_chunks = []
             for i in range(0, states.size(0), self.mini_batch_size):
                 _, sv = self.policy(states[i : i + self.mini_batch_size])
@@ -131,7 +132,7 @@ class PPOAgent:
             states_noisy = torch.clamp(states + noise, 0.0, 1.0)
 
             # Compute surrogate old log-probs for noisy states (chunked, AMP)
-            with torch.no_grad(), torch.amp.autocast(device_type=self.device.type, enabled=self._use_amp):
+            with torch.no_grad(), torch.amp.autocast(device_type=self.device.type, dtype=self._amp_dtype, enabled=self._use_amp):
                 logit_chunks = []
                 for i in range(0, states_noisy.size(0), self.mini_batch_size):
                     lg, _ = self.policy(states_noisy[i : i + self.mini_batch_size])
@@ -179,8 +180,8 @@ class PPOAgent:
                 mb_returns = returns[mb_idx]
                 mb_masks = action_masks[mb_idx]
 
-                # Mixed-precision forward pass (FP16 on CUDA, FP32 elsewhere)
-                with torch.amp.autocast(device_type=self.device.type, enabled=self._use_amp):
+                # Mixed-precision forward pass (BF16 on CUDA, FP32 elsewhere)
+                with torch.amp.autocast(device_type=self.device.type, dtype=self._amp_dtype, enabled=self._use_amp):
                     logits, current_values = self.policy(mb_states)
 
                     # Guard against NaN logits (sign of weight instability)
@@ -207,11 +208,9 @@ class PPOAgent:
                     loss = policy_loss + value_loss + entropy_bonus
 
                 self.optimizer.zero_grad()
-                self.scaler.scale(loss).backward()
-                self.scaler.unscale_(self.optimizer)
+                loss.backward()
                 nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5)
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
+                self.optimizer.step()
 
     def step_scheduler(self):
         """Step the learning rate scheduler. Call once per epoch."""

@@ -90,20 +90,7 @@ def uniform_log_prob(mask):
     return float(np.log(1.0 / n))
 
 
-def get_curriculum_options(epoch):
-    """Return env.reset() options for the current curriculum phase.
-
-    Phase 1 (epochs 0-49):   Endgame practice, 2-5 pieces per side.
-    Phase 2 (epochs 50-149): Mid-game, 4-9 pieces per side.
-    Phase 3 (epochs 150+):   Full game, 12 pieces per side (standard).
-    """
-    # if epoch < 50:
-    #     return {"num_pieces": random.randint(2, 5)}
-    # elif epoch < 150:
-    #     return {"num_pieces": random.randint(4, 9)}
-    # else:
-    #     return None
-    return None  # standard 12v12 for all epochs
+get_curriculum_options = cfg.get_curriculum_options
 
 
 def play_benchmark_game(n_actions, opponent_type, opponent_model_path=None):
@@ -511,7 +498,7 @@ def train_parallel(num_epochs=cfg.NUM_EPOCHS, num_games=cfg.NUM_GAMES,
                 game_args = []
                 for game_id in range(batch_start, batch_end):
                     opp_path = None
-                    if pool.should_use_opponent(prob=cfg.POOL_OPPONENT_PROB):
+                    if pool.should_use_opponent(prob=cfg.get_pool_opponent_prob(epoch)):
                         opp_path = pool.sample()
                     game_args.append((n_actions, game_id, epoch, opp_path))
 

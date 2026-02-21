@@ -162,8 +162,7 @@ def uniform_log_prob(mask):
     return float(np.log(1.0 / n))
 
 
-def get_curriculum_options(epoch):
-    return None  # standard 12v12 for all epochs
+get_curriculum_options = cfg.get_curriculum_options
 
 
 def zip_csv_file(csv_file_path, zip_file_path):
@@ -722,7 +721,7 @@ def train_gpu_parallel(num_epochs=cfg.NUM_EPOCHS, num_games=cfg.NUM_GAMES,
         game_tasks = []
         for game_id in range(num_games):
             opp_path = None
-            if pool.should_use_opponent(prob=cfg.POOL_OPPONENT_PROB):
+            if pool.should_use_opponent(prob=cfg.get_pool_opponent_prob(epoch)):
                 opp_path = pool.sample()
             game_tasks.append({
                 "mode": "train",
