@@ -91,12 +91,80 @@ def get_curriculum_options(epoch):
     Phase 2 (epochs 50-149): Mid-game, 4-9 pieces per side.
     Phase 3 (epochs 150+):   Full game, 12 pieces per side (standard).
     """
-    if epoch < 50:
-        return {"num_pieces": random.randint(2, 5)}
-    elif epoch < 150:
-        return {"num_pieces": random.randint(4, 9)}
-    else:
-        return None
+    # if epoch < 50:
+    #     return {"num_pieces": random.randint(2, 5)}
+    # elif epoch < 150:
+    #     return {"num_pieces": random.randint(4, 9)}
+    # else:
+    #     return None
+    return None  # standard 12v12 for all epochs
+
+
+def play_benchmark_game(n_actions, opponent_type, opponent_model_path=None):
+    """Play a single benchmark game (no memory/training, just win/loss/tie).
+
+    Args:
+        n_actions: Size of the action space.
+        opponent_type: "random" or "model".
+        opponent_model_path: Path to opponent model (only for opponent_type="model").
+
+    Returns:
+        dict with keys: agent_color, agent_win, opponent_win, tie, steps
+    """
+    env = CheckersEnv()
+    agent = _worker_agent
+
+    opponent = None
+    if opponent_type == "model" and opponent_model_path is not None:
+        opponent = _get_opponent(n_actions, opponent_model_path)
+
+    # Agent plays a random color each game
+    agent_color = BLUE if random.random() < 0.5 else RED
+    opponent_color = RED if agent_color == BLUE else BLUE
+
+    state, _ = env.reset()
+    done = False
+    steps = 0
+
+    while not done:
+        action_mask = env.get_action_mask()
+
+        if action_mask.sum() == 0:
+            _, _, done, _, info = env.step(0)
+            steps += 1
+            if done:
+                break
+            state = env.get_board_state()
+            continue
+
+        current_turn = env.game.turn
+        if current_turn == agent_color:
+            # Agent plays greedily (no exploration) for benchmark
+            with torch.no_grad():
+                action, _, _ = agent.select_action(state, action_mask)
+        elif opponent_type == "random":
+            action = random_action_from_mask(action_mask)
+        else:
+            # Model opponent plays greedily
+            with torch.no_grad():
+                action, _, _ = opponent.select_action(state, action_mask)
+
+        next_state, _, done, _, info = env.step(action)
+        steps += 1
+        state = next_state
+
+    winner = info.get("winner", "Tie")
+    agent_win = 1 if winner == agent_color else 0
+    opponent_win = 1 if (winner != agent_color and winner != "Tie" and winner != "None") else 0
+    tie = 1 if winner == "Tie" else 0
+
+    return {
+        "agent_color": "BLUE" if agent_color == BLUE else "RED",
+        "agent_win": agent_win,
+        "opponent_win": opponent_win,
+        "tie": tie,
+        "steps": steps,
+    }
 
 
 def play_game(n_actions, game_id, epoch, opponent_model_path=None):
@@ -162,25 +230,24 @@ def play_game(n_actions, game_id, epoch, opponent_model_path=None):
         is_opponent_turn = (opponent is not None and env.game.turn == opponent_color)
 
         if is_opponent_turn:
-            with torch.no_grad():
-                action, log_prob, _ = opponent.select_action(state, action_mask)
-            if isinstance(log_prob, torch.Tensor):
-                log_prob = log_prob.item()
+            # Pool opponents get a fixed exploration rate to prevent
+            # deterministic loops that trigger 3-fold repetition ties.
+            pool_epsilon = 0.15
+            if random.random() < pool_epsilon:
+                action = random_action_from_mask(action_mask)
+                log_prob = uniform_log_prob(action_mask)
+            else:
+                with torch.no_grad():
+                    action, log_prob, _ = opponent.select_action(state, action_mask)
+                if isinstance(log_prob, torch.Tensor):
+                    log_prob = log_prob.item()
         else:
-            # Reset exploration at each curriculum phase boundary so
-            # the agent can discover strategies for the new game type.
-            if epoch < 50:          # Phase 1: endgame (2-5 pieces)
-                epsilon = max(0.08, 1.0 - epoch / 50)
-            elif epoch < 150:       # Phase 2: mid-game (4-9 pieces)
-                epsilon = max(0.08, 0.5 - (epoch - 50) / 200)
-            else:                   # Phase 3: full game (12v12)
-                epsilon = max(0.08, 0.3 - (epoch - 150) / 300)
+            # Exploration: decay from 100% random to 8% over 100 epochs.
+            epsilon = max(0.08, 1.0 - epoch / 100)
 
-            # Forced random first moves during curriculum (random boards)
-            # to add opening diversity.  Disabled for full games so the
-            # agent can learn proper opening strategy; epsilon already
-            # provides sufficient exploration.
-            use_random_first = first_move and epoch < 150
+            # No forced random first moves — full 12v12 from the start,
+            # epsilon provides sufficient opening diversity.
+            use_random_first = False
 
             if use_random_first:
                 action = random_action_from_mask(action_mask)
@@ -283,7 +350,60 @@ def play_game(n_actions, game_id, epoch, opponent_model_path=None):
     }
 
 
-def train_parallel(num_epochs=1000, num_games=2500, batch_size=500, n_actions=NUM_ACTIONS):
+def run_benchmark(agent, n_actions, num_processes, reference_model_path, num_games=200):
+    """Evaluate the agent against random and reference opponents.
+
+    Returns:
+        dict with win/tie rates vs each opponent type.
+    """
+    temp_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "PPO_saved_models_parallel", "_benchmark_temp.pt"
+    )
+    torch.save(agent.policy.state_dict(), temp_path)
+
+    results = {}
+    try:
+        with Pool(num_processes, initializer=_init_worker,
+                  initargs=(n_actions, temp_path)) as p:
+            # --- vs Random ---
+            random_args = [(n_actions, "random", None)] * num_games
+            random_results = p.starmap(play_benchmark_game, random_args)
+
+            wins = sum(r["agent_win"] for r in random_results)
+            losses = sum(r["opponent_win"] for r in random_results)
+            ties = sum(r["tie"] for r in random_results)
+            avg_steps = sum(r["steps"] for r in random_results) / num_games
+            results["vs_random"] = {
+                "win_rate": wins / num_games,
+                "loss_rate": losses / num_games,
+                "tie_rate": ties / num_games,
+                "avg_steps": avg_steps,
+            }
+
+            # --- vs Reference model ---
+            if reference_model_path and os.path.exists(reference_model_path):
+                ref_args = [(n_actions, "model", reference_model_path)] * num_games
+                ref_results = p.starmap(play_benchmark_game, ref_args)
+
+                wins = sum(r["agent_win"] for r in ref_results)
+                losses = sum(r["opponent_win"] for r in ref_results)
+                ties = sum(r["tie"] for r in ref_results)
+                avg_steps = sum(r["steps"] for r in ref_results) / num_games
+                results["vs_reference"] = {
+                    "win_rate": wins / num_games,
+                    "loss_rate": losses / num_games,
+                    "tie_rate": ties / num_games,
+                    "avg_steps": avg_steps,
+                }
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+    return results
+
+
+def train_parallel(num_epochs=1000, num_games=2500, batch_size=2500, n_actions=NUM_ACTIONS):
     """Parallelized training loop for the Checkers PPO agent."""
     input_shape = (4, 8, 8)
     agent = PPOAgent(input_shape, n_actions)
@@ -296,7 +416,9 @@ def train_parallel(num_epochs=1000, num_games=2500, batch_size=500, n_actions=NU
     pool_dir = os.path.join(base_dir, "opponent_pool_parallel")
     pool = OpponentPool(pool_dir, max_size=20)
     pool_save_interval = 10
-    pool_opponent_prob = 0.3
+    pool_opponent_prob = 0.15
+    benchmark_interval = 10
+    benchmark_games = 500
 
     start_epoch = 0
 
@@ -313,6 +435,13 @@ def train_parallel(num_epochs=1000, num_games=2500, batch_size=500, n_actions=NU
     detailed_csv_folder_path = os.path.join(base_dir, "training_progress_detailed_parallel")
     os.makedirs(detailed_csv_folder_path, exist_ok=True)
     csv_file_path = os.path.join(base_dir, "training_progress_parallel.csv")
+    benchmark_csv_path = os.path.join(base_dir, "benchmark_parallel.csv")
+
+    # Save the starting model as a permanent reference for benchmarking
+    reference_model_path = os.path.join(model_dir, "reference_model.pt")
+    if not os.path.exists(reference_model_path):
+        torch.save(agent.policy.state_dict(), reference_model_path)
+        print(f"Saved reference model for benchmarking: {reference_model_path}")
 
     if start_epoch == 0:
         with open(csv_file_path, mode='w', newline='') as file:
@@ -320,6 +449,16 @@ def train_parallel(num_epochs=1000, num_games=2500, batch_size=500, n_actions=NU
             writer.writerow([
                 "epoch", "average_epoch_reward", "average_blue_reward", "average_red_reward",
                 "average_episode_length", "win_rate_blue", "win_rate_red", "tie_rate", "max_move_reward"
+            ])
+
+    # Always create benchmark CSV with header if it doesn't exist yet
+    if not os.path.exists(benchmark_csv_path):
+        with open(benchmark_csv_path, mode='w', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow([
+                "epoch",
+                "vs_random_win", "vs_random_loss", "vs_random_tie", "vs_random_avg_steps",
+                "vs_reference_win", "vs_reference_loss", "vs_reference_tie", "vs_reference_avg_steps",
             ])
 
     num_processes = max(2, int(cpu_count() * 0.5))
@@ -430,6 +569,31 @@ def train_parallel(num_epochs=1000, num_games=2500, batch_size=500, n_actions=NU
               f"Blue Win: {blue_win_rate:.2%}, Red Win: {red_win_rate:.2%}, "
               f"Tie: {tie_rate:.2%}, LR: {agent.scheduler.get_last_lr()[0]:.2e}")
 
+        # --- Benchmark evaluation every N epochs ---
+        if (epoch + 1) % benchmark_interval == 0:
+            print(f"  Running benchmark ({benchmark_games} games each vs random & reference)...")
+            bench = run_benchmark(
+                agent, n_actions, num_processes,
+                reference_model_path, num_games=benchmark_games,
+            )
+            vr = bench["vs_random"]
+            print(f"  vs Random:    Win {vr['win_rate']:.1%}  Loss {vr['loss_rate']:.1%}  "
+                  f"Tie {vr['tie_rate']:.1%}  AvgSteps {vr['avg_steps']:.0f}")
+
+            vref = bench.get("vs_reference", {})
+            if vref:
+                print(f"  vs Reference: Win {vref['win_rate']:.1%}  Loss {vref['loss_rate']:.1%}  "
+                      f"Tie {vref['tie_rate']:.1%}  AvgSteps {vref['avg_steps']:.0f}")
+
+            with open(benchmark_csv_path, mode='a', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow([
+                    epoch + 1,
+                    vr["win_rate"], vr["loss_rate"], vr["tie_rate"], vr["avg_steps"],
+                    vref.get("win_rate", ""), vref.get("loss_rate", ""),
+                    vref.get("tie_rate", ""), vref.get("avg_steps", ""),
+                ])
+
 
 if __name__ == "__main__":
-    train_parallel(num_epochs=1000, num_games=5000)
+    train_parallel(num_epochs=1000, num_games=5000, batch_size=5000)

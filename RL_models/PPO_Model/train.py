@@ -24,13 +24,14 @@ def zip_csv_file(csv_file_path, zip_file_path):
 def get_curriculum_options(epoch):
     """Return env.reset() options for the current curriculum phase.
 
-    Phase 1 (epochs 0-49):   Endgame practice, 2-5 pieces per side.
-    Phase 2 (epochs 50-149): Mid-game, 4-9 pieces per side.
-    Phase 3 (epochs 150+):   Full game, 12 pieces per side (standard).
+    Phase 1 (epochs 0-99):   Mid-game, 4-9 pieces per side.
+    Phase 2 (epochs 100+):   Full game, 12 pieces per side (standard).
+
+    NOTE: The old 2-5 piece endgame phase was removed because small-piece
+    positions are often theoretical draws, causing the agent to converge on
+    passive play before learning aggression.
     """
-    if epoch < 50:
-        return {"num_pieces": random.randint(2, 5)}
-    elif epoch < 150:
+    if epoch < 100:
         return {"num_pieces": random.randint(4, 9)}
     else:
         return None  # standard 12v12
@@ -54,14 +55,14 @@ def uniform_log_prob(mask):
 
 def select_action_for_agent(agent, state, action_mask, epoch, first_move, first_move_count):
     """Select an action using exploration/exploitation strategy."""
-    if first_move and epoch < 50:
+    if first_move and epoch < 150:
         action = random_action_from_mask(action_mask)
         log_prob = uniform_log_prob(action_mask)
         first_move_count += 1
         if first_move_count > 10:
             first_move = False
     else:
-        epsilon = max(0.03, 1 - epoch / 50)
+        epsilon = max(0.08, 1.0 - epoch / 100)
         if random.random() < epsilon:
             action = random_action_from_mask(action_mask)
             log_prob = uniform_log_prob(action_mask)

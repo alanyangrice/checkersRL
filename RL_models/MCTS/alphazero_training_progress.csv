@@ -1,0 +1,1 @@
+epoch,games,blue_wins,red_wins,ties,avg_moves,policy_loss,value_loss,total_loss,buffer_size,time

@@ -92,10 +92,19 @@ class CheckersEnv(gym.Env):
         if self._action_mask.sum() == 0:
             loser_color = self.game.turn
             winner = BLUE if loser_color == RED else RED
-            reward = -100.0
 
-            blue_adj = -100.0 if loser_color == BLUE else 0.0
-            red_adj = -100.0 if loser_color == RED else 0.0
+            # No action was taken, so step reward is 0.  All terminal signals
+            # go through per-color adjustments applied to each side's last
+            # memory entry: loser gets -100, winner gets +100.
+            reward = 0.0
+            blue_adj = 0.0
+            red_adj = 0.0
+            if loser_color == BLUE:
+                blue_adj = -100.0
+                red_adj = 100.0
+            else:
+                red_adj = -100.0
+                blue_adj = 100.0
 
             self.game.switch_turn()
             self._update_action_mask()
@@ -194,25 +203,23 @@ class CheckersEnv(gym.Env):
         # Check game-over first (need 'done' flag for opponent penalty guard)
         end_reward, done, winner = self.reward_end_game()
 
-        board_stats = self.analyze_board()
         shaped_reward = 0.0
 
-        shaped_reward += self.reward_control_center(board_stats)
-        shaped_reward += self.reward_protect_rear(board_stats)
-        shaped_reward += self.reward_balance(board_stats)
-        shaped_reward += self.reward_for_kings(board_stats)
+        # King promotion: one-time bonus for advancing a piece
         shaped_reward += self.reward_king_promotion(old_board)
 
         # +10 for the final capture hop (intermediates already got +10 each)
         if self._is_capture_turn:
             shaped_reward += 10.0
 
-        shaped_reward += self.penalize_undefended_pieces(old_board, new_board)
-
-        # NOTE: penalize_opponent_advantage removed — it was simulating ALL
-        # opponent moves with deep-copies on every turn, consuming ~90% of CPU.
-        # penalize_undefended_pieces already captures the key "don't leave
-        # pieces hanging" signal at a fraction of the cost.
+        # NOTE: penalize_undefended_pieces removed — the retroactive capture
+        # penalty (-2.5 per piece taken) already punishes the victim when a
+        # capture actually happens, and the pre-emptive version was discouraging
+        # tactical positions where pieces are in contact.
+        #
+        # Static board-feature rewards (center control, rear protection,
+        # balance, king count) were also removed because they reward
+        # *maintaining* a position rather than *making progress*.
 
         # Combine: scaled shaping + full-strength terminal reward
         reward = shaped_reward * SHAPING_SCALE + end_reward
@@ -225,13 +232,15 @@ class CheckersEnv(gym.Env):
         blue_adj, red_adj = 0.0, 0.0
 
         # Capture penalty: penalise the opponent whose piece(s) were taken
-        # (-10 per piece, symmetric with the +10 capture bonus).
+        # (-5 per piece, halved relative to the +10 capture bonus to
+        # encourage tactical exchanges rather than passive avoidance).
         if self._is_capture_turn:
             num_captured = len(self._current_move_chain) - 1
+            capture_penalty = -5.0 * num_captured * SHAPING_SCALE
             if opponent_color == BLUE:
-                blue_adj -= 10.0 * num_captured
+                blue_adj += capture_penalty
             else:
-                red_adj -= 10.0 * num_captured
+                red_adj += capture_penalty
 
         # Terminal loser penalty: when the acting player wins, the opponent
         # (loser) needs -100.  (If the acting player loses, their -100 is
@@ -243,6 +252,18 @@ class CheckersEnv(gym.Env):
                     blue_adj -= 100.0
                 else:
                     red_adj -= 100.0
+
+        # Tie penalty for the non-acting player: the acting player already
+        # receives the tie penalty via `reward` (from reward_end_game), but
+        # the opponent gets nothing.  Apply the same tie penalty retroactively,
+        # computed from the *opponent's* perspective so the advantage penalty
+        # is correct for their side.
+        if done and winner == "Tie":
+            tie_pen = self._tie_reward(color=opponent_color)
+            if opponent_color == BLUE:
+                blue_adj += tie_pen
+            else:
+                red_adj += tie_pen
 
         # --- Switch turn ------------------------------------------------
         self.game.switch_turn()
@@ -445,13 +466,14 @@ class CheckersEnv(gym.Env):
             return self._tie_reward(), True, "Tie"
         elif winner is not None:
             return -100, True, copy.deepcopy(winner)
-        return -np.sqrt(len(self.game.moves)) / 5, False, None
+        return -np.sqrt(len(self.game.moves)) / 10, False, None
+        # return 0, False, None
 
     # ------------------------------------------------------------------
     # Private utilities
     # ------------------------------------------------------------------
     
-    def _tie_reward(self):
+    def _tie_reward(self, color=None):
         """Tie penalty that scales with material advantage and total pieces.
 
         Three components (all negative):
@@ -463,13 +485,17 @@ class CheckersEnv(gym.Env):
            played out.  Discourages passive play that leads to draws.
 
         Example outcomes (kings count as 1.5 pieces):
-          Equal material, few pieces  (1v1):   -30 +  0 + -4  = -34
-          Equal material, many pieces (10v10): -30 +  0 + -40 = -70
-          Advantage, many pieces      (10v5):  -30 + -25 + -30 = -85
-          Disadvantage, few pieces    (1v3):   -30 +  0 + -8  = -38
+          Equal material, few pieces  (1v1):   -80 +  0 + -4  = -84
+          Equal material, many pieces (10v10): -80 +  0 + -40 = -120
+          Advantage, many pieces      (10v5):  -80 + -40 + -30 = -150
+          Disadvantage, few pieces    (1v3):   -80 +  0 + -8  = -88
+
+        Args:
+            color: The color to compute the penalty for. Defaults to
+                   self.game.turn (the acting player).
         """
         board = self.game.board.board
-        my_color = self.game.turn
+        my_color = color if color is not None else self.game.turn
         opp_color = RED if my_color == BLUE else BLUE
 
         my_reg = sum(1 for row in board for p in row
@@ -486,7 +512,7 @@ class CheckersEnv(gym.Env):
         total_material = my_material + opp_material
         advantage = my_material - opp_material   # positive = I had more
 
-        base = -50
+        base = -100
         adv_penalty = -8 * max(advantage, 0)     # only the stronger side pays
         stall_penalty = -2 * total_material       # more pieces left = worse
 

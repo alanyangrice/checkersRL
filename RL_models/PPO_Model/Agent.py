@@ -16,9 +16,9 @@ def get_device():
 
 
 class PPOAgent:
-    def __init__(self, input_shape, n_actions, lr=1e-4, gamma=0.95, eps_clip=0.2,
+    def __init__(self, input_shape, n_actions, lr=5e-5, gamma=0.90, eps_clip=0.2,
                  K_epochs=4, gae_lambda=0.95, device=None, augment=True,
-                 augment_noise=0.05, mini_batch_size=2048):
+                 augment_noise=0.05, mini_batch_size=4096):
         self.device = device or get_device()
         self.policy = PPOPolicyNetwork(input_shape, n_actions).to(self.device)
         self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
@@ -74,10 +74,13 @@ class PPOAgent:
         done_flags = torch.tensor(memory.done, dtype=torch.bool).to(self.device)
 
         # --- GAE on original data -----------------------------------------
-        # Forward pass on GPU to get state values
+        # Forward pass on GPU to get state values (chunked to avoid OOM)
         with torch.no_grad():
-            _, state_values = self.policy(states)
-            state_values = state_values.squeeze(-1)
+            sv_chunks = []
+            for i in range(0, states.size(0), self.mini_batch_size):
+                _, sv = self.policy(states[i : i + self.mini_batch_size])
+                sv_chunks.append(sv.squeeze(-1))
+            state_values = torch.cat(sv_chunks, dim=0)
 
         # Move to CPU for the GAE scan. The sequential loop does per-element
         # indexing which triggers a CPU↔GPU sync on every iteration when run
@@ -111,9 +114,13 @@ class PPOAgent:
             noise = torch.randn_like(states) * self.augment_noise
             states_noisy = torch.clamp(states + noise, 0.0, 1.0)
 
-            # Compute surrogate old log-probs for noisy states
+            # Compute surrogate old log-probs for noisy states (chunked)
             with torch.no_grad():
-                logits_noisy, _ = self.policy(states_noisy)
+                logit_chunks = []
+                for i in range(0, states_noisy.size(0), self.mini_batch_size):
+                    lg, _ = self.policy(states_noisy[i : i + self.mini_batch_size])
+                    logit_chunks.append(lg)
+                logits_noisy = torch.cat(logit_chunks, dim=0)
 
             # Skip augmentation if network produced NaN (early sign of instability)
             if torch.isnan(logits_noisy).any():
@@ -123,12 +130,12 @@ class PPOAgent:
                 probs_noisy = Categorical(logits=logits_noisy)
                 log_probs_old_noisy = probs_noisy.log_prob(actions)
 
-                # Concatenate original + noisy
-                states = torch.cat([states, states_noisy], dim=0)
-                actions = torch.cat([actions, actions.clone()], dim=0)
-                log_probs_old = torch.cat([log_probs_old, log_probs_old_noisy], dim=0)
-                advantages = torch.cat([advantages, advantages.clone()], dim=0)
-                returns = torch.cat([returns, returns.clone()], dim=0)
+            # Concatenate original + noisy
+            states = torch.cat([states, states_noisy], dim=0)
+            actions = torch.cat([actions, actions.clone()], dim=0)
+            log_probs_old = torch.cat([log_probs_old, log_probs_old_noisy], dim=0)
+            advantages = torch.cat([advantages, advantages.clone()], dim=0)
+            returns = torch.cat([returns, returns.clone()], dim=0)
 
         # Normalize advantages over the full (augmented) batch
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
@@ -156,24 +163,24 @@ class PPOAgent:
                     continue
 
                 logits = torch.clamp(logits, -50.0, 50.0)
-                probs = Categorical(logits=logits)
-                log_probs = probs.log_prob(mb_actions)
-                entropy = probs.entropy()
-                ratios = torch.exp(log_probs - mb_log_probs_old)
+            probs = Categorical(logits=logits)
+            log_probs = probs.log_prob(mb_actions)
+            entropy = probs.entropy()
+            ratios = torch.exp(log_probs - mb_log_probs_old)
 
-                # Clipped Surrogate Loss
-                surr1 = ratios * mb_advantages
-                surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * mb_advantages
-                policy_loss = -torch.min(surr1, surr2).mean()
-                value_loss = 0.5 * nn.MSELoss()(current_values, mb_returns)
-                entropy_bonus = -0.05 * entropy.mean()
+            # Clipped Surrogate Loss
+            surr1 = ratios * mb_advantages
+            surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * mb_advantages
+            policy_loss = -torch.min(surr1, surr2).mean()
+            value_loss = 0.5 * nn.MSELoss()(current_values, mb_returns)
+            entropy_bonus = -0.01 * entropy.mean()
 
-                loss = policy_loss + value_loss + entropy_bonus
+            loss = policy_loss + value_loss + entropy_bonus
 
-                self.optimizer.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5)
-                self.optimizer.step()
+            self.optimizer.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5)
+            self.optimizer.step()
 
     def step_scheduler(self):
         """Step the learning rate scheduler. Call once per epoch."""

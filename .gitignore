@@ -2,9 +2,12 @@
 RL_models/PPO_Model/training_progress_detailed/
 RL_models/PPO_Model/PPO_saved_models/
 RL_models/PPO_Model/training_progress_detailed_parallel/
+RL_models/PPO_Model/training_progress_detailed_parallel_v1/
 RL_models/PPO_Model/PPO_saved_models_parallel/
+RL_models/PPO_Model/PPO_saved_models_parallel_v1/
 RL_models/PPO_Model/opponent_pool/
 RL_models/PPO_Model/opponent_pool_parallel/
+RL_models/PPO_Model/opponent_pool_parallel_v1/
 RL_models/MCTS/alphazero_checkpoints/
 
 # Ignore Python cache
