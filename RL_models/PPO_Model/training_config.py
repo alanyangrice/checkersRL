@@ -31,13 +31,80 @@ LR_SCHEDULER_ETA_MIN = 1e-6   # CosineAnnealingLR minimum LR
 
 NUM_EPOCHS = 1000
 NUM_GAMES = 5000              # games per epoch
-POOL_OPPONENT_PROB_CURRICULUM = 0.25  # pool prob during curriculum phase (diversity already comes from position randomness)
-POOL_OPPONENT_PROB_FULL = 0.50        # pool prob after curriculum ends (stronger anti-passive-play pressure)
+POOL_OPPONENT_PROB_CURRICULUM = 0.25  # pool prob during curriculum phase
+POOL_OPPONENT_PROB_FULL = 0.50        # pool prob after curriculum (single-agent mode)
 POOL_EPSILON = 0.15           # exploration rate for pool opponents
 POOL_SAVE_INTERVAL = 10       # save to opponent pool every N epochs
-POOL_MAX_SIZE = 20            # max checkpoints in the opponent pool
+POOL_MAX_SIZE = 20            # max checkpoints per agent in the opponent pool
 BENCHMARK_INTERVAL = 10       # run benchmark every N epochs
 BENCHMARK_GAMES = 500         # games per benchmark evaluation
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Multi-Agent League Play
+# ─────────────────────────────────────────────────────────────────────
+
+# Reward-diverse agent profiles. Each entry fully specifies the reward
+# function and PPO hyperparameters for one agent type. Add new agent
+# types here without any code changes elsewhere.
+#
+# Keys:
+#   capture_bonus        reward for capturing a piece (per hop)
+#   capture_penalty      retroactive penalty applied to the victim (per piece)
+#   king_bonus           one-time reward for king promotion
+#   tie_base             base penalty for a draw
+#   shaping_scale        multiplier on all shaped (non-terminal) rewards
+#   time_penalty_scale   multiplier on the per-move time penalty
+#   gamma                discount factor (controls planning horizon)
+#   entropy_bonus        entropy regularisation coefficient in PPO loss
+LEAGUE_AGENTS = {
+    "tactical": {
+        # Balanced style — captures + king promotion + tie aversion.
+        # Represents the current well-rounded baseline.
+        "capture_bonus":      10.0,
+        "capture_penalty":    -5.0,
+        "king_bonus":         15.0,
+        "tie_base":          -200,
+        "shaping_scale":       0.5,
+        "time_penalty_scale":  1.0,
+        "gamma":               0.99,
+        "entropy_bonus":       0.01,
+    },
+    "terminal": {
+        # Win/loss only — no intermediate shaping whatsoever.
+        # Forces the agent to develop long-horizon positional reasoning
+        # rather than myopic material counting.
+        "capture_bonus":      0.0,
+        "capture_penalty":    0.0,
+        "king_bonus":         0.0,
+        "tie_base":          -80,    # accepts draws more readily; winning is the only signal
+        "shaping_scale":      0.0,
+        "time_penalty_scale": 0.0,
+        "gamma":              0.995,  # needs very long horizon since terminal signal is all there is
+        "entropy_bonus":      0.02,   # extra exploration — must discover positional wins
+    },
+    "aggressive": {
+        # Amplified tactical rewards + extreme tie aversion.
+        # Piece-hungry, forces exchanges, demolishes passive draw-seekers.
+        "capture_bonus":      20.0,
+        "capture_penalty":   -10.0,
+        "king_bonus":         25.0,
+        "tie_base":          -500,   # very high — hates draws
+        "shaping_scale":       0.8,
+        "time_penalty_scale":  2.0,  # urgency: finish faster
+        "gamma":               0.97, # short-horizon opportunist
+        "entropy_bonus":       0.01,
+    },
+}
+
+# Which agent types are active in the current league run.
+# Remove an entry to disable that agent; add a new LEAGUE_AGENTS key to enable it.
+ACTIVE_AGENTS = ["tactical", "terminal", "aggressive"]
+
+# Opponent pool probability for league mode.
+# Cross-agent diversity (3 styles) makes 33% roughly equivalent to 50%
+# in single-agent mode, while leaving more time for productive self-play.
+LEAGUE_POOL_OPPONENT_PROB = 0.33
 
 
 # ─────────────────────────────────────────────────────────────────────

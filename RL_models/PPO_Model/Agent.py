@@ -35,7 +35,7 @@ def _compute_gae(deltas: torch.Tensor, not_done: torch.Tensor,
 class PPOAgent:
     def __init__(self, input_shape, n_actions, lr=1e-4, gamma=0.95, eps_clip=0.2,
                  K_epochs=4, gae_lambda=0.95, device=None, augment=True,
-                 augment_noise=0.05, mini_batch_size=2048):
+                 augment_noise=0.05, mini_batch_size=2048, entropy_bonus=0.01):
         self.device = device or get_device()
         self.policy = PPOPolicyNetwork(input_shape, n_actions).to(self.device)
         self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
@@ -47,6 +47,7 @@ class PPOAgent:
         self.augment = augment
         self.augment_noise = augment_noise
         self.mini_batch_size = mini_batch_size
+        self.entropy_bonus = entropy_bonus
 
         # Mixed precision: bfloat16 on CUDA (same exponent range as FP32,
         # no overflow risk, no GradScaler needed — uses tensor cores on Ampere+)
@@ -203,7 +204,7 @@ class PPOAgent:
                     surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * mb_advantages
                     policy_loss = -torch.min(surr1, surr2).mean()
                     value_loss = 0.5 * nn.MSELoss()(current_values, mb_returns)
-                    entropy_bonus = -0.01 * entropy.mean()
+                    entropy_bonus = -self.entropy_bonus * entropy.mean()
 
                     loss = policy_loss + value_loss + entropy_bonus
 

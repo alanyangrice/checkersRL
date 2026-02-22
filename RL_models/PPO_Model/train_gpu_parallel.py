@@ -212,9 +212,10 @@ def _load_opponent(n_actions, opp_path, cache):
 
 
 def _play_game(worker_id, request_queue, response_queue,
-               n_actions, epoch, opponent_model_path, opp_cache):
+               n_actions, epoch, opponent_model_path, opp_cache,
+               reward_config=None):
     """Play one game using the GPU server for agent inference."""
-    env = CheckersEnv()
+    env = CheckersEnv(reward_config=reward_config)
 
     # Optionally load a pool opponent (CPU-local, cached)
     opponent = None
@@ -383,9 +384,10 @@ def _play_game(worker_id, request_queue, response_queue,
 
 
 def _play_benchmark_game(worker_id, request_queue, response_queue,
-                         n_actions, opponent_type, opponent_model_path, opp_cache):
+                         n_actions, opponent_type, opponent_model_path, opp_cache,
+                         reward_config=None):
     """Play a single benchmark game using GPU server for agent inference."""
-    env = CheckersEnv()
+    env = CheckersEnv(reward_config=reward_config)
 
     opponent = None
     if opponent_type == "model" and opponent_model_path is not None:
@@ -450,10 +452,11 @@ def worker_fn(worker_id, request_queue, response_queue, results_queue,
     the original task_index so the main process can reassemble ordering.
 
     task_dict keys:
-        mode:  "train" or "benchmark"
-        epoch: (train only)
+        mode:             "train" or "benchmark"
+        epoch:            (train only)
         opponent_model_path: path or None
-        opponent_type: (benchmark only) "random" or "model"
+        opponent_type:    (benchmark only) "random" or "model"
+        reward_config:    optional dict of reward parameters for the env
     """
     opp_cache = {}  # per-worker opponent model cache
     games_played = 0
@@ -464,17 +467,20 @@ def worker_fn(worker_id, request_queue, response_queue, results_queue,
             break
 
         task_index, task = item
+        reward_config = task.get("reward_config", None)
 
         if task["mode"] == "train":
             result = _play_game(
                 worker_id, request_queue, response_queue,
                 n_actions, task["epoch"], task["opponent_model_path"], opp_cache,
+                reward_config=reward_config,
             )
         else:  # benchmark
             result = _play_benchmark_game(
                 worker_id, request_queue, response_queue,
                 n_actions, task["opponent_type"],
                 task["opponent_model_path"], opp_cache,
+                reward_config=reward_config,
             )
 
         results_queue.put((task_index, result))
@@ -575,17 +581,32 @@ def _run_games_on_gpu(model, device, n_actions, game_tasks, num_workers,
 # ─────────────────────────────────────────────────────────────────────
 
 def run_benchmark(model, device, n_actions, num_workers,
-                  reference_model_path, num_games=200):
-    """Evaluate the agent against random and reference opponents using GPU server."""
+                  reference_model_path, num_games=200,
+                  extra_opponents=None, include_random=True):
+    """Evaluate the agent against multiple opponents using the GPU server.
+
+    Args:
+        reference_model_path: Path to the self-reference model (own past weights).
+        extra_opponents: Optional dict of {label: model_path} for additional
+                         opponents to benchmark against (e.g. other league agent
+                         types). Each gets num_games games. Missing paths are
+                         skipped gracefully.
+
+    Returns:
+        dict with keys "vs_random", "vs_reference", and one key per
+        extra_opponents entry (only if the path exists).
+        Each value: {"win_rate", "loss_rate", "tie_rate", "avg_steps"}.
+    """
     tasks = []
 
-    # vs Random
-    for _ in range(num_games):
-        tasks.append({
-            "mode": "benchmark",
-            "opponent_type": "random",
-            "opponent_model_path": None,
-        })
+    # vs Random (optional — skip for pairwise cross-agent benchmarks)
+    if include_random:
+        for _ in range(num_games):
+            tasks.append({
+                "mode": "benchmark",
+                "opponent_type": "random",
+                "opponent_model_path": None,
+            })
 
     # vs Reference model
     has_ref = reference_model_path and os.path.exists(reference_model_path)
@@ -597,35 +618,45 @@ def run_benchmark(model, device, n_actions, num_workers,
                 "opponent_model_path": reference_model_path,
             })
 
+    # vs Extra opponents (e.g. other league agent types)
+    valid_extras = {}
+    if extra_opponents:
+        for label, path in extra_opponents.items():
+            if path and os.path.exists(path):
+                valid_extras[label] = path
+                for _ in range(num_games):
+                    tasks.append({
+                        "mode": "benchmark",
+                        "opponent_type": "model",
+                        "opponent_model_path": path,
+                    })
+
     all_results = _run_games_on_gpu(
         model, device, n_actions, tasks, num_workers, label="benchmark"
     )
 
+    def _tally(slice_results):
+        return {
+            "win_rate":  sum(r["agent_win"]    for r in slice_results) / num_games,
+            "loss_rate": sum(r["opponent_win"]  for r in slice_results) / num_games,
+            "tie_rate":  sum(r["tie"]           for r in slice_results) / num_games,
+            "avg_steps": sum(r["steps"]         for r in slice_results) / num_games,
+        }
+
     results = {}
-    random_results = all_results[:num_games]
-    wins = sum(r["agent_win"] for r in random_results)
-    losses = sum(r["opponent_win"] for r in random_results)
-    ties_count = sum(r["tie"] for r in random_results)
-    avg_steps = sum(r["steps"] for r in random_results) / num_games
-    results["vs_random"] = {
-        "win_rate": wins / num_games,
-        "loss_rate": losses / num_games,
-        "tie_rate": ties_count / num_games,
-        "avg_steps": avg_steps,
-    }
+    offset = 0
+
+    if include_random:
+        results["vs_random"] = _tally(all_results[offset : offset + num_games])
+        offset += num_games
 
     if has_ref:
-        ref_results = all_results[num_games:]
-        wins = sum(r["agent_win"] for r in ref_results)
-        losses = sum(r["opponent_win"] for r in ref_results)
-        ties_count = sum(r["tie"] for r in ref_results)
-        avg_steps = sum(r["steps"] for r in ref_results) / num_games
-        results["vs_reference"] = {
-            "win_rate": wins / num_games,
-            "loss_rate": losses / num_games,
-            "tie_rate": ties_count / num_games,
-            "avg_steps": avg_steps,
-        }
+        results["vs_reference"] = _tally(all_results[offset : offset + num_games])
+        offset += num_games
+
+    for label in valid_extras:
+        results[f"vs_{label}"] = _tally(all_results[offset : offset + num_games])
+        offset += num_games
 
     return results
 
@@ -635,21 +666,38 @@ def run_benchmark(model, device, n_actions, num_workers,
 # ─────────────────────────────────────────────────────────────────────
 
 def train_gpu_parallel(num_epochs=cfg.NUM_EPOCHS, num_games=cfg.NUM_GAMES,
-                       n_actions=NUM_ACTIONS, num_workers=None):
+                       n_actions=NUM_ACTIONS, num_workers=None,
+                       agent_type=None, reward_config=None):
     """GPU-accelerated parallelized training loop for the Checkers PPO agent.
 
     Args:
-        num_workers: Number of CPU worker processes. Defaults to
-                     cfg.GPU_WORKER_FRACTION of cpu_count.
+        num_workers:   Number of CPU worker processes.
+        agent_type:    League agent name (e.g. "tactical"). If provided,
+                       reward_config and PPO hyperparams (gamma, entropy_bonus)
+                       are looked up from cfg.LEAGUE_AGENTS[agent_type].
+        reward_config: Explicit reward config dict (overrides agent_type lookup).
     """
     input_shape = (4, 8, 8)
     device = get_device()
+
+    # Resolve reward config and per-agent PPO hyperparams
+    if agent_type is not None and agent_type in cfg.LEAGUE_AGENTS:
+        league_cfg = cfg.LEAGUE_AGENTS[agent_type]
+        if reward_config is None:
+            reward_config = league_cfg
+        gamma         = league_cfg.get("gamma", cfg.GAMMA)
+        entropy_bonus = league_cfg.get("entropy_bonus", 0.01)
+    else:
+        gamma         = cfg.GAMMA
+        entropy_bonus = 0.01
+
     agent = PPOAgent(
         input_shape, n_actions, device=device,
-        lr=cfg.LEARNING_RATE, gamma=cfg.GAMMA, eps_clip=cfg.EPS_CLIP,
+        lr=cfg.LEARNING_RATE, gamma=gamma, eps_clip=cfg.EPS_CLIP,
         K_epochs=cfg.K_EPOCHS, gae_lambda=cfg.GAE_LAMBDA,
         augment=cfg.AUGMENT, augment_noise=cfg.AUGMENT_NOISE,
         mini_batch_size=cfg.MINI_BATCH_SIZE,
+        entropy_bonus=entropy_bonus,
     )
 
     print(f"Device: {device}")
@@ -727,6 +775,7 @@ def train_gpu_parallel(num_epochs=cfg.NUM_EPOCHS, num_games=cfg.NUM_GAMES,
                 "mode": "train",
                 "epoch": epoch,
                 "opponent_model_path": opp_path,
+                "reward_config": reward_config,  # None = default env rewards
             })
 
         # Detailed CSV
@@ -777,9 +826,9 @@ def train_gpu_parallel(num_epochs=cfg.NUM_EPOCHS, num_games=cfg.NUM_GAMES,
         # Step the learning rate scheduler
         agent.step_scheduler()
 
-        # Save to opponent pool periodically
+        # Save to opponent pool periodically (namespaced by agent_type if set)
         if (epoch + 1) % cfg.POOL_SAVE_INTERVAL == 0:
-            pool.save(agent.policy.state_dict(), epoch + 1)
+            pool.save(agent.policy.state_dict(), epoch + 1, agent_name=agent_type)
             print(f"  Saved to opponent pool (size: {pool.size})")
 
         # Zip detailed CSV

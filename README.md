@@ -49,6 +49,7 @@ checkersRL/
     │   ├── train.py                # Sequential CPU self-play training
     │   ├── train_parallel.py       # CPU-parallel self-play training
     │   ├── train_gpu_parallel.py   # GPU-accelerated training with inference server
+    │   ├── train_league.py         # Multi-agent league play (reward-diverse agents, shared pool)
     │   └── benchmark/
     │       ├── benchmark_inference.py  # CPU vs GPU latency benchmarks
     │       └── benchmark_train.py      # One-off epoch benchmark runner
@@ -67,7 +68,7 @@ Standard American checkers:
 - Captures are mandatory when available, including multi-jump chains
 - Pieces promote to kings upon reaching the opposite end of the board
 - Win by capturing all opponent pieces or leaving them with no legal moves
-- Tie after 250 moves or 3 repeated board states
+- Tie after 250 moves or 5 repeated board states (5-fold repetition threshold)
 
 ## How It Works
 
@@ -95,12 +96,12 @@ All hyperparameters are centralized:
 | Parameter | Value |
 |---|---|
 | Learning rate | 1e-4 (cosine annealed to 1e-6) |
-| Discount (gamma) | 0.95 |
+| Discount (gamma) | 0.99 |
 | PPO clip range | 0.2 |
 | GAE lambda | 0.95 |
 | Mini-batch size | 2048 |
 | Games per epoch | 5000 |
-| Pool opponent prob | 15% |
+| Pool opponent prob | 20% (curriculum phase) / 50% (full 12v12) |
 | Pool epsilon | 15% |
 | Epsilon decay | 1.0 → 0.08 over 100 epochs |
 
@@ -117,8 +118,24 @@ All shaped rewards scaled by 0.5 so terminal outcomes dominate.
 | Capture penalty (opponent) | −2.5 retroactive (−5 × 0.5) |
 | Blockout win | +100 (winner adjustment) |
 | Blockout loss | −100 (loser adjustment) |
-| Tie | −80 to −150 (scales with material advantage and total pieces) |
+| Tie | −200 base − up to −48 stall (scales with material advantage and total pieces remaining) |
 | Time penalty | −sqrt(moves)/10 per non-terminal move |
+
+### Multi-Agent League Play (train_league.py)
+
+Standard self-play causes **co-evolution collapse** — both agents converge to a mutual draw equilibrium because they share the same objective and play styles. This is documented in large-scale RL systems; AlphaStar (Vinyals et al., 2019) and OpenAI Five (Berner et al., 2019) both solved it via population diversity.
+
+Our approach: **reward-diverse league training** with three agent types, each optimizing a different shaped reward function. Agents train sequentially in one script and share a unified opponent pool (`opponent_pool_league/`):
+
+| Agent type | Reward profile | Emergent play style |
+|---|---|---|
+| `tactical` | Balanced captures + king promotion + tie penalty −200 | Current well-rounded baseline |
+| `terminal` | Terminal only (win/loss/tie), no shaping | Long-horizon positional; doesn't care about material |
+| `aggressive` | 2× capture bonus, king promotion +25, tie penalty −500 | Piece-hungry, forces exchanges, hates draws |
+
+When any agent samples a pool opponent, it randomly draws from **all three agents' checkpoints** — guaranteeing cross-style exposure every epoch. A passive draw-seeking policy that works against its own mirror image fails against the aggressive agent's forced exchanges.
+
+New agent types can be added at any time by extending `LEAGUE_AGENTS` in `training_config.py`.
 
 ## Getting Started
 
@@ -156,6 +173,9 @@ python -m RL_models.PPO_Model.train
 
 # AlphaZero: MCTS self-play training
 python -m RL_models.MCTS.alphazero_trainer
+
+# Multi-agent league play (reward-diverse, shared opponent pool)
+python -m RL_models.PPO_Model.train_league
 ```
 
 ### Play Against the Agent
@@ -210,6 +230,12 @@ python -m RL_models.PPO_Model.benchmark.benchmark_train
 7. **Coulom, R.** (2006). *Efficient Selectivity and Backup Operators in Monte-Carlo Tree Search.* Computers and Games. [[paper]](https://link.springer.com/chapter/10.1007/978-3-540-75538-8_7) — Foundational MCTS with UCT.
 
 8. **Rosin, C. D.** (2011). *Multi-armed Bandits with Episode Context.* Annals of Mathematics and Artificial Intelligence, 61(3), 203–230. — PUCT selection formula used in AlphaZero MCTS.
+
+9. **Vinyals, O., Babuschkin, I., Czarnecki, W. M., et al.** (DeepMind). (2019). *Grandmaster level in StarCraft II using multi-agent reinforcement learning.* Nature, 575(7782), 350–354. https://doi.org/10.1038/s41586-019-1724-z — League play with agent-role diversity (main agents, exploiters) and PFSP opponent sampling to prevent co-evolution collapse.
+
+10. **Berner, C., Brockman, G., Chan, B., et al.** (OpenAI). (2019). *Dota 2 with Large Scale Deep Reinforcement Learning.* arXiv:1912.06680. [[paper]](https://arxiv.org/abs/1912.06680) — Population-based training with diverse reward shaping and historical policy sampling (80% self-play / 20% historical) to prevent strategy cycling.
+
+11. **Lanctot, M., Zambaldi, V., Gruslys, A., et al.** (2017). *A Unified Game-Theoretic Approach to Multiagent Reinforcement Learning.* NeurIPS 2017. arXiv:1711.00832. [[paper]](https://arxiv.org/abs/1711.00832) — PSRO: the game-theoretic foundation showing naive self-play converges to a pathological Nash equilibrium; best responses to the mixture of past policies provably converges to the true Nash.
 
 ## License
 

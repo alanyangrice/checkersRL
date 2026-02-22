@@ -24,7 +24,19 @@ class CheckersEnv(gym.Env):
     call game.switch_turn() -- just keep calling step().
     """
 
-    def __init__(self):
+    def __init__(self, reward_config=None):
+        """Create a CheckersEnv.
+
+        Args:
+            reward_config: Optional dict overriding default reward parameters.
+                Keys (all optional, defaults shown):
+                    capture_bonus      (10.0)  — reward per capture hop
+                    capture_penalty    (-5.0)  — retroactive penalty to victim per piece
+                    king_bonus         (15.0)  — one-time king-promotion reward
+                    tie_base           (-200)  — base tie penalty
+                    shaping_scale      (0.5)   — multiplier on all shaped rewards
+                    time_penalty_scale (1.0)   — multiplier on per-move time penalty
+        """
         super(CheckersEnv, self).__init__()
 
         self.game = Game()
@@ -45,6 +57,15 @@ class CheckersEnv(gym.Env):
 
         # Action mask (updated after reset/step)
         self._action_mask = np.zeros(NUM_ACTIONS, dtype=np.float32)
+
+        # Reward parameters (configurable for multi-agent league play)
+        cfg = reward_config or {}
+        self._capture_bonus      = cfg.get("capture_bonus",      10.0)
+        self._capture_penalty    = cfg.get("capture_penalty",    -5.0)
+        self._king_bonus         = cfg.get("king_bonus",         15.0)
+        self._tie_base           = cfg.get("tie_base",          -200)
+        self._shaping_scale      = cfg.get("shaping_scale",       0.5)
+        self._time_penalty_scale = cfg.get("time_penalty_scale",  1.0)
 
     # ------------------------------------------------------------------
     # Gym interface
@@ -170,7 +191,7 @@ class CheckersEnv(gym.Env):
             self._update_action_mask()
             obs = self.get_board_state()
 
-            return obs, 10.0, False, False, {
+            return obs, self._capture_bonus, False, False, {
                 "turn": self.game.turn,
                 "turn_complete": False,
                 "winner": "None",
@@ -198,7 +219,8 @@ class CheckersEnv(gym.Env):
         # --- Reward computation ------------------------------------------
         # Shaped rewards are scaled down so terminal outcomes (win/loss/tie)
         # have more relative impact on the learning signal.
-        SHAPING_SCALE = 0.5
+        # Uses instance variables so each env instance can have a different
+        # reward profile (league play with diverse agents).
 
         # Check game-over first (need 'done' flag for opponent penalty guard)
         end_reward, done, winner = self.reward_end_game()
@@ -208,9 +230,9 @@ class CheckersEnv(gym.Env):
         # King promotion: one-time bonus for advancing a piece
         shaped_reward += self.reward_king_promotion(old_board)
 
-        # +10 for the final capture hop (intermediates already got +10 each)
+        # capture_bonus for the final capture hop (intermediates already got it)
         if self._is_capture_turn:
-            shaped_reward += 10.0
+            shaped_reward += self._capture_bonus
 
         # NOTE: penalize_undefended_pieces removed — the retroactive capture
         # penalty (-2.5 per piece taken) already punishes the victim when a
@@ -222,7 +244,7 @@ class CheckersEnv(gym.Env):
         # *maintaining* a position rather than *making progress*.
 
         # Combine: scaled shaping + full-strength terminal reward
-        reward = shaped_reward * SHAPING_SCALE + end_reward
+        reward = shaped_reward * self._shaping_scale + end_reward
 
         # Note: Immediate per-step repetition penalties were tried but disrupted
         # training (blue/red asymmetry, catastrophic reward scale).  The
@@ -236,12 +258,10 @@ class CheckersEnv(gym.Env):
         opponent_color = RED if acting_color == BLUE else BLUE
         blue_adj, red_adj = 0.0, 0.0
 
-        # Capture penalty: penalise the opponent whose piece(s) were taken
-        # (-5 per piece, halved relative to the +10 capture bonus to
-        # encourage tactical exchanges rather than passive avoidance).
+        # Capture penalty: penalise the opponent whose piece(s) were taken.
         if self._is_capture_turn:
             num_captured = len(self._current_move_chain) - 1
-            capture_penalty = -5.0 * num_captured * SHAPING_SCALE
+            capture_penalty = self._capture_penalty * num_captured * self._shaping_scale
             if opponent_color == BLUE:
                 blue_adj += capture_penalty
             else:
@@ -451,7 +471,7 @@ class CheckersEnv(gym.Env):
 
     def reward_king_promotion(self, old_board):
         if self._king_promoted(old_board.board):
-            return 15
+            return self._king_bonus
         return 0
 
     def penalize_undefended_pieces(self, old_board, new_board):
@@ -471,7 +491,7 @@ class CheckersEnv(gym.Env):
             return self._tie_reward(), True, "Tie"
         elif winner is not None:
             return -100, True, copy.deepcopy(winner)
-        return -np.sqrt(len(self.game.moves)) / 10, False, None
+        return -np.sqrt(len(self.game.moves)) / 10 * self._time_penalty_scale, False, None
         # return 0, False, None
 
     # ------------------------------------------------------------------
@@ -517,7 +537,7 @@ class CheckersEnv(gym.Env):
         total_material = my_material + opp_material
         advantage = my_material - opp_material   # positive = I had more
 
-        base = -200                               # raised from -100 — ties should be worse than any loss
+        base = self._tie_base
         adv_penalty = -8 * max(advantage, 0)     # only the stronger side pays
         stall_penalty = -2 * total_material       # more pieces left = worse
 
