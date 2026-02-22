@@ -224,6 +224,11 @@ class CheckersEnv(gym.Env):
         # Combine: scaled shaping + full-strength terminal reward
         reward = shaped_reward * SHAPING_SCALE + end_reward
 
+        # Note: Immediate per-step repetition penalties were tried but disrupted
+        # training (blue/red asymmetry, catastrophic reward scale).  The
+        # combination of 5-fold repetition threshold + higher base tie penalty
+        # (-200) + gamma=0.98 (in training_config) is the preferred approach.
+
         # --- Per-color reward adjustments for the training loop ----------
         # These are retroactive penalties applied to the *opponent's* last
         # memory entry, returned via info so the env owns all reward math.
@@ -512,7 +517,7 @@ class CheckersEnv(gym.Env):
         total_material = my_material + opp_material
         advantage = my_material - opp_material   # positive = I had more
 
-        base = -100
+        base = -200                               # raised from -100 — ties should be worse than any loss
         adv_penalty = -8 * max(advantage, 0)     # only the stronger side pays
         stall_penalty = -2 * total_material       # more pieces left = worse
 

@@ -240,7 +240,7 @@ class Game:
         # Check board state repetition
         board_hash = self.board.get_board_hash()
         self.board_states[board_hash] = self.board_states.get(board_hash, 0) + 1
-        if self.board_states[board_hash] >= 3:
+        if self.board_states[board_hash] >= 5:
             return "Tie"
 
         # Check for presence of pieces for each color

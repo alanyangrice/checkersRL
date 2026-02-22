@@ -12,7 +12,9 @@ from multiprocessing import cpu_count
 # ─────────────────────────────────────────────────────────────────────
 
 LEARNING_RATE = 1e-4
-GAMMA = 0.95                  # discount factor
+GAMMA = 0.99                # discount factor (raised from 0.95 — higher gamma makes terminal
+                              # tie/loss penalties less discounted, reducing the incentive to
+                              # force early ties to escape future losses)
 EPS_CLIP = 0.2                # PPO clipping range
 K_EPOCHS = 4                  # PPO update epochs per batch
 GAE_LAMBDA = 0.95             # GAE smoothing parameter
@@ -29,8 +31,8 @@ LR_SCHEDULER_ETA_MIN = 1e-6   # CosineAnnealingLR minimum LR
 
 NUM_EPOCHS = 1000
 NUM_GAMES = 5000              # games per epoch
-POOL_OPPONENT_PROB_CURRICULUM = 0.20  # pool prob during curriculum phase (diversity already comes from position randomness)
-POOL_OPPONENT_PROB_FULL = 0.35        # pool prob after curriculum ends (stronger anti-passive-play pressure)
+POOL_OPPONENT_PROB_CURRICULUM = 0.25  # pool prob during curriculum phase (diversity already comes from position randomness)
+POOL_OPPONENT_PROB_FULL = 0.50        # pool prob after curriculum ends (stronger anti-passive-play pressure)
 POOL_EPSILON = 0.15           # exploration rate for pool opponents
 POOL_SAVE_INTERVAL = 10       # save to opponent pool every N epochs
 POOL_MAX_SIZE = 20            # max checkpoints in the opponent pool
@@ -47,7 +49,7 @@ CURRICULUM_ENABLED = True
 # Phase 1: mid-game positions (4-9 pieces per side)
 # NOTE: 2-5 piece endgame phases were avoided — very small positions are
 # often theoretical draws and train passive play rather than curing it.
-CURRICULUM_PHASE1_END_EPOCH = 100   # switch to full 12v12 after this epoch
+CURRICULUM_PHASE1_END_EPOCH = 80  # switch to full 12v12 after this epoch
 CURRICULUM_PHASE1_PIECES_MIN = 4
 CURRICULUM_PHASE1_PIECES_MAX = 9
 

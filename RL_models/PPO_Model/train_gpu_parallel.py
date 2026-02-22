@@ -849,6 +849,11 @@ def train_gpu_parallel(num_epochs=cfg.NUM_EPOCHS, num_games=cfg.NUM_GAMES,
                     vref.get("tie_rate", ""), vref.get("avg_steps", ""),
                 ])
 
+            # Auto-advance reference model to current epoch so the next
+            # benchmark always measures improvement over the last tested epoch.
+            torch.save(agent.policy.state_dict(), reference_model_path)
+            print(f"  Reference model advanced to epoch {epoch + 1}")
+
 
 if __name__ == "__main__":
     train_gpu_parallel()

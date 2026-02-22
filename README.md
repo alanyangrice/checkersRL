@@ -2,8 +2,6 @@
 
 A fully playable checkers game with a reinforcement learning agent trained via **Proximal Policy Optimization (PPO)** self-play. Play against a friend locally, challenge a trained AI opponent, or replay recorded training games.
 
-**Current performance**: 88.4% win rate vs random player after 50 training epochs (500,000+ games).
-
 ## Features
 
 - **Interactive Checkers Game** — full implementation of standard American checkers rules with a Pygame GUI
@@ -194,20 +192,7 @@ python -m RL_models.PPO_Model.benchmark.benchmark_inference
 # Run benchmark for a specific epoch
 python -m RL_models.PPO_Model.benchmark.benchmark_train
 ```
-
-## Training Results
-
-| Epoch | vs Random (win%) | vs Reference (win%) |
-|-------|-----------------|-------------------|
-| 10 | 58.8% | 56.0% |
-| 20 | 64.8% | 67.6% |
-| 30 | 75.0% | 75.6% |
-| 40 | 84.0% | 84.4% |
-| 50 | **88.4%** | 86.6% |
-| 60 | 85.4% | 35.0%* |
-
-*Reference model updated to epoch 50 at this point. The drop reflects strategy cycling (self-play non-transitivity) — the agent converged to a passive draw-seeking strategy that beats random but loses to its own past self.
-
+ 
 ## References
 
 1. **Schulman, J., Wolski, F., Dhariwal, P., Radford, A., & Klimov, O.** (2017). *Proximal Policy Optimization Algorithms.* arXiv:1707.06347. [[paper]](https://arxiv.org/abs/1707.06347) — Core training algorithm.
