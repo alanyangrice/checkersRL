@@ -21,7 +21,7 @@ GAE_LAMBDA = 0.95             # GAE smoothing parameter
 AUGMENT = True                # DrAC-style data augmentation
 AUGMENT_NOISE = 0.05          # std of Gaussian noise for augmentation
 MINI_BATCH_SIZE = 2048        # mini-batch size for PPO updates
-LR_SCHEDULER_T_MAX = 500      # CosineAnnealingLR period
+LR_SCHEDULER_T_MAX = 250      # CosineAnnealingLR period
 LR_SCHEDULER_ETA_MIN = 1e-6   # CosineAnnealingLR minimum LR
 
 
@@ -86,14 +86,17 @@ LEAGUE_AGENTS = {
     "aggressive": {
         # Amplified tactical rewards + extreme tie aversion.
         # Piece-hungry, forces exchanges, demolishes passive draw-seekers.
-        "capture_bonus":      20.0,
-        "capture_penalty":   -10.0,
-        "king_bonus":         30.0,
-        "tie_base":           -80, # base penalty for a draw with 80 penalty
+        # Reward magnitudes reduced vs run 6 (20/30 → 15/20) to cut gradient
+        # variance; entropy raised to 0.02 to match terminal and prevent the
+        # policy-sharpening collapse observed at run 6 epochs 73-75.
+        "capture_bonus":      15.0,
+        "capture_penalty":    -8.0,
+        "king_bonus":         20.0,
+        "tie_base":           -80,
         "shaping_scale":       0.8,
         "time_penalty_scale":  2.0,  # urgency: finish faster
-        "gamma":               0.99, # short-horizon opportunist with 0.99 discount factor
-        "entropy_bonus":       0.01,
+        "gamma":               0.99,
+        "entropy_bonus":       0.02,  # was 0.01 — slows policy sharpening
     },
 }
 
@@ -101,10 +104,12 @@ LEAGUE_AGENTS = {
 # Remove an entry to disable that agent; add a new LEAGUE_AGENTS key to enable it.
 ACTIVE_AGENTS = ["tactical", "terminal", "aggressive"]
 
-# Opponent pool probability for league mode.
-# Cross-agent diversity (3 styles) makes 33% roughly equivalent to 50%
-# in single-agent mode, while leaving more time for productive self-play.
-LEAGUE_POOL_OPPONENT_PROB = 0.10
+# Opponent pool probability for league mode — ramped after curriculum.
+# During curriculum (epoch < 20), position diversity is already high so
+# cross-style opponents add less; 10% keeps noise low.  After epoch 20,
+# 30% gives meaningful cross-style exposure without crowding out self-play.
+LEAGUE_POOL_OPPONENT_PROB_EARLY = 0.20
+LEAGUE_POOL_OPPONENT_PROB_FULL  = 0.30
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -131,6 +136,22 @@ EPSILON_DECAY_EPOCHS = 100    # epochs over which epsilon decays
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Checkpoint management
+# ─────────────────────────────────────────────────────────────────────
+
+CHECKPOINT_KEEP_LAST = None   # None = keep all checkpoints; set to an int to prune old ones
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Prioritized opponent sampling
+# ─────────────────────────────────────────────────────────────────────
+
+OPPONENT_SAMPLING_TEMPERATURE = 0.5  # lower = exploit harder opponents more aggressively
+OPPONENT_PRIOR_WIN_RATE       = 0.5  # assumed win rate for unseen/new checkpoints
+OPPONENT_MIN_GAMES            = 5    # games required before stats influence sampling weight
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Parallelism
 # ─────────────────────────────────────────────────────────────────────
 
@@ -154,6 +175,17 @@ def get_num_workers_gpu():
 def get_epsilon(epoch):
     """Compute exploration epsilon for the given epoch."""
     return max(EPSILON_END, EPSILON_START - epoch / EPSILON_DECAY_EPOCHS)
+
+
+def get_league_pool_prob(league_epoch):
+    """Return pool opponent probability for the current league epoch.
+
+    Lower during curriculum (epoch < CURRICULUM_PHASE1_END_EPOCH) and higher
+    once all three agent types have had a chance to add checkpoints.
+    """
+    if CURRICULUM_ENABLED and league_epoch < CURRICULUM_PHASE1_END_EPOCH:
+        return LEAGUE_POOL_OPPONENT_PROB_EARLY
+    return LEAGUE_POOL_OPPONENT_PROB_FULL
 
 
 def get_pool_opponent_prob(epoch):

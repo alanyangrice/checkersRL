@@ -204,9 +204,9 @@ def play_game(n_actions, game_id, epoch, opponent_model_path=None):
 
             blue_adj = info.get("blue_reward_adjustment", 0.0)
             red_adj = info.get("red_reward_adjustment", 0.0)
-            if blue_adj != 0.0 and blue_memory.rewards:
+            if blue_adj != 0.0 and len(blue_memory) > 0:
                 blue_memory.rewards[-1] += blue_adj
-            if red_adj != 0.0 and red_memory.rewards:
+            if red_adj != 0.0 and len(red_memory) > 0:
                 red_memory.rewards[-1] += red_adj
 
             if done:
@@ -293,9 +293,9 @@ def play_game(n_actions, game_id, epoch, opponent_model_path=None):
         # Apply per-color reward adjustments computed by the env
         blue_adj = info.get("blue_reward_adjustment", 0.0)
         red_adj = info.get("red_reward_adjustment", 0.0)
-        if blue_adj != 0.0 and blue_memory.rewards:
+        if blue_adj != 0.0 and len(blue_memory) > 0:
             blue_memory.rewards[-1] += blue_adj
-        if red_adj != 0.0 and red_memory.rewards:
+        if red_adj != 0.0 and len(red_memory) > 0:
             red_memory.rewards[-1] += red_adj
 
         log_prob_list.append(log_prob)

@@ -24,6 +24,7 @@ Run from repo root:
     python -m RL_models.PPO_Model.train_league
 """
 
+import copy
 import os
 import csv
 import time
@@ -34,14 +35,17 @@ from multiprocessing import cpu_count
 
 import torch
 
-from RL_models.PPO_Model.Agent import PPOAgent, get_device
+from RL_models.PPO_Model.Agent import (PPOAgent, get_device,
+                                        get_policy_state_dict,
+                                        load_policy_state_dict)
 from RL_models.PPO_Model.Memory import Memory
 from RL_models.PPO_Model.OpponentPool import OpponentPool
 from RL_models.PPO_Model import training_config as cfg
 from itertools import combinations
 
 from RL_models.PPO_Model.train_gpu_parallel import (
-    _run_games_on_gpu,
+    WorkerContext,
+    _prune_checkpoints,
     run_benchmark,
     write_detailed_csv,
     zip_csv_file,
@@ -89,7 +93,7 @@ def _load_checkpoint(agent, model_dir, device):
     latest = max(checkpoints, key=lambda f: int(f.split("_")[-1].split(".")[0]))
     cp = torch.load(os.path.join(model_dir, latest), map_location=device,
                     weights_only=False)
-    agent.policy.load_state_dict(cp["model_state_dict"])
+    load_policy_state_dict(agent.policy, cp["model_state_dict"])
     agent.optimizer.load_state_dict(cp["optimizer_state_dict"])
     if "scheduler_state_dict" in cp:
         agent.scheduler.load_state_dict(cp["scheduler_state_dict"])
@@ -219,7 +223,7 @@ def train_league(num_league_epochs=cfg.NUM_EPOCHS,
 
         # Save reference model if new run
         if not os.path.exists(ref_paths[agent_type]):
-            torch.save(agents[agent_type].policy.state_dict(),
+            torch.save(agents[agent_type].get_policy_state_dict(),
                        ref_paths[agent_type])
             print(f"  [{agent_type}] Saved reference model (epoch 0)")
 
@@ -243,134 +247,157 @@ def train_league(num_league_epochs=cfg.NUM_EPOCHS,
     # skips epochs — all agents advance together from the earliest checkpoint.
     global_start_epoch = min(start_epochs.values())
 
-    # ── League training loop ────────────────────────────────────────
-    for league_epoch in range(global_start_epoch, num_league_epochs):
-        print(f"\n{'='*60}")
-        print(f"  League epoch {league_epoch + 1}  |  pool size: {pool.size}")
-        print(f"{'='*60}")
+    def _build_tasks(agent_type, league_epoch):
+        """Build the task list for one agent-epoch."""
+        reward_cfg = cfg.LEAGUE_AGENTS[agent_type]
+        tasks = []
+        for _ in range(num_games):
+            opp_path = None
+            if pool.should_use_opponent(prob=cfg.get_league_pool_prob(league_epoch)):
+                opp_path = pool.sample(agent_name=agent_type)
+            tasks.append({
+                "mode": "train",
+                "epoch": league_epoch,
+                "opponent_model_path": opp_path,
+                "reward_config": reward_cfg,
+            })
+        return tasks
 
-        for agent_type in cfg.ACTIVE_AGENTS:
-            agent       = agents[agent_type]
-            reward_cfg  = cfg.LEAGUE_AGENTS[agent_type]
+    # ── League training loop (WorkerContext, sequential) ──────────────────
+    # Workers are kept alive across all agent-epochs within the entire run,
+    # eliminating per-agent spawn overhead (~1-2s/worker on Windows).
+    #
+    # Collection and GPU update are strictly sequential: all CPU workers
+    # finish collecting games before the PPO update starts, so CPU and GPU
+    # are never both under full load at the same time.
 
-            print(f"\n  [{agent_type}] epoch {league_epoch + 1}  "
-                  f"(gamma={reward_cfg['gamma']}, "
-                  f"tie_base={reward_cfg['tie_base']})")
+    first_agent = cfg.ACTIVE_AGENTS[0]
+    initial_sd  = agents[first_agent].get_policy_state_dict()
 
-            epoch_start = time.perf_counter()
+    with WorkerContext(initial_sd, device, n_actions, num_workers) as ctx:
 
-            # Build task list
-            game_tasks = []
-            for _ in range(num_games):
-                opp_path = None
-                if pool.should_use_opponent(prob=cfg.LEAGUE_POOL_OPPONENT_PROB):
-                    opp_path = pool.sample()
-                game_tasks.append({
-                    "mode": "train",
-                    "epoch": league_epoch,
-                    "opponent_model_path": opp_path,
-                    "reward_config": reward_cfg,
-                })
+        for league_epoch in range(global_start_epoch, num_league_epochs):
+            print(f"\n{'='*60}")
+            print(f"  League epoch {league_epoch + 1}  |  pool size: {pool.size}")
+            print(f"{'='*60}")
 
-            # Detailed CSV for this agent-epoch
-            detail_csv = os.path.join(
-                detail_dirs[agent_type],
-                f"detailed_games_epoch_{league_epoch + 1}.csv"
-            )
-            with open(detail_csv, "w", newline="") as f:
-                csv.writer(f).writerow([
-                    "game_number", "blue_win", "red_win", "total_reward",
-                    "blue_reward", "red_reward", "time", "opponent",
-                    "moves", "log_probs", "reward_list"
-                ])
+            for agent_idx, agent_type in enumerate(cfg.ACTIVE_AGENTS):
+                agent      = agents[agent_type]
+                reward_cfg = cfg.LEAGUE_AGENTS[agent_type]
 
-            # Run games with GPU inference server
-            all_results = _run_games_on_gpu(
-                agent.policy, device, n_actions, game_tasks, num_workers,
-                label=f"[{agent_type}] ep{league_epoch + 1}",
-            )
+                print(f"\n  [{agent_type}] epoch {league_epoch + 1}  "
+                      f"(gamma={reward_cfg['gamma']}, "
+                      f"tie_base={reward_cfg['tie_base']})")
 
-            write_detailed_csv(detail_csv, all_results, 0,
-                               league_epoch, num_games)
+                epoch_start = time.perf_counter()
 
-            # Zip detailed CSV immediately after writing (before any early-exit paths)
-            zip_path = detail_csv.replace(".csv", ".zip")
-            zip_csv_file(detail_csv, zip_path)
+                # Collect games with up-to-date weights, then wait for all workers
+                # to finish before starting the GPU PPO update.
+                ctx.update_model(agent.get_policy_state_dict())
+                all_results = ctx.run_tasks(
+                    _build_tasks(agent_type, league_epoch),
+                    f"[{agent_type}] ep{league_epoch + 1}",
+                )
 
-            # Aggregate statistics
-            total_rewards = {"blue": 0, "red": 0}
-            blue_wins = red_wins = ties = total_steps = pool_games = 0
-            max_move_reward = float('-inf')
+                # Detailed CSV for this agent-epoch
+                detail_csv = os.path.join(
+                    detail_dirs[agent_type],
+                    f"detailed_games_epoch_{league_epoch + 1}.csv"
+                )
+                with open(detail_csv, "w", newline="") as f:
+                    csv.writer(f).writerow([
+                        "game_number", "blue_win", "red_win", "total_reward",
+                        "blue_reward", "red_reward", "time", "opponent",
+                        "moves", "log_probs", "reward_list"
+                    ])
 
-            for r in all_results:
-                total_rewards["blue"] += r["rewards"]["blue"]
-                total_rewards["red"]  += r["rewards"]["red"]
-                total_steps       += r["episode_steps"]
-                blue_wins         += r["blue_win"]
-                red_wins          += r["red_win"]
-                ties              += 1 - (r["blue_win"] or r["red_win"])
-                max_move_reward    = max(max_move_reward,
-                                        r["max_episode_move_reward"])
-                if r["opponent"] != "self":
-                    pool_games += 1
+                write_detailed_csv(detail_csv, all_results, 0,
+                                   league_epoch, num_games)
 
-            # PPO update (GPU)
-            combined_memory = Memory()
-            for r in all_results:
-                combined_memory.extend(r["blue_memory"])
-                combined_memory.extend(r["red_memory"])
-            agent.update(combined_memory)
-            agent.step_scheduler()
+                # Zip detailed CSV immediately after writing
+                zip_path = detail_csv.replace(".csv", ".zip")
+                zip_csv_file(detail_csv, zip_path)
 
-            # Guard: skip saving if weights went NaN during update
-            if any(torch.isnan(p).any()
-                   for p in agent.policy.parameters()):
-                print(f"    [{agent_type}] CRITICAL: NaN in policy weights after "
-                      f"update at epoch {league_epoch + 1} — skipping checkpoint save. "
-                      f"Consider rolling back to previous epoch.")
-                continue
+                # Aggregate statistics
+                total_rewards = {"blue": 0, "red": 0}
+                blue_wins = red_wins = ties = total_steps = pool_games = 0
+                max_move_reward = float('-inf')
 
-            # Pool save
-            if (league_epoch + 1) % cfg.POOL_SAVE_INTERVAL == 0:
-                pool.save(agent.policy.state_dict(),
-                          league_epoch + 1,
-                          agent_name=agent_type)
-                print(f"    [{agent_type}] saved to league pool "
-                      f"(total pool size: {pool.size})")
+                for r in all_results:
+                    total_rewards["blue"] += r["rewards"]["blue"]
+                    total_rewards["red"]  += r["rewards"]["red"]
+                    total_steps       += r["episode_steps"]
+                    blue_wins         += r["blue_win"]
+                    red_wins          += r["red_win"]
+                    ties              += 1 - (r["blue_win"] or r["red_win"])
+                    max_move_reward    = max(max_move_reward,
+                                            r["max_episode_move_reward"])
+                    if r["opponent"] != "self":
+                        pool_games += 1
 
-            # Log epoch statistics
-            epoch_duration = time.perf_counter() - epoch_start
-            avg_reward      = (total_rewards["blue"] + total_rewards["red"]) / num_games
-            avg_blue_reward = total_rewards["blue"] / num_games
-            avg_red_reward  = total_rewards["red"]  / num_games
-            avg_steps       = total_steps / num_games
-            blue_win_rate   = blue_wins / num_games
-            red_win_rate    = red_wins  / num_games
-            tie_rate        = ties      / num_games
+                # Update prioritized opponent sampling stats (single JSON round-trip)
+                pool.batch_update_stats(all_results, agent_name=agent_type)
 
-            with open(csv_paths[agent_type], "a", newline="") as f:
-                csv.writer(f).writerow([
-                    league_epoch + 1, avg_reward, avg_blue_reward,
-                    avg_red_reward, avg_steps, blue_win_rate,
-                    red_win_rate, tie_rate, max_move_reward,
-                    round(epoch_duration, 2),
-                ])
+                # PPO update (GPU) — workers are idle while this runs
+                combined_memory = Memory()
+                for r in all_results:
+                    combined_memory.extend(r["blue_memory"])
+                    combined_memory.extend(r["red_memory"])
+                agent.update(combined_memory)
+                agent.step_scheduler()
 
-            # Save checkpoint
-            torch.save({
-                "epoch": league_epoch + 1,
-                "model_state_dict": agent.policy.state_dict(),
-                "optimizer_state_dict": agent.optimizer.state_dict(),
-                "scheduler_state_dict": agent.scheduler.state_dict(),
-            }, os.path.join(model_dirs[agent_type],
-                            f"agent_epoch_{league_epoch + 1}.pt"))
+                # Guard: skip saving if weights went NaN during update
+                if any(torch.isnan(p).any()
+                       for p in agent.policy.parameters()):
+                    print(f"    [{agent_type}] CRITICAL: NaN in policy weights after "
+                          f"update at epoch {league_epoch + 1} — skipping checkpoint save. "
+                          f"Consider rolling back to previous epoch.")
+                    continue
 
-            print(f"    [{agent_type}] ep{league_epoch + 1} done in "
-                  f"{epoch_duration:.0f}s. "
-                  f"Reward: {avg_reward:.1f}  "
-                  f"Blue: {blue_win_rate:.1%}  Red: {red_win_rate:.1%}  "
-                  f"Tie: {tie_rate:.1%}  "
-                  f"LR: {agent.scheduler.get_last_lr()[0]:.2e}")
+                # Pool save
+                if (league_epoch + 1) % cfg.POOL_SAVE_INTERVAL == 0:
+                    pool.save(agent.get_policy_state_dict(),
+                              league_epoch + 1,
+                              agent_name=agent_type)
+                    print(f"    [{agent_type}] saved to league pool "
+                          f"(total pool size: {pool.size})")
+
+                # Log epoch statistics
+                epoch_duration = time.perf_counter() - epoch_start
+                avg_reward      = (total_rewards["blue"] + total_rewards["red"]) / num_games
+                avg_blue_reward = total_rewards["blue"] / num_games
+                avg_red_reward  = total_rewards["red"]  / num_games
+                avg_steps       = total_steps / num_games
+                blue_win_rate   = blue_wins / num_games
+                red_win_rate    = red_wins  / num_games
+                tie_rate        = ties      / num_games
+
+                with open(csv_paths[agent_type], "a", newline="") as f:
+                    csv.writer(f).writerow([
+                        league_epoch + 1, avg_reward, avg_blue_reward,
+                        avg_red_reward, avg_steps, blue_win_rate,
+                        red_win_rate, tie_rate, max_move_reward,
+                        round(epoch_duration, 2),
+                    ])
+
+                # Save checkpoint
+                torch.save({
+                    "epoch": league_epoch + 1,
+                    "model_state_dict": agent.get_policy_state_dict(),
+                    "optimizer_state_dict": agent.optimizer.state_dict(),
+                    "scheduler_state_dict": agent.scheduler.state_dict(),
+                }, os.path.join(model_dirs[agent_type],
+                                f"agent_epoch_{league_epoch + 1}.pt"))
+
+                # Prune old checkpoints — keep only the most recent N
+                _prune_checkpoints(model_dirs[agent_type], cfg.CHECKPOINT_KEEP_LAST)
+
+                print(f"    [{agent_type}] ep{league_epoch + 1} done in "
+                      f"{epoch_duration:.0f}s. "
+                      f"Reward: {avg_reward:.1f}  "
+                      f"Blue: {blue_win_rate:.1%}  Red: {red_win_rate:.1%}  "
+                      f"Tie: {tie_rate:.1%}  "
+                      f"LR: {agent.scheduler.get_last_lr()[0]:.2e}")
 
 
 
@@ -427,7 +454,7 @@ def train_league(num_league_epochs=cfg.NUM_EPOCHS,
 
             # Auto-advance each agent's self-reference to current epoch
             for at in cfg.ACTIVE_AGENTS:
-                torch.save(agents[at].policy.state_dict(), ref_paths[at])
+                torch.save(agents[at].get_policy_state_dict(), ref_paths[at])
             print(f"  All reference models advanced to epoch {league_epoch + 1}")
 
 

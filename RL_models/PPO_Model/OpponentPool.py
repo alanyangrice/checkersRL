@@ -1,6 +1,11 @@
+import json
 import os
 import random
+
+import numpy as np
 import torch
+
+from RL_models.PPO_Model import training_config as cfg
 
 
 class OpponentPool:
@@ -10,13 +15,18 @@ class OpponentPool:
 
     Single-agent mode (original behaviour):
         pool.save(state_dict, epoch=10)           → saves pool_epoch_10.pt
-        pool.sample()                             → samples from pool_epoch_*.pt
+        pool.sample()                             → weighted sample from pool_epoch_*.pt
 
     League mode (multi-agent):
         pool.save(state_dict, epoch=10,           → saves tactical_epoch_10.pt
                   agent_name="tactical")
-        pool.sample()                             → samples from ALL *.pt files
-                                                     (cross-agent exposure)
+        pool.sample(agent_name="tactical")        → weighted sample from ALL *.pt files
+                                                     with weights based on win-rate stats
+                                                     tracked per agent_name
+
+    Sampling uses softmax-weighted selection biased toward opponents with lower
+    historical win rates (PFSP-style: sample opponents you struggle against more often).
+    Stats are persisted per agent in win_rates_{agent_name}.json files.
 
     In league mode, eviction is performed per agent_name so that each agent
     type maintains its own window of max_size checkpoints.
@@ -28,14 +38,11 @@ class OpponentPool:
         os.makedirs(pool_dir, exist_ok=True)
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # Internal helpers — checkpoint listing
     # ------------------------------------------------------------------
 
     def _list_checkpoints_for(self, agent_name=None):
-        """Return sorted filenames belonging to a specific agent_name.
-
-        If agent_name is None, returns single-agent 'pool_epoch_N.pt' files.
-        """
+        """Return sorted filenames belonging to a specific agent_name."""
         if agent_name is None:
             files = [f for f in os.listdir(self.pool_dir)
                      if f.startswith("pool_epoch_") and f.endswith(".pt")]
@@ -49,12 +56,34 @@ class OpponentPool:
 
     def _list_all_checkpoints(self):
         """Return all .pt files in the pool directory (cross-agent sampling)."""
-        files = [f for f in os.listdir(self.pool_dir) if f.endswith(".pt")]
-        return files
+        return [f for f in os.listdir(self.pool_dir) if f.endswith(".pt")]
 
     # Legacy alias used by single-agent code paths
     def _list_checkpoints(self):
         return self._list_checkpoints_for(agent_name=None)
+
+    # ------------------------------------------------------------------
+    # Internal helpers — win-rate stats persistence
+    # ------------------------------------------------------------------
+
+    def _stats_path(self, agent_name=None):
+        key = agent_name if agent_name is not None else "default"
+        return os.path.join(self.pool_dir, f"win_rates_{key}.json")
+
+    def _load_stats(self, agent_name=None):
+        path = self._stats_path(agent_name)
+        if not os.path.exists(path):
+            return {}
+        try:
+            with open(path, "r") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return {}
+
+    def _save_stats(self, stats, agent_name=None):
+        path = self._stats_path(agent_name)
+        with open(path, "w") as f:
+            json.dump(stats, f)
 
     # ------------------------------------------------------------------
     # Public API
@@ -80,21 +109,83 @@ class OpponentPool:
         while len(checkpoints) > self.max_size:
             oldest = checkpoints.pop(0)
             os.remove(os.path.join(self.pool_dir, oldest))
+            # Remove evicted checkpoint from win-rate stats so stale data
+            # does not pollute future sampling weights.
+            stats = self._load_stats(agent_name)
+            if oldest in stats:
+                del stats[oldest]
+                self._save_stats(stats, agent_name)
 
-    def sample(self):
-        """Return the full path to a random checkpoint from the pool.
+    def batch_update_stats(self, all_results, agent_name=None):
+        """Update win-rate stats from a completed epoch's game results.
 
-        In league mode (multiple agent types present) samples uniformly from
-        ALL checkpoints — providing cross-style exposure.  In single-agent
-        mode, samples from pool_epoch_*.pt files only.
+        Takes the full all_results list, filters for games that used a pool
+        opponent (opponent_path is not None), and performs a single JSON
+        load + batch of increments + single JSON save.  Call once per epoch,
+        NOT once per game, to keep I/O to a single round-trip.
+
+        Args:
+            all_results: list of result dicts from _run_games_on_gpu.
+            agent_name: The agent whose stats to update (e.g. "tactical").
+        """
+        pool_results = [
+            r for r in all_results
+            if r.get("opponent_path") is not None and r.get("agent_win") is not None
+        ]
+        if not pool_results:
+            return
+
+        stats = self._load_stats(agent_name)
+
+        for r in pool_results:
+            fname = os.path.basename(r["opponent_path"])
+            entry = stats.setdefault(fname, {"w": 0, "l": 0, "t": 0, "n": 0})
+            tie   = not r["blue_win"] and not r["red_win"]
+            if tie:
+                entry["t"] += 1
+            elif r["agent_win"]:
+                entry["w"] += 1
+            else:
+                entry["l"] += 1
+            entry["n"] += 1
+
+        self._save_stats(stats, agent_name)
+
+    def sample(self, agent_name=None):
+        """Return the full path to a checkpoint, weighted by difficulty.
+
+        Checkpoints the agent historically struggles against (lower win rate)
+        receive higher sampling weight — analogous to AlphaStar's PFSP.
+
+        Weight formula:  weight_i = (1 - win_rate_i) / temperature
+        Probabilities:   softmax(weights)
+
+        New or unseen checkpoints use OPPONENT_PRIOR_WIN_RATE (0.5) until
+        OPPONENT_MIN_GAMES games have been played against them.
 
         Returns None if the pool is empty.
         """
-        # Prefer cross-agent sampling when agent-namespaced files exist
         all_files = self._list_all_checkpoints()
         if not all_files:
             return None
-        chosen = random.choice(all_files)
+
+        stats = self._load_stats(agent_name)
+        weights = []
+        for fname in all_files:
+            entry = stats.get(fname, {})
+            n = entry.get("n", 0)
+            if n >= cfg.OPPONENT_MIN_GAMES:
+                win_rate = entry["w"] / n
+            else:
+                win_rate = cfg.OPPONENT_PRIOR_WIN_RATE
+            weights.append((1.0 - win_rate) / cfg.OPPONENT_SAMPLING_TEMPERATURE)
+
+        # Numerically stable softmax
+        w = np.array(weights, dtype=np.float64)
+        w = np.exp(w - w.max())
+        w /= w.sum()
+
+        chosen = np.random.choice(all_files, p=w)
         return os.path.join(self.pool_dir, chosen)
 
     def should_use_opponent(self, prob=0.3):
