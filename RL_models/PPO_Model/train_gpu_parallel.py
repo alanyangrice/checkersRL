@@ -117,8 +117,21 @@ class InferenceServer(threading.Thread):
             with torch.no_grad():
                 logits, _ = self.model(states_t)
 
+            if torch.isnan(logits).any():
+                print(f"[InferenceServer] NaN in logits — sending random actions for this batch")
+                for i, wid in enumerate(worker_ids):
+                    mask = masks_np[i]
+                    valid = np.where(mask > 0)[0]
+                    action = int(np.random.choice(valid)) if len(valid) > 0 else 0
+                    n = max(int(mask.sum()), 1)
+                    log_prob = float(np.log(1.0 / n))
+                    self.response_queues[wid].put((action, log_prob, 0.0))
+                continue
+
             masked_logits = logits + torch.where(
-                masks_t > 0, 0.0, self._neg_inf
+                masks_t > 0,
+                torch.zeros_like(logits),
+                torch.full_like(logits, -1e10),
             )
             probs = Categorical(logits=masked_logits)
             actions = probs.sample()
@@ -231,8 +244,7 @@ def _play_game(worker_id, request_queue, response_queue,
     state, _ = env.reset(options=curriculum_opts)
     done = False
 
-    episode_reward, episode_steps, max_episode_move_reward = 0, 0, 0
-    first_move, first_move_count = True, 0
+    episode_reward, episode_steps, max_episode_move_reward = 0, 0, float('-inf')
     log_prob_list = []
     reward_colors = []
     blue_win, red_win = 0, 0
@@ -244,7 +256,6 @@ def _play_game(worker_id, request_queue, response_queue,
             next_state, reward, done, _, info = env.step(0)
             episode_reward += reward
             episode_steps += 1
-            log_prob_list.append(0.0)
 
             blue_adj = info.get("blue_reward_adjustment", 0.0)
             red_adj = info.get("red_reward_adjustment", 0.0)
@@ -278,15 +289,8 @@ def _play_game(worker_id, request_queue, response_queue,
         else:
             # Current agent — use GPU server or random exploration
             epsilon = cfg.get_epsilon(epoch)
-            use_random_first = False
 
-            if use_random_first:
-                action = random_action_from_mask(action_mask)
-                log_prob = uniform_log_prob(action_mask)
-                first_move_count += 1
-                if first_move_count > 1:
-                    first_move = False
-            elif random.random() < epsilon:
+            if random.random() < epsilon:
                 action = random_action_from_mask(action_mask)
                 log_prob = uniform_log_prob(action_mask)
             else:
@@ -318,19 +322,9 @@ def _play_game(worker_id, request_queue, response_queue,
             if acting_color == BLUE:
                 blue_memory.add(state, action, reward, log_prob, done, action_mask)
                 reward_colors.append("blue")
-                if done:
-                    red_memory.update_last_done()
             else:
                 red_memory.add(state, action, reward, log_prob, done, action_mask)
                 reward_colors.append("red")
-                if done:
-                    blue_memory.update_last_done()
-        else:
-            if done:
-                if acting_color == BLUE:
-                    red_memory.update_last_done()
-                else:
-                    blue_memory.update_last_done()
 
         # Apply per-color reward adjustments computed by the env
         blue_adj = info.get("blue_reward_adjustment", 0.0)
@@ -340,7 +334,10 @@ def _play_game(worker_id, request_queue, response_queue,
         if red_adj != 0.0 and red_memory.rewards:
             red_memory.rewards[-1] += red_adj
 
-        log_prob_list.append(log_prob)
+        # Only log agent log_probs (opponent steps excluded) so log_probs
+        # aligns with rewards_list in the detailed CSV
+        if not is_opponent_acting:
+            log_prob_list.append(log_prob)
 
         if done:
             winner = info["winner"]
@@ -387,7 +384,7 @@ def _play_benchmark_game(worker_id, request_queue, response_queue,
                          n_actions, opponent_type, opponent_model_path, opp_cache,
                          reward_config=None):
     """Play a single benchmark game using GPU server for agent inference."""
-    env = CheckersEnv(reward_config=reward_config)
+    env = CheckersEnv(reward_config=None)  # benchmarks only track outcomes, not rewards
 
     opponent = None
     if opponent_type == "model" and opponent_model_path is not None:
@@ -399,6 +396,7 @@ def _play_benchmark_game(worker_id, request_queue, response_queue,
     state, _ = env.reset()
     done = False
     steps = 0
+    info = {}
 
     while not done:
         action_mask = env.get_action_mask()
@@ -560,8 +558,13 @@ def _run_games_on_gpu(model, device, n_actions, game_tasks, num_workers,
                 print(f"  {label}: {games_done}/{total_tasks} finished "
                       f"({alive} workers active)")
                 reported = games_done
-        except:
-            pass
+        except Exception:
+            # Check if all workers have died before all results arrived
+            if not any(p.is_alive() for p in workers) and len(result_map) < total_tasks:
+                raise RuntimeError(
+                    f"[{label}] All workers died after {len(result_map)}/{total_tasks} games. "
+                    f"Check worker processes for exceptions."
+                )
 
     # Stop server
     stop_event.set()
@@ -722,6 +725,8 @@ def train_gpu_parallel(num_epochs=cfg.NUM_EPOCHS, num_games=cfg.NUM_GAMES,
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         agent.policy.load_state_dict(checkpoint['model_state_dict'])
         agent.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if 'scheduler_state_dict' in checkpoint:
+            agent.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         start_epoch = checkpoint['epoch']
         print(f"Resuming training from epoch: {start_epoch}")
 
@@ -802,7 +807,7 @@ def train_gpu_parallel(num_epochs=cfg.NUM_EPOCHS, num_games=cfg.NUM_GAMES,
 
         # ── Aggregate statistics ──────────────────────────────────
         total_rewards = {"blue": 0, "red": 0}
-        blue_wins, red_wins, ties, max_move_reward, total_steps = 0, 0, 0, 0, 0
+        blue_wins, red_wins, ties, max_move_reward, total_steps = 0, 0, 0, float('-inf'), 0
         pool_games = 0
 
         for result in all_results:
@@ -860,6 +865,7 @@ def train_gpu_parallel(num_epochs=cfg.NUM_EPOCHS, num_games=cfg.NUM_GAMES,
             'epoch': epoch + 1,
             'model_state_dict': agent.policy.state_dict(),
             'optimizer_state_dict': agent.optimizer.state_dict(),
+            'scheduler_state_dict': agent.scheduler.state_dict(),
         }, os.path.join(model_dir, f"agent_epoch_{epoch + 1}.pt"))
 
         print(f"Epoch {epoch + 1} complete in {epoch_duration:.1f}s. "

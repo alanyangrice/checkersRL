@@ -4,6 +4,7 @@ import torch.optim as optim
 import numpy as np
 from torch.distributions import Categorical
 from RL_models.PPO_Model.PolicyNetwork import PPOPolicyNetwork
+from RL_models.PPO_Model import training_config as cfg
 
 
 def get_device():
@@ -39,7 +40,11 @@ class PPOAgent:
         self.device = device or get_device()
         self.policy = PPOPolicyNetwork(input_shape, n_actions).to(self.device)
         self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
-        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=500, eta_min=1e-6)
+        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer,
+            T_max=cfg.LR_SCHEDULER_T_MAX,
+            eta_min=cfg.LR_SCHEDULER_ETA_MIN,
+        )
         self.gamma = gamma
         self.eps_clip = eps_clip
         self.K_epochs = K_epochs
@@ -71,7 +76,11 @@ class PPOAgent:
             logits, _ = self.policy(state_t)
 
         # Apply semantic mask: -inf for invalid actions, 0 for valid
-        masked_logits = logits + torch.where(mask_t > 0, 0.0, torch.tensor(-1e10, device=self.device))
+        masked_logits = logits + torch.where(
+            mask_t > 0,
+            torch.zeros_like(logits),
+            torch.full_like(logits, -1e10),
+        )
 
         probs = Categorical(logits=masked_logits)
         action = probs.sample()
@@ -147,18 +156,20 @@ class PPOAgent:
                 logits_noisy = torch.clamp(logits_noisy, -50.0, 50.0)
                 # Apply action masks so augmented log_probs match the masked distribution
                 masked_logits_noisy = logits_noisy + torch.where(
-                    action_masks > 0, 0.0, torch.tensor(-1e10, device=self.device)
+                    action_masks > 0,
+                    torch.zeros_like(logits_noisy),
+                    torch.full_like(logits_noisy, -1e10),
                 )
                 probs_noisy = Categorical(logits=masked_logits_noisy)
                 log_probs_old_noisy = probs_noisy.log_prob(actions)
 
-            # Concatenate original + noisy
-            states = torch.cat([states, states_noisy], dim=0)
-            actions = torch.cat([actions, actions.clone()], dim=0)
-            log_probs_old = torch.cat([log_probs_old, log_probs_old_noisy], dim=0)
-            advantages = torch.cat([advantages, advantages.clone()], dim=0)
-            returns = torch.cat([returns, returns.clone()], dim=0)
-            action_masks = torch.cat([action_masks, action_masks.clone()], dim=0)
+                # Concatenate original + noisy (only when augmentation succeeded)
+                states = torch.cat([states, states_noisy], dim=0)
+                actions = torch.cat([actions, actions.clone()], dim=0)
+                log_probs_old = torch.cat([log_probs_old, log_probs_old_noisy], dim=0)
+                advantages = torch.cat([advantages, advantages.clone()], dim=0)
+                returns = torch.cat([returns, returns.clone()], dim=0)
+                action_masks = torch.cat([action_masks, action_masks.clone()], dim=0)
 
         # Normalize advantages over the full (augmented) batch
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
@@ -166,7 +177,6 @@ class PPOAgent:
 
         # --- PPO update for K epochs with mini-batches --------------------
         total = states.size(0)
-        neg_inf = torch.tensor(-1e10, device=self.device)
 
         for _ in range(self.K_epochs):
             # Shuffle indices each epoch for stochastic mini-batches
@@ -193,7 +203,11 @@ class PPOAgent:
                     logits = torch.clamp(logits, -50.0, 50.0)
 
                     # Apply action masks so the distribution matches collection
-                    masked_logits = logits + torch.where(mb_masks > 0, 0.0, neg_inf)
+                    masked_logits = logits + torch.where(
+                        mb_masks > 0,
+                        torch.zeros_like(logits),
+                        torch.full_like(logits, -1e10),
+                    )
                     probs = Categorical(logits=masked_logits)
                     log_probs = probs.log_prob(mb_actions)
                     entropy = probs.entropy()

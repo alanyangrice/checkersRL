@@ -17,11 +17,14 @@ from RL_models.MCTS.mcts_search import MCTSSearch
 from RL_models.checkers_env import CheckersEnv
 
 
-def load_network(device, epoch=None):
+def load_network(device, epoch=None, agent_type=None):
     """Load a model checkpoint.
 
-    If *epoch* is given, loads that specific epoch from the PPO parallel folder.
-    Otherwise, loads the latest available model (AlphaZero > PPO parallel > PPO sequential).
+    Args:
+        epoch:      Load a specific epoch number. If omitted, loads the latest.
+        agent_type: One of "tactical", "terminal", "aggressive" to load a league
+                    agent, or None to use the default priority order
+                    (AlphaZero > PPO-parallel > PPO-sequential).
 
     Returns (network, mode_name).
     """
@@ -29,7 +32,36 @@ def load_network(device, epoch=None):
     input_shape = (4, 8, 8)
     network = PPOPolicyNetwork(input_shape, NUM_ACTIONS).to(device)
 
-    # If a specific epoch was requested, go straight to it
+    # League agent requested — load from the league-specific directory
+    if agent_type is not None:
+        league_dir = os.path.join(base_dir, "PPO_Model", f"PPO_saved_models_{agent_type}")
+        if not os.path.exists(league_dir):
+            print(f"ERROR: League model directory not found: {league_dir}")
+            sys.exit(1)
+
+        if epoch is not None:
+            model_path = os.path.join(league_dir, f"agent_epoch_{epoch}.pt")
+        else:
+            checkpoints = [f for f in os.listdir(league_dir)
+                           if f.startswith("agent_epoch_") and f.endswith(".pt")]
+            if not checkpoints:
+                print(f"ERROR: No checkpoints found in {league_dir}")
+                sys.exit(1)
+            latest = max(checkpoints, key=lambda f: int(f.split("_")[-1].split(".")[0]))
+            model_path = os.path.join(league_dir, latest)
+
+        if not os.path.exists(model_path):
+            print(f"ERROR: No checkpoint found at {model_path}")
+            sys.exit(1)
+
+        ep_num = model_path.split("_")[-1].split(".")[0]
+        mode_name = f"League-{agent_type} (epoch {ep_num})"
+        print(f"Loading {mode_name}: {model_path}")
+        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+        network.load_state_dict(checkpoint["model_state_dict"])
+        return network, mode_name
+
+    # If a specific epoch was requested (parallel model)
     if epoch is not None:
         model_path = os.path.join(
             base_dir, "PPO_Model", "PPO_saved_models_parallel", f"agent_epoch_{epoch}.pt"
@@ -154,13 +186,13 @@ def save_game_csv(env, winner, player_color, ai_color, mode_name,
     print(f"\nGame saved to {csv_path}")
 
 
-def play_agent(use_mcts=False, num_simulations=100, epoch=None):
+def play_agent(use_mcts=False, num_simulations=100, epoch=None, agent_type=None):
     pygame.init()
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
     pygame.display.set_caption("Checkers Game - Play Against AI")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    network, mode_name = load_network(device, epoch=epoch)
+    network, mode_name = load_network(device, epoch=epoch, agent_type=agent_type)
     network.eval()
 
     # Set up the AI action selector
@@ -429,8 +461,13 @@ if __name__ == "__main__":
     parser.add_argument("--mcts", action="store_true", help="Use MCTS for AI moves (stronger but slower)")
     parser.add_argument("--simulations", type=int, default=100, help="MCTS simulations per move (default: 100)")
     parser.add_argument("--epoch", type=int, default=None,
-                        help="Load a specific training epoch (e.g. --epoch 230). "
+                        help="Load a specific training epoch (e.g. --epoch 72). "
                              "If omitted, loads the latest checkpoint.")
+    parser.add_argument("--agent", type=str, default=None,
+                        choices=["tactical", "terminal", "aggressive"],
+                        help="Play against a league agent (e.g. --agent aggressive). "
+                             "If omitted, loads the default PPO-parallel model.")
     args = parser.parse_args()
 
-    play_agent(use_mcts=args.mcts, num_simulations=args.simulations, epoch=args.epoch)
+    play_agent(use_mcts=args.mcts, num_simulations=args.simulations,
+               epoch=args.epoch, agent_type=args.agent)

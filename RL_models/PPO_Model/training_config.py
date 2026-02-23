@@ -64,7 +64,7 @@ LEAGUE_AGENTS = {
         "capture_bonus":      10.0,
         "capture_penalty":    -5.0,
         "king_bonus":         15.0,
-        "tie_base":          -200,
+        "tie_base":          -80,
         "shaping_scale":       0.5,
         "time_penalty_scale":  1.0,
         "gamma":               0.99,
@@ -88,11 +88,11 @@ LEAGUE_AGENTS = {
         # Piece-hungry, forces exchanges, demolishes passive draw-seekers.
         "capture_bonus":      20.0,
         "capture_penalty":   -10.0,
-        "king_bonus":         25.0,
-        "tie_base":          -500,   # very high — hates draws
+        "king_bonus":         30.0,
+        "tie_base":           -80, # base penalty for a draw with 80 penalty
         "shaping_scale":       0.8,
         "time_penalty_scale":  2.0,  # urgency: finish faster
-        "gamma":               0.97, # short-horizon opportunist
+        "gamma":               0.99, # short-horizon opportunist with 0.99 discount factor
         "entropy_bonus":       0.01,
     },
 }
@@ -104,7 +104,7 @@ ACTIVE_AGENTS = ["tactical", "terminal", "aggressive"]
 # Opponent pool probability for league mode.
 # Cross-agent diversity (3 styles) makes 33% roughly equivalent to 50%
 # in single-agent mode, while leaving more time for productive self-play.
-LEAGUE_POOL_OPPONENT_PROB = 0.33
+LEAGUE_POOL_OPPONENT_PROB = 0.10
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -116,7 +116,7 @@ CURRICULUM_ENABLED = True
 # Phase 1: mid-game positions (4-9 pieces per side)
 # NOTE: 2-5 piece endgame phases were avoided — very small positions are
 # often theoretical draws and train passive play rather than curing it.
-CURRICULUM_PHASE1_END_EPOCH = 80  # switch to full 12v12 after this epoch
+CURRICULUM_PHASE1_END_EPOCH = 20  # switch to full 12v12 after this epoch
 CURRICULUM_PHASE1_PIECES_MIN = 4
 CURRICULUM_PHASE1_PIECES_MAX = 9
 

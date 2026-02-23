@@ -91,6 +91,8 @@ def _load_checkpoint(agent, model_dir, device):
                     weights_only=False)
     agent.policy.load_state_dict(cp["model_state_dict"])
     agent.optimizer.load_state_dict(cp["optimizer_state_dict"])
+    if "scheduler_state_dict" in cp:
+        agent.scheduler.load_state_dict(cp["scheduler_state_dict"])
     print(f"    Resumed {os.path.basename(model_dir)} from epoch {cp['epoch']}")
     return cp["epoch"]
 
@@ -237,8 +239,8 @@ def train_league(num_league_epochs=cfg.NUM_EPOCHS,
         with open(bench_league_path, "w", newline="") as f:
             csv.writer(f).writerow(header)
 
-    # Determine the maximum start_epoch across all agents (training resumes
-    # at the highest common point — all agents advance together).
+    # Determine the minimum start_epoch across all agents so that no agent
+    # skips epochs — all agents advance together from the earliest checkpoint.
     global_start_epoch = min(start_epochs.values())
 
     # ── League training loop ────────────────────────────────────────
@@ -291,10 +293,14 @@ def train_league(num_league_epochs=cfg.NUM_EPOCHS,
             write_detailed_csv(detail_csv, all_results, 0,
                                league_epoch, num_games)
 
+            # Zip detailed CSV immediately after writing (before any early-exit paths)
+            zip_path = detail_csv.replace(".csv", ".zip")
+            zip_csv_file(detail_csv, zip_path)
+
             # Aggregate statistics
             total_rewards = {"blue": 0, "red": 0}
             blue_wins = red_wins = ties = total_steps = pool_games = 0
-            max_move_reward = 0
+            max_move_reward = float('-inf')
 
             for r in all_results:
                 total_rewards["blue"] += r["rewards"]["blue"]
@@ -316,6 +322,14 @@ def train_league(num_league_epochs=cfg.NUM_EPOCHS,
             agent.update(combined_memory)
             agent.step_scheduler()
 
+            # Guard: skip saving if weights went NaN during update
+            if any(torch.isnan(p).any()
+                   for p in agent.policy.parameters()):
+                print(f"    [{agent_type}] CRITICAL: NaN in policy weights after "
+                      f"update at epoch {league_epoch + 1} — skipping checkpoint save. "
+                      f"Consider rolling back to previous epoch.")
+                continue
+
             # Pool save
             if (league_epoch + 1) % cfg.POOL_SAVE_INTERVAL == 0:
                 pool.save(agent.policy.state_dict(),
@@ -323,10 +337,6 @@ def train_league(num_league_epochs=cfg.NUM_EPOCHS,
                           agent_name=agent_type)
                 print(f"    [{agent_type}] saved to league pool "
                       f"(total pool size: {pool.size})")
-
-            # Zip detailed CSV
-            zip_path = detail_csv.replace(".csv", ".zip")
-            zip_csv_file(detail_csv, zip_path)
 
             # Log epoch statistics
             epoch_duration = time.perf_counter() - epoch_start
@@ -351,6 +361,7 @@ def train_league(num_league_epochs=cfg.NUM_EPOCHS,
                 "epoch": league_epoch + 1,
                 "model_state_dict": agent.policy.state_dict(),
                 "optimizer_state_dict": agent.optimizer.state_dict(),
+                "scheduler_state_dict": agent.scheduler.state_dict(),
             }, os.path.join(model_dirs[agent_type],
                             f"agent_epoch_{league_epoch + 1}.pt"))
 
