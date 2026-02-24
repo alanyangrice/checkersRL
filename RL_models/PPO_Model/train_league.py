@@ -401,61 +401,61 @@ def train_league(num_league_epochs=cfg.NUM_EPOCHS,
 
 
 
-        # ── Consolidated benchmark (once per league epoch, after all agents) ──
-        if (league_epoch + 1) % cfg.BENCHMARK_INTERVAL == 0:
-            print(f"\n  League benchmark (epoch {league_epoch + 1}) — "
-                  f"{cfg.BENCHMARK_GAMES} games each...")
-            bench = _run_league_benchmark(
-                agents, device, n_actions, num_workers,
-                model_dirs, ref_paths, num_games=cfg.BENCHMARK_GAMES,
-            )
+            # ── Consolidated benchmark (once per league epoch, after all agents) ──
+            if (league_epoch + 1) % cfg.BENCHMARK_INTERVAL == 0:
+                print(f"\n  League benchmark (epoch {league_epoch + 1}) — "
+                      f"{cfg.BENCHMARK_GAMES} games each...")
+                bench = _run_league_benchmark(
+                    agents, device, n_actions, num_workers,
+                    model_dirs, ref_paths, num_games=cfg.BENCHMARK_GAMES,
+                )
 
-            # Print per-agent rows
-            for at in cfg.ACTIVE_AGENTS:
-                vr = bench.get(f"{at}_vs_random", {})
-                vs = bench.get(f"{at}_vs_self",   {})
-                if vr:
-                    print(f"  {at:<12} vs random: "
-                          f"Win {vr['win_rate']:.1%}  "
-                          f"Loss {vr['loss_rate']:.1%}  "
-                          f"Tie {vr['tie_rate']:.1%}  "
-                          f"AvgSteps {vr['avg_steps']:.0f}")
-                if vs:
-                    print(f"  {at:<12} vs self:   "
-                          f"Win {vs['win_rate']:.1%}  "
-                          f"Loss {vs['loss_rate']:.1%}  "
-                          f"Tie {vs['tie_rate']:.1%}  "
-                          f"AvgSteps {vs['avg_steps']:.0f}")
+                # Print per-agent rows
+                for at in cfg.ACTIVE_AGENTS:
+                    vr = bench.get(f"{at}_vs_random", {})
+                    vs = bench.get(f"{at}_vs_self",   {})
+                    if vr:
+                        print(f"  {at:<12} vs random: "
+                              f"Win {vr['win_rate']:.1%}  "
+                              f"Loss {vr['loss_rate']:.1%}  "
+                              f"Tie {vr['tie_rate']:.1%}  "
+                              f"AvgSteps {vr['avg_steps']:.0f}")
+                    if vs:
+                        print(f"  {at:<12} vs self:   "
+                              f"Win {vs['win_rate']:.1%}  "
+                              f"Loss {vs['loss_rate']:.1%}  "
+                              f"Tie {vs['tie_rate']:.1%}  "
+                              f"AvgSteps {vs['avg_steps']:.0f}")
 
-            # Print cross-agent rows
-            for type_a, type_b in combinations(cfg.ACTIVE_AGENTS, 2):
-                v = bench.get(f"{type_a}_vs_{type_b}", {})
-                if v:
-                    print(f"  {type_a} vs {type_b}: "
-                          f"Win {v['win_rate']:.1%}  "
-                          f"Loss {v['loss_rate']:.1%}  "
-                          f"Tie {v['tie_rate']:.1%}  "
-                          f"AvgSteps {v['avg_steps']:.0f}")
+                # Print cross-agent rows
+                for type_a, type_b in combinations(cfg.ACTIVE_AGENTS, 2):
+                    v = bench.get(f"{type_a}_vs_{type_b}", {})
+                    if v:
+                        print(f"  {type_a} vs {type_b}: "
+                              f"Win {v['win_rate']:.1%}  "
+                              f"Loss {v['loss_rate']:.1%}  "
+                              f"Tie {v['tie_rate']:.1%}  "
+                              f"AvgSteps {v['avg_steps']:.0f}")
 
-            # Write CSV row — order matches header exactly
-            row = [league_epoch + 1]
-            for at in cfg.ACTIVE_AGENTS:
-                for opp in ["random", "self"]:
-                    v = bench.get(f"{at}_vs_{opp}", {})
-                    row += [v.get("win_rate", ""), v.get("loss_rate", ""),
-                            v.get("tie_rate", ""), v.get("avg_steps", "")]
-            for type_a, type_b in combinations(cfg.ACTIVE_AGENTS, 2):
-                for ta, tb in [(type_a, type_b), (type_b, type_a)]:
-                    v = bench.get(f"{ta}_vs_{tb}", {})
-                    row += [v.get("win_rate", ""), v.get("loss_rate", ""),
-                            v.get("tie_rate", ""), v.get("avg_steps", "")]
-            with open(bench_league_path, "a", newline="") as f:
-                csv.writer(f).writerow(row)
+                # Write CSV row — order matches header exactly
+                row = [league_epoch + 1]
+                for at in cfg.ACTIVE_AGENTS:
+                    for opp in ["random", "self"]:
+                        v = bench.get(f"{at}_vs_{opp}", {})
+                        row += [v.get("win_rate", ""), v.get("loss_rate", ""),
+                                v.get("tie_rate", ""), v.get("avg_steps", "")]
+                for type_a, type_b in combinations(cfg.ACTIVE_AGENTS, 2):
+                    for ta, tb in [(type_a, type_b), (type_b, type_a)]:
+                        v = bench.get(f"{ta}_vs_{tb}", {})
+                        row += [v.get("win_rate", ""), v.get("loss_rate", ""),
+                                v.get("tie_rate", ""), v.get("avg_steps", "")]
+                with open(bench_league_path, "a", newline="") as f:
+                    csv.writer(f).writerow(row)
 
-            # Auto-advance each agent's self-reference to current epoch
-            for at in cfg.ACTIVE_AGENTS:
-                torch.save(agents[at].get_policy_state_dict(), ref_paths[at])
-            print(f"  All reference models advanced to epoch {league_epoch + 1}")
+                # Auto-advance each agent's self-reference to current epoch
+                for at in cfg.ACTIVE_AGENTS:
+                    torch.save(agents[at].get_policy_state_dict(), ref_paths[at])
+                print(f"  All reference models advanced to epoch {league_epoch + 1}")
 
 
 if __name__ == "__main__":

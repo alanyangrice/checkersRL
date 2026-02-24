@@ -159,7 +159,7 @@ OPPONENT_MIN_GAMES            = 5    # games required before stats influence sam
 CPU_WORKER_FRACTION = 0.5     # fraction of cpu_count for CPU-only mode
 
 # GPU-accelerated parallel (train_gpu_parallel.py)
-GPU_WORKER_FRACTION = 0.75    # fraction of cpu_count for GPU mode
+GPU_WORKER_FRACTION = 0.5    # fraction of cpu_count for GPU mode
 
 
 def get_num_workers_cpu():

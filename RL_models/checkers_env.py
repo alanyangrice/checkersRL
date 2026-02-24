@@ -406,6 +406,84 @@ class CheckersEnv(gym.Env):
 
         return board_state
 
+    def fast_clone(self):
+        """Create a lightweight clone of this environment for MCTS simulations.
+
+        A full copy.deepcopy(env) also copies game.board_states (a dict with
+        50+ nested-tuple entries by mid-game) and game.moves (50+ strings).
+        Neither is needed for short MCTS simulations, but both are expensive
+        to copy.  This method skips them and uses Piece.clone() / Board.clone()
+        instead of generic deepcopy machinery.
+
+        What is copied independently:
+          - board.board grid  — each Piece gets its own clone (mutations in the
+                                simulation cannot corrupt the real game state)
+          - _action_mask      — numpy array (mutated in-place each step)
+          - _visited_squares  — set (elements added during capture chains)
+          - _current_move_chain — list (appended to during captures)
+
+        What is intentionally reset / shared:
+          - board_states → {}    (tie-by-repetition; MCTS sims too short to need it)
+          - moves        → []    (logging only; not used for game logic)
+          - num_moves    → copied as int; 250-move limit still tracked via
+                           max(num_moves, len(moves)) in check_winner()
+          - _turn_start_board → shared reference (read-only in _finish_turn();
+                                replaced on the first step of any new turn)
+          - reward config floats → shared (immutable scalars)
+          - observation/action spaces → shared (stateless gym objects)
+        """
+        env = CheckersEnv.__new__(CheckersEnv)
+
+        # ── Game object ────────────────────────────────────────────────────
+        g = Game.__new__(Game)
+        g.board         = self.game.board.clone()
+        g.turn          = self.game.turn        # immutable tuple — safe to share
+
+        # Skipped: board_states, moves — expensive and irrelevant for MCTS
+        g.board_states  = {}
+        g.moves         = []
+        g.num_moves     = self.game.num_moves   # int — copy by value
+
+        # GUI / move-tree state — not used by env.step(); zero cost to reset
+        g.selected_piece     = None
+        g.current_node       = None
+        g.rootNode           = None
+        g.move_in_progress   = True
+        g.capture_in_progress = False
+        g.capture_possible   = False
+        g.move_chain         = []
+
+        env.game = g
+
+        # ── Capture-chain tracking ─────────────────────────────────────────
+        env._capture_in_progress  = self._capture_in_progress
+        env._capturing_piece_sq   = self._capturing_piece_sq
+        env._visited_squares      = self._visited_squares.copy()
+        env._current_move_chain   = self._current_move_chain[:]
+        env._is_capture_turn      = self._is_capture_turn
+
+        # _turn_start_board is only read (never mutated) in _finish_turn().
+        # When _capture_in_progress is False, env.step() overwrites it on the
+        # very first call, so the current value is never used.
+        env._turn_start_board = self._turn_start_board
+
+        # ── Action mask ───────────────────────────────────────────────────
+        env._action_mask = self._action_mask.copy()
+
+        # ── Reward config (immutable scalars) ─────────────────────────────
+        env._capture_bonus      = self._capture_bonus
+        env._capture_penalty    = self._capture_penalty
+        env._king_bonus         = self._king_bonus
+        env._tie_base           = self._tie_base
+        env._shaping_scale      = self._shaping_scale
+        env._time_penalty_scale = self._time_penalty_scale
+
+        # ── Gymnasium spaces (stateless — safe to share) ──────────────────
+        env.observation_space = self.observation_space
+        env.action_space      = self.action_space
+
+        return env
+
     def render(self):
         print("Board State")
         print(self.game.board)
