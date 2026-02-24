@@ -196,6 +196,21 @@ class Board:
                 piece.make_king()
             self.board[row][col] = piece
 
+    def clone(self):
+        """Return a fast independent copy of the board for MCTS simulations.
+
+        Uses Piece.clone() on every occupied cell instead of Python's generic
+        deepcopy machinery, skipping the attribute-dict traversal overhead.
+        The result is a fully independent Board whose pieces can be mutated
+        without affecting the original.
+        """
+        b = Board.__new__(Board)
+        b.board = [
+            [cell.clone() if cell != 0 else 0 for cell in row]
+            for row in self.board
+        ]
+        return b
+
     def has_legal_moves(self, turn):
         """Returns True if the given player has any legal moves available."""
         capture_possible = self.is_capture_possible(turn)
