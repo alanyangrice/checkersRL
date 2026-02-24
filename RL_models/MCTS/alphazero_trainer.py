@@ -23,7 +23,8 @@ import numpy as np
 
 from RL_models.checkers_env import CheckersEnv
 from RL_models.MCTS.mcts_search import MCTSSearch
-from RL_models.PPO_Model.PolicyNetwork import PPOPolicyNetwork
+from RL_models.MCTS.AlphaZeroNetwork import AlphaZeroNetwork
+from RL_models.MCTS import training_config as cfg
 from RL_models.PPO_Model.Agent import get_device
 from checkers_game.constants import BLUE, RED, NUM_ACTIONS
 
@@ -42,14 +43,14 @@ class AlphaZeroTrainer:
 
     def __init__(
         self,
-        num_simulations=100,
-        c_puct=1.5,
-        lr=1e-3,
-        weight_decay=1e-4,
-        buffer_size=50000,
-        batch_size=256,
-        train_steps_per_epoch=100,
-        temperature_threshold=15,
+        num_simulations=cfg.NUM_SIMULATIONS,
+        c_puct=cfg.C_PUCT,
+        lr=cfg.LEARNING_RATE,
+        weight_decay=cfg.WEIGHT_DECAY,
+        buffer_size=cfg.BUFFER_SIZE,
+        batch_size=cfg.BATCH_SIZE,
+        train_steps_per_epoch=cfg.TRAIN_STEPS_PER_EPOCH,
+        temperature_threshold=cfg.TEMPERATURE_THRESHOLD,
         device=None,
     ):
         self.device = device or get_device()
@@ -61,18 +62,22 @@ class AlphaZeroTrainer:
 
         # Network
         input_shape = (4, 8, 8)
-        self.network = PPOPolicyNetwork(input_shape, NUM_ACTIONS).to(self.device)
+        self.network = AlphaZeroNetwork(input_shape, NUM_ACTIONS).to(self.device)
         self.optimizer = optim.Adam(
             self.network.parameters(), lr=lr, weight_decay=weight_decay
         )
         self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer, T_max=500, eta_min=1e-6
+            self.optimizer, T_max=cfg.LR_T_MAX, eta_min=cfg.LR_ETA_MIN
         )
 
         # MCTS
         self.mcts = MCTSSearch(
-            self.network, num_simulations=num_simulations,
-            c_puct=c_puct, device=self.device
+            self.network,
+            num_simulations=num_simulations,
+            c_puct=c_puct,
+            dirichlet_alpha=cfg.DIRICHLET_ALPHA,
+            dirichlet_epsilon=cfg.DIRICHLET_EPSILON,
+            device=self.device,
         )
 
         # Replay buffer: stores (state, mcts_policy, outcome)
@@ -94,6 +99,7 @@ class AlphaZeroTrainer:
         done = False
 
         self.network.eval()
+        self.mcts._root = None  # start each game with a fresh search tree
 
         while not done:
             action_mask = env.get_action_mask()
@@ -103,22 +109,29 @@ class AlphaZeroTrainer:
                 _, _, done, _, info = env.step(0)
                 break
 
-            # Choose temperature based on move count
-            # Early game: temperature=1 (explore), later: temperature=0 (exploit)
-            temperature = 1.0 if move_count < self.temperature_threshold else 0.1
+            temperature = (
+                cfg.TEMPERATURE_EARLY
+                if move_count < self.temperature_threshold
+                else cfg.TEMPERATURE_LATE
+            )
 
             # Record the state and current player BEFORE the action
             state = env.get_board_state()
             current_player = copy.deepcopy(env.game.turn)
 
-            # Run MCTS to get action and visit-count distribution
-            action, mcts_policy = self.mcts.select_action(env, temperature=temperature)
+            # Run MCTS with Dirichlet noise (self-play exploration)
+            action, mcts_policy = self.mcts.select_action(
+                env, temperature=temperature, add_noise=True
+            )
 
             # Store training data (outcome will be filled in after the game)
             game_data.append((state, mcts_policy, current_player))
 
             # Apply the action
             _, _, done, _, info = env.step(action)
+
+            # Advance the cached tree root so the next search reuses statistics
+            self.mcts.update_root(action)
 
             # Count full turns (not intermediate capture hops)
             if info.get("turn_complete", True):
@@ -181,12 +194,12 @@ class AlphaZeroTrainer:
             # Value loss: MSE between predicted and actual outcome
             value_loss = nn.MSELoss()(values, target_values_t)
 
-            # Total loss
-            loss = policy_loss + value_loss
+            # Total loss: scale value loss to prevent it from dominating early
+            loss = policy_loss + cfg.VALUE_LOSS_WEIGHT * value_loss
 
             self.optimizer.zero_grad()
             loss.backward()
-            nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=1.0)
+            nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=cfg.GRAD_CLIP_NORM)
             self.optimizer.step()
 
             total_policy_loss += policy_loss.item()
@@ -202,6 +215,7 @@ class AlphaZeroTrainer:
             "epoch": epoch,
             "model_state_dict": self.network.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
+            "scheduler_state_dict": self.scheduler.state_dict(),
         }
         if stats:
             data.update(stats)
@@ -212,31 +226,33 @@ class AlphaZeroTrainer:
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         self.network.load_state_dict(checkpoint["model_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        # Update MCTS reference to the loaded network
+        if "scheduler_state_dict" in checkpoint:
+            self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         self.mcts.network = self.network
         return checkpoint.get("epoch", 0)
 
 
 def get_curriculum_options(epoch):
     """Curriculum phases for AlphaZero training."""
-    if epoch < 30:
-        return {"num_pieces": random.randint(2, 5)}
-    elif epoch < 80:
-        return {"num_pieces": random.randint(4, 9)}
+    if epoch < cfg.CURRICULUM_PHASE1_END:
+        lo, hi = cfg.CURRICULUM_PHASE1_PIECES
+        return {"num_pieces": random.randint(lo, hi)}
+    elif epoch < cfg.CURRICULUM_PHASE2_END:
+        lo, hi = cfg.CURRICULUM_PHASE2_PIECES
+        return {"num_pieces": random.randint(lo, hi)}
     else:
         return None
 
 
 def main():
     """Main AlphaZero training loop."""
-    # Hyperparameters
-    num_epochs = 500
-    games_per_epoch = 100
-    num_simulations = 100
-    batch_size = 256
-    train_steps = 100
-    buffer_size = 50000
-    save_interval = 5
+    num_epochs = cfg.NUM_EPOCHS
+    games_per_epoch = cfg.GAMES_PER_EPOCH
+    num_simulations = cfg.NUM_SIMULATIONS
+    batch_size = cfg.BATCH_SIZE
+    train_steps = cfg.TRAIN_STEPS_PER_EPOCH
+    buffer_size = cfg.BUFFER_SIZE
+    save_interval = cfg.SAVE_INTERVAL
 
     # Directories
     base_dir = os.path.dirname(os.path.abspath(__file__))

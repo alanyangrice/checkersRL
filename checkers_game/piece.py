@@ -46,3 +46,17 @@ class Piece:
     def move(self, row, col):
         self.row = row
         self.col = col
+
+    def clone(self):
+        """Return a fast independent copy for MCTS simulations.
+
+        Bypasses Python's generic deepcopy machinery by directly assigning
+        the five attributes that can change during gameplay.
+        """
+        p = Piece.__new__(Piece)
+        p.row = self.row
+        p.col = self.col
+        p.color = self.color
+        p.king = self.king
+        p.direction = self.direction
+        return p
