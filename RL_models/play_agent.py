@@ -328,7 +328,7 @@ def play_agent(use_mcts=False, num_simulations=100, epoch=None, agent_type=None)
                 break
 
             if use_mcts:
-                action, _ = mcts.select_action(env, temperature=0.1)
+                action, _, _ = mcts.select_action(env, temperature=0.1)
             else:
                 action, _, _ = agent.select_action(state, action_mask)
 

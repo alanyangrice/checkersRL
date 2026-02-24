@@ -262,9 +262,13 @@ class Game:
         if not blue_pieces_found:
             return RED
 
-        # Check if the current player has no legal moves (they lose)
-        if not self.board.has_legal_moves(self.turn):
-            return BLUE if self.turn == RED else RED
+        # Check if the next player (opponent) has no legal moves — they lose.
+        # check_winner() is always called BEFORE switch_turn(), so self.turn
+        # is the player who just moved. The player who cannot move NEXT is the
+        # opponent, not the current mover.
+        next_player = RED if self.turn == BLUE else BLUE
+        if not self.board.has_legal_moves(next_player):
+            return self.turn  # current player wins; opponent is stuck
 
         return None
 

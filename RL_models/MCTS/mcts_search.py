@@ -204,8 +204,11 @@ class MCTSSearch:
         Returns:
             action:       int - selected action index.
             action_probs: (NUM_ACTIONS,) visit-count distribution (training target).
+            root_value:   float - network's value estimate at the root position
+                          from the perspective of the current player.  Useful for
+                          tracking value-head calibration over training.
         """
-        action_probs, _ = self.search(env, add_noise=add_noise)
+        action_probs, root_value = self.search(env, add_noise=add_noise)
 
         if temperature == 0:
             action = int(np.argmax(action_probs))
@@ -221,7 +224,7 @@ class MCTSSearch:
             tempered = exp_probs / exp_probs.sum()
             action = int(np.random.choice(NUM_ACTIONS, p=tempered))
 
-        return action, action_probs
+        return action, action_probs, root_value
 
     # ---------------------------------------------------------------------- #
     # Private helpers

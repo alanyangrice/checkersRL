@@ -5,21 +5,27 @@
 # Self-play exploration (Dirichlet noise added to root priors)
 # ---------------------------------------------------------------------------
 # α controls the concentration of the noise distribution.
-# Smaller α → noisier/more uniform; larger α → concentrated near network priors.
-# Rule of thumb: α ≈ 10 / avg_branching_factor.
-# Checkers has ~8 legal moves on average, so α ≈ 1.0; 0.3 is the Chess value
-# and is conservative enough to start with.
-DIRICHLET_ALPHA = 0.3
+# Rule of thumb from the AlphaZero paper: α ≈ 10 / avg_branching_factor.
+#   Chess (~35 moves)  → α = 0.3
+#   Shogi (~70 moves)  → α = 0.15
+#   Go    (~250 moves) → α = 0.03
+#   Checkers (~8 moves)→ α = 10/8 ≈ 1.25
+#
+# With α = 0.3 (Chess value) applied to 7–8 checkers moves the noise
+# distribution is highly concentrated — most mass falls on 1–2 moves and
+# the other 5–6 are barely explored during self-play.  At α ≈ 1.0–1.25
+# the noise is near-uniform, guaranteeing every legal move is tried.
+DIRICHLET_ALPHA = 1.0
 DIRICHLET_EPSILON = 0.25    # Fraction of noise mixed into root priors
 
 # ---------------------------------------------------------------------------
 # Loss weighting
 # ---------------------------------------------------------------------------
-# Scales the value head loss relative to policy loss.
-# policy_loss (cross-entropy) typically sits in ~[1, 3] nats.
-# value_loss  (MSE vs ±1 targets) can be up to 4.0 early in training.
-# A weight < 1.0 prevents the value head from dominating gradients early on.
-VALUE_LOSS_WEIGHT = 0.5
+# The original AlphaZero paper weights policy and value losses equally (1.0).
+# A lower value (e.g. 0.5) under-trains the value head — since MCTS Q-values
+# are averages of backed-up network values, a poorly calibrated value head
+# means poor search guidance, which then produces poor policy targets.
+VALUE_LOSS_WEIGHT = 1.0
 
 # ---------------------------------------------------------------------------
 # Network architecture
@@ -32,7 +38,7 @@ VALUE_HEAD_CHANNELS = 1     # 1×1 conv output channels before the value linear 
 # ---------------------------------------------------------------------------
 # MCTS search
 # ---------------------------------------------------------------------------
-NUM_SIMULATIONS = 100       # Simulations per move during self-play
+NUM_SIMULATIONS = 400       # Simulations per move during self-play
 C_PUCT = 1.5                # Exploration constant in the PUCT formula
 
 # ---------------------------------------------------------------------------
@@ -51,7 +57,11 @@ LR_ETA_MIN = 1e-6           # Minimum learning rate
 # ---------------------------------------------------------------------------
 # Replay buffer & training
 # ---------------------------------------------------------------------------
-BUFFER_SIZE = 50_000        # Maximum number of (state, policy, outcome) tuples
+BUFFER_SIZE = 500_000       # Maximum number of (state, policy, outcome) tuples
+# At 100 games/epoch × ~50 moves/game ≈ 5,000 new positions per epoch.
+# 50 K fills in ~10 epochs, causing the network to only see the last
+# 10 epochs of data — catastrophic forgetting for a 500-epoch run.
+# 500 K retains ~100 epochs of diversity (AlphaZero uses 500 K).
 BATCH_SIZE = 256            # Mini-batch size per gradient step
 TRAIN_STEPS_PER_EPOCH = 100 # Gradient updates performed after each epoch
 
@@ -67,13 +77,13 @@ TEMPERATURE_LATE = 0.1      # Temperature for moves >= TEMPERATURE_THRESHOLD
 # Training loop
 # ---------------------------------------------------------------------------
 NUM_EPOCHS = 500
-SAVE_INTERVAL = 5           # Save a checkpoint every N epochs
+SAVE_INTERVAL = 1           # Save a checkpoint every N epochs
 
 # ---------------------------------------------------------------------------
 # Parallel training  (train_parallel.py)
 # ---------------------------------------------------------------------------
 # None = auto-detect (os.cpu_count() - 2, capped at 16)
-NUM_WORKERS = None
+NUM_WORKERS = 24
 
 
 def get_num_workers_parallel():
@@ -82,13 +92,13 @@ def get_num_workers_parallel():
     if NUM_WORKERS is not None:
         return NUM_WORKERS
     cpu = os.cpu_count() or 4
-    return max(1, min(cpu - 2, 16))
+    return max(1, min(cpu - 2, 24))
 
 # ---------------------------------------------------------------------------
 # Curriculum learning phases  (used in get_curriculum_options)
 # ---------------------------------------------------------------------------
-CURRICULUM_PHASE1_END = 30          # Epochs 0–29: small endgame positions
-CURRICULUM_PHASE2_END = 80          # Epochs 30–79: medium positions
+CURRICULUM_PHASE1_END = 0          # Epochs 0–29: small endgame positions
+CURRICULUM_PHASE2_END = 0          # Epochs 30–79: medium positions
 CURRICULUM_PHASE1_PIECES = (2, 5)   # Random piece count range for phase 1
 CURRICULUM_PHASE2_PIECES = (4, 9)   # Random piece count range for phase 2
 # Epochs >= CURRICULUM_PHASE2_END: full board (options=None)

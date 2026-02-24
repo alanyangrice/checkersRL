@@ -64,7 +64,7 @@ LEAGUE_AGENTS = {
         "capture_bonus":      10.0,
         "capture_penalty":    -5.0,
         "king_bonus":         15.0,
-        "tie_base":          -80,
+        "tie_base":          -90,
         "shaping_scale":       0.5,
         "time_penalty_scale":  1.0,
         "gamma":               0.99,
@@ -77,7 +77,7 @@ LEAGUE_AGENTS = {
         "capture_bonus":      0.0,
         "capture_penalty":    0.0,
         "king_bonus":         0.0,
-        "tie_base":          -80,    # accepts draws more readily; winning is the only signal
+        "tie_base":          -90,    # accepts draws more readily; winning is the only signal
         "shaping_scale":      0.0,
         "time_penalty_scale": 0.0,
         "gamma":              0.995,  # needs very long horizon since terminal signal is all there is
@@ -92,7 +92,7 @@ LEAGUE_AGENTS = {
         "capture_bonus":      15.0,
         "capture_penalty":    -8.0,
         "king_bonus":         20.0,
-        "tie_base":           -80,
+        "tie_base":           -90,
         "shaping_scale":       0.8,
         "time_penalty_scale":  2.0,  # urgency: finish faster
         "gamma":               0.99,

@@ -3,7 +3,9 @@ RL_models/PPO_Model/training_progress_detailed*/
 RL_models/PPO_Model/PPO_saved_models*/
 RL_models/PPO_Model/opponent_pool*
 RL_models/PPO_Model/opponent_pool_league*
+
 RL_models/MCTS/alphazero_checkpoints/
+RL_models/MCTS/az_detailed_games*/
 
 # Ignore Python cache
 __pycache__/

@@ -42,12 +42,16 @@ class MCTSNode:
         """PUCT score: Q(s,a) + c * P(s,a) * sqrt(N_parent) / (1 + N(s,a)).
 
         Balances exploitation (Q) with exploration (prior * visit ratio).
+
+        max(parent_visits, 1) prevents sqrt(0) = 0 on the very first simulation,
+        which would make all children score 0 and cause the first simulation to
+        pick arbitrarily (ignoring priors) rather than the highest-prior child.
         """
         if self.parent is None:
             return 0.0
 
         parent_visits = self.parent.visit_count
-        exploration = c_puct * self.prior * math.sqrt(parent_visits) / (1 + self.visit_count)
+        exploration = c_puct * self.prior * math.sqrt(max(parent_visits, 1)) / (1 + self.visit_count)
         return self.q_value + exploration
 
     @property

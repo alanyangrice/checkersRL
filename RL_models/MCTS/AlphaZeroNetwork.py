@@ -14,6 +14,7 @@ AlphaZero's value must stay in [-1, 1] so that:
   3. MSE training against outcomes in {-1, 0, +1} is well-conditioned.
 """
 
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -109,6 +110,6 @@ class AlphaZeroNetwork(nn.Module):
         v = F.relu(self.value_bn(self.value_conv(out)))
         v = v.view(v.size(0), -1)
         v = F.relu(self.value_fc1(v))
-        value = F.tanh(self.value_fc2(v))
+        value = torch.tanh(self.value_fc2(v))
 
         return logits, value

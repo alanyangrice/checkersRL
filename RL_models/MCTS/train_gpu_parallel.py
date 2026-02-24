@@ -41,6 +41,7 @@ import random
 import threading
 import time
 import argparse
+import zipfile
 from collections import deque
 from multiprocessing import Process, Queue, Event
 from multiprocessing import shared_memory as _shm_module
@@ -61,7 +62,7 @@ from checkers_game.constants import BLUE, RED, NUM_ACTIONS
 # NumpyCheckersEnv is not used directly here but is imported so it is
 # available in worker processes when MCTSSearch.search() calls
 # NumpyCheckersEnv.from_env(env) for fast simulation cloning.
-from RL_models.MCTS.numpy_checkers_env import NumpyCheckersEnv  # noqa: F401
+from RL_models.numpy_checkers_env import NumpyCheckersEnv  # noqa: F401
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -231,6 +232,9 @@ def _play_self_play_game(worker_id, request_queue, response_queue,
             game_data  — list of (state_np, mcts_policy_np, player_color)
             winner     — BLUE / RED / "Tie"
             num_moves  — number of completed turns
+            game_stats — dict of per-game diagnostic signals:
+                           avg_root_val_winner, avg_root_val_loser,
+                           avg_policy_entropy, move_sequence
     """
     evaluator = RemoteEvaluator(
         worker_id, request_queue, response_queue, state_buf, mask_buf
@@ -247,11 +251,13 @@ def _play_self_play_game(worker_id, request_queue, response_queue,
     env = CheckersEnv()
     env.reset(options=curriculum_opts)
 
-    game_data  = []
-    move_count = 0
-    done       = False
-    info       = {}
-    mcts._root = None
+    game_data   = []
+    value_log   = []   # (player_color, root_value) per move
+    entropy_log = []   # float per move
+    move_count  = 0
+    done        = False
+    info        = {}
+    mcts._root  = None
 
     while not done:
         action_mask = env.get_action_mask()
@@ -269,9 +275,16 @@ def _play_self_play_game(worker_id, request_queue, response_queue,
         state          = env.get_board_state()
         current_player = env.game.turn
 
-        action, mcts_policy = mcts.select_action(
+        action, mcts_policy, root_value = mcts.select_action(
             env, temperature=temperature, add_noise=True
         )
+
+        # Per-step diagnostics
+        eps = 1e-10
+        entropy = float(-np.sum(mcts_policy * np.log(mcts_policy + eps)))
+        value_log.append((current_player, root_value))
+        entropy_log.append(entropy)
+
         game_data.append((state, mcts_policy, current_player))
 
         _, _, done, _, info = env.step(action)
@@ -281,7 +294,23 @@ def _play_self_play_game(worker_id, request_queue, response_queue,
             move_count += 1
 
     winner = info.get("winner", "Tie")
-    return {"game_data": game_data, "winner": winner, "num_moves": move_count}
+
+    is_decisive = winner not in ("Tie", "None")
+    winner_vals = [v for p, v in value_log if is_decisive and p == winner]
+    loser_vals  = [v for p, v in value_log if is_decisive and p != winner]
+    game_stats = {
+        "avg_root_val_winner": float(np.mean(winner_vals)) if winner_vals else 0.0,
+        "avg_root_val_loser":  float(np.mean(loser_vals))  if loser_vals  else 0.0,
+        "avg_policy_entropy":  float(np.mean(entropy_log)) if entropy_log  else 0.0,
+        "move_sequence":       ", ".join(env.game.moves),
+    }
+
+    return {
+        "game_data":  game_data,
+        "winner":     winner,
+        "num_moves":  move_count,
+        "game_stats": game_stats,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -534,7 +563,7 @@ def train_alphazero_parallel(num_workers=None):
     # ── Training network (on GPU — used only for gradient updates) ────────
     input_shape = (4, 8, 8)
     network = AlphaZeroNetwork(input_shape, NUM_ACTIONS).to(device)
-    optimizer = optim.Adam(
+    optimizer = optim.AdamW(
         network.parameters(),
         lr=cfg.LEARNING_RATE, weight_decay=cfg.WEIGHT_DECAY,
     )
@@ -545,9 +574,11 @@ def train_alphazero_parallel(num_workers=None):
     replay_buffer = deque(maxlen=cfg.BUFFER_SIZE)
 
     # ── Directories / CSV ─────────────────────────────────────────────────
-    base_dir  = os.path.dirname(os.path.abspath(__file__))
-    model_dir = os.path.join(base_dir, "alphazero_checkpoints")
+    base_dir     = os.path.dirname(os.path.abspath(__file__))
+    model_dir    = os.path.join(base_dir, "alphazero_checkpoints")
+    detailed_dir = os.path.join(base_dir, "az_detailed_games_parallel")
     os.makedirs(model_dir, exist_ok=True)
+    os.makedirs(detailed_dir, exist_ok=True)
     csv_path = os.path.join(base_dir, "alphazero_training_progress_parallel.csv")
 
     # ── Resume from latest checkpoint ────────────────────────────────────
@@ -572,6 +603,8 @@ def train_alphazero_parallel(num_workers=None):
             csv.writer(f).writerow([
                 "epoch", "games", "blue_wins", "red_wins", "ties",
                 "avg_moves", "policy_loss", "value_loss", "total_loss",
+                "avg_grad_norm", "policy_entropy_nats",
+                "avg_root_val_winner", "avg_root_val_loser",
                 "buffer_size", "num_workers", "epoch_time_s",
             ])
 
@@ -595,16 +628,36 @@ def train_alphazero_parallel(num_workers=None):
                 game_tasks, label=f"Epoch {epoch + 1}"
             )
 
-            # ── Populate replay buffer ───────────────────────────────────
+            # ── Populate replay buffer + write detailed game CSV ─────────
             blue_wins = red_wins = ties = total_moves = 0
-            for res in all_results:
-                winner    = res["winner"]
-                game_data = res["game_data"]
+            total_root_val_winner = 0.0
+            total_root_val_loser  = 0.0
+            total_entropy         = 0.0
+
+            detailed_csv_path = os.path.join(
+                detailed_dir, f"az_games_epoch_{epoch + 1}.csv"
+            )
+            detailed_headers = [
+                "game_id", "epoch", "game_num", "winner", "num_moves",
+                "avg_root_val_winner", "avg_root_val_loser",
+                "avg_policy_entropy_nats", "move_sequence",
+            ]
+            with open(detailed_csv_path, mode="w", newline="") as f:
+                csv.writer(f).writerow(detailed_headers)
+
+            for game_idx, res in enumerate(all_results):
+                winner     = res["winner"]
+                game_data  = res["game_data"]
+                game_stats = res["game_stats"]
                 total_moves += res["num_moves"]
 
                 if winner == BLUE:    blue_wins += 1
                 elif winner == RED:   red_wins  += 1
                 else:                 ties      += 1
+
+                total_root_val_winner += game_stats["avg_root_val_winner"]
+                total_root_val_loser  += game_stats["avg_root_val_loser"]
+                total_entropy         += game_stats["avg_policy_entropy"]
 
                 for state, mcts_policy, player_color in game_data:
                     if winner in ("Tie", "None"):
@@ -615,13 +668,38 @@ def train_alphazero_parallel(num_workers=None):
                         outcome = -1.0
                     replay_buffer.append((state, mcts_policy, outcome))
 
-            avg_moves = total_moves / cfg.GAMES_PER_EPOCH
+                with open(detailed_csv_path, mode="a", newline="") as f:
+                    csv.writer(f).writerow([
+                        epoch * cfg.GAMES_PER_EPOCH + game_idx + 1,
+                        epoch + 1,
+                        game_idx + 1,
+                        winner,
+                        res["num_moves"],
+                        round(game_stats["avg_root_val_winner"], 4),
+                        round(game_stats["avg_root_val_loser"],  4),
+                        round(game_stats["avg_policy_entropy"],  4),
+                        game_stats["move_sequence"],
+                    ])
+
+            # Compress and remove the per-epoch detailed CSV
+            epoch_zip_path = os.path.join(
+                detailed_dir, f"az_games_epoch_{epoch + 1}.zip"
+            )
+            with zipfile.ZipFile(epoch_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.write(detailed_csv_path,
+                         arcname=os.path.basename(detailed_csv_path))
+            os.remove(detailed_csv_path)
+
+            avg_moves           = total_moves           / cfg.GAMES_PER_EPOCH
+            avg_root_val_winner = total_root_val_winner / cfg.GAMES_PER_EPOCH
+            avg_root_val_loser  = total_root_val_loser  / cfg.GAMES_PER_EPOCH
+            epoch_avg_entropy   = total_entropy         / cfg.GAMES_PER_EPOCH
 
             # ── Training phase (GPU gradient updates) ────────────────────
-            p_loss = v_loss = t_loss = 0.0
+            p_loss = v_loss = t_loss = avg_grad_norm = 0.0
             if len(replay_buffer) >= cfg.BATCH_SIZE:
                 network.train()
-                total_p = total_v = total_t = 0.0
+                total_p = total_v = total_t = total_gn = 0.0
 
                 for _ in range(cfg.TRAIN_STEPS_PER_EPOCH):
                     batch = random.sample(replay_buffer, cfg.BATCH_SIZE)
@@ -640,20 +718,34 @@ def train_alphazero_parallel(num_workers=None):
 
                     optimizer.zero_grad()
                     loss.backward()
-                    nn.utils.clip_grad_norm_(
+                    pre_clip_norm = nn.utils.clip_grad_norm_(
                         network.parameters(), cfg.GRAD_CLIP_NORM
                     )
                     optimizer.step()
 
-                    total_p += pl.item()
-                    total_v += vl.item()
-                    total_t += loss.item()
+                    total_p  += pl.item()
+                    total_v  += vl.item()
+                    total_t  += loss.item()
+                    total_gn += pre_clip_norm.item()
 
                 n = cfg.TRAIN_STEPS_PER_EPOCH
-                p_loss = total_p / n
-                v_loss = total_v / n
-                t_loss = total_t / n
+                p_loss       = total_p  / n
+                v_loss       = total_v  / n
+                t_loss       = total_t  / n
+                avg_grad_norm = total_gn / n
                 network.eval()
+
+            # Buffer-level policy entropy
+            if len(replay_buffer) >= 1:
+                sample_n  = min(2048, len(replay_buffer))
+                sample    = random.sample(list(replay_buffer), sample_n)
+                policies  = np.array([s[1] for s in sample])
+                eps       = 1e-10
+                buffer_entropy = float(
+                    -(policies * np.log(policies + eps)).sum(axis=1).mean()
+                )
+            else:
+                buffer_entropy = 0.0
 
             scheduler.step()
             elapsed = time.perf_counter() - epoch_start
@@ -665,6 +757,14 @@ def train_alphazero_parallel(num_workers=None):
                   f"Avg Moves: {avg_moves:.1f}")
             print(f"  Policy Loss: {p_loss:.4f}  Value Loss: {v_loss:.4f}  "
                   f"Total: {t_loss:.4f}")
+            print(f"  Grad Norm (pre-clip): {avg_grad_norm:.4f}  "
+                  f"[clip={cfg.GRAD_CLIP_NORM}  "
+                  f"{'BINDING' if avg_grad_norm > cfg.GRAD_CLIP_NORM * 0.9 else 'not binding'}]")
+            print(f"  Buffer Policy Entropy: {buffer_entropy:.4f} nats  "
+                  f"(max uniform ~{np.log(8):.2f} for 8-move branching)")
+            print(f"  Value calibration — winner avg: {avg_root_val_winner:+.3f}  "
+                  f"loser avg: {avg_root_val_loser:+.3f}  "
+                  f"(ideal: +1.0 / -1.0)")
             print(f"  LR: {scheduler.get_last_lr()[0]:.2e}  "
                   f"Buffer: {len(replay_buffer)}")
 
@@ -673,6 +773,8 @@ def train_alphazero_parallel(num_workers=None):
                     epoch + 1, cfg.GAMES_PER_EPOCH,
                     blue_wins, red_wins, ties, avg_moves,
                     p_loss, v_loss, t_loss,
+                    avg_grad_norm, buffer_entropy,
+                    round(avg_root_val_winner, 4), round(avg_root_val_loser, 4),
                     len(replay_buffer), num_workers, round(elapsed, 1),
                 ])
 
