@@ -155,7 +155,8 @@ def _random_agent(env):
 # 1) Absolute strength: network vs random
 # ─────────────────────────────────────────────────────────────────────────────
 
-def play_vs_random(network, device, num_games=40, num_simulations=100):
+def play_vs_random(network, device, num_games=40, num_simulations=100,
+                   verbose=False):
     """Play games against a random opponent.  Half as BLUE, half as RED.
 
     Returns dict: wins, losses, ties, win_rate, score, games, avg_moves.
@@ -183,6 +184,10 @@ def play_vs_random(network, device, num_games=40, num_simulations=100):
         else:
             losses += 1
 
+        if verbose and (i + 1) % 10 == 0:
+            print(f"    vs-random: {i + 1}/{num_games} games  "
+                  f"({wins}W/{losses}L/{ties}T so far)", flush=True)
+
     n = max(num_games, 1)
     return {
         "wins": wins, "losses": losses, "ties": ties,
@@ -198,7 +203,7 @@ def play_vs_random(network, device, num_games=40, num_simulations=100):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def play_vs_network(new_net, old_net, device, num_games=40,
-                    num_simulations=100):
+                    num_simulations=100, verbose=False):
     """Play games between two networks.  Half as BLUE, half as RED.
 
     Uses stochastic openings (first K moves at temperature=1) to produce
@@ -239,6 +244,10 @@ def play_vs_network(new_net, old_net, device, num_games=40,
         else:
             losses += 1
 
+        if verbose and (i + 1) % 10 == 0:
+            print(f"    vs-best:   {i + 1}/{num_games} games  "
+                  f"({wins}W/{losses}L/{ties}T so far)", flush=True)
+
     n = max(num_games, 1)
     return {
         "wins": wins, "losses": losses, "ties": ties,
@@ -250,7 +259,7 @@ def play_vs_network(new_net, old_net, device, num_games=40,
 
 
 def gate_checkpoint(new_net, old_net, device, num_games=40,
-                    num_simulations=100, threshold=None):
+                    num_simulations=100, threshold=None, verbose=False):
     """Gating test: accept new_net if its score exceeds threshold.
 
     score = (wins + 0.5 * ties) / games
@@ -261,7 +270,7 @@ def gate_checkpoint(new_net, old_net, device, num_games=40,
     if threshold is None:
         threshold = cfg.GATE_THRESHOLD
     stats = play_vs_network(new_net, old_net, device, num_games,
-                            num_simulations)
+                            num_simulations, verbose=verbose)
     accepted = stats["score"] >= threshold
     return accepted, stats
 
@@ -398,7 +407,7 @@ def test_mcts_correctness(device, num_simulations=80):
 
 def run_evaluation(network, device, best_state_dict=None,
                    num_games_random=40, num_games_gate=40,
-                   eval_simulations=100):
+                   eval_simulations=100, verbose=True):
     """Run all evaluation suites and return a summary dict.
 
     Args:
@@ -409,26 +418,37 @@ def run_evaluation(network, device, best_state_dict=None,
         num_games_random: games to play vs random.
         num_games_gate:   games to play for gating.
         eval_simulations: MCTS simulations per move during eval.
+        verbose:          print per-game progress (default True).
 
     Returns dict: vs_random, gate, gate_accepted, mcts_test.
     """
     network.eval()
 
+    if verbose:
+        print("  MCTS correctness test...", flush=True)
     mcts_result = test_mcts_correctness(device)
 
+    if verbose:
+        print(f"  vs Random ({num_games_random} games, "
+              f"{eval_simulations} sims/move)...", flush=True)
     random_result = play_vs_random(
-        network, device, num_games_random, eval_simulations
+        network, device, num_games_random, eval_simulations,
+        verbose=verbose,
     )
 
     gate_result = None
     gate_accepted = None
     if best_state_dict is not None:
+        if verbose:
+            print(f"  vs Best ({num_games_gate} games, "
+                  f"{eval_simulations} sims/move)...", flush=True)
         input_shape = (4, 8, 8)
         best_net = AlphaZeroNetwork(input_shape, NUM_ACTIONS).to(device)
         best_net.load_state_dict(best_state_dict)
         best_net.eval()
         gate_accepted, gate_result = gate_checkpoint(
-            network, best_net, device, num_games_gate, eval_simulations
+            network, best_net, device, num_games_gate, eval_simulations,
+            verbose=verbose,
         )
 
     return {

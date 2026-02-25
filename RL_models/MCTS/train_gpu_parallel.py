@@ -635,11 +635,13 @@ def train_alphazero_parallel(num_workers=None):
                 "avg_grad_norm", "policy_entropy_nats",
                 "avg_root_val_winner", "avg_root_val_loser",
                 "buffer_size", "num_workers", "epoch_time_s",
-                "eval_vs_random_wr", "eval_vs_best_wr", "eval_gate_accepted",
+                "eval_vs_random_wr", "eval_vs_prev_wr", "eval_vs_prev_score_ge_gate",
                 "mcts_test_passed",
             ])
 
-    best_state_dict = freeze_state_dict(network)
+    # Sliding-window gate: always compare against the model from EVAL_INTERVAL
+    # epochs ago (updated unconditionally after every evaluation).
+    prev_eval_state_dict = freeze_state_dict(network)
 
     # ── Spawn workers + inference server, run training ────────────────────
     with WorkerContext(network.state_dict(), device, num_workers) as ctx:
@@ -818,14 +820,23 @@ def train_alphazero_parallel(num_workers=None):
             mcts_test_passed = ""
 
             if (epoch + 1) % cfg.EVAL_INTERVAL == 0:
+                prev_epoch = epoch + 1 - cfg.EVAL_INTERVAL
+                gate_label = (f"epoch-{prev_epoch} model"
+                              if prev_epoch > 0 else "initial model")
+                print(f"\n  Running evaluation (gate vs {gate_label})...",
+                      flush=True)
                 eval_result = run_evaluation(
                     network, device,
-                    best_state_dict=(best_state_dict
+                    best_state_dict=(prev_eval_state_dict
                                      if cfg.GATE_ENABLED else None),
                     num_games_random=cfg.EVAL_GAMES_RANDOM,
                     num_games_gate=cfg.EVAL_GAMES_GATE,
                     eval_simulations=cfg.EVAL_SIMULATIONS,
+                    verbose=True,
                 )
+                network.train()
+                # Slide the window: current model becomes the new reference
+                prev_eval_state_dict = freeze_state_dict(network)
                 print_evaluation(eval_result, epoch + 1)
 
                 eval_vs_random_wr = round(
@@ -838,9 +849,6 @@ def train_alphazero_parallel(num_workers=None):
                         eval_result["gate"]["win_rate"], 4
                     )
                     eval_gate_accepted = eval_result["gate_accepted"]
-                    if eval_result["gate_accepted"]:
-                        best_state_dict = freeze_state_dict(network)
-                        print("  → Best model updated.")
 
             with open(csv_path, mode="a", newline="") as f:
                 csv.writer(f).writerow([
