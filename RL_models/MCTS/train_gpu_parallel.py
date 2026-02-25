@@ -239,15 +239,19 @@ def _play_self_play_game(worker_id, request_queue, response_queue,
     evaluator = RemoteEvaluator(
         worker_id, request_queue, response_queue, state_buf, mask_buf
     )
+
+    curriculum_opts = _get_curriculum_options(epoch)
+    num_sims = (cfg.NUM_SIMULATIONS_CURRICULUM
+                if curriculum_opts is not None
+                else cfg.NUM_SIMULATIONS)
+
     mcts = MCTSSearch(
         evaluator=evaluator,
-        num_simulations=cfg.NUM_SIMULATIONS,
+        num_simulations=num_sims,
         c_puct=cfg.C_PUCT,
         dirichlet_alpha=cfg.DIRICHLET_ALPHA,
         dirichlet_epsilon=cfg.DIRICHLET_EPSILON,
     )
-
-    curriculum_opts = _get_curriculum_options(epoch)
     env = CheckersEnv()
     env.reset(options=curriculum_opts)
 
@@ -620,9 +624,16 @@ def train_alphazero_parallel(num_workers=None):
 
         for epoch in range(start_epoch, cfg.NUM_EPOCHS):
             epoch_start = time.perf_counter()
+            curriculum_opts = _get_curriculum_options(epoch)
+            epoch_sims = (cfg.NUM_SIMULATIONS_CURRICULUM
+                          if curriculum_opts is not None
+                          else cfg.NUM_SIMULATIONS)
+            phase = ("phase1" if epoch < cfg.CURRICULUM_PHASE1_END
+                     else "phase2" if epoch < cfg.CURRICULUM_PHASE2_END
+                     else "full")
             print(f"\nEpoch {epoch + 1}/{cfg.NUM_EPOCHS} — "
                   f"self-play ({cfg.GAMES_PER_EPOCH} games, "
-                  f"{cfg.NUM_SIMULATIONS} sims/move, "
+                  f"{epoch_sims} sims/move, {phase}, "
                   f"{num_workers} workers)")
 
             # Push latest weights into inference server before self-play
@@ -668,7 +679,7 @@ def train_alphazero_parallel(num_workers=None):
 
                 for state, mcts_policy, player_color in game_data:
                     if winner in ("Tie", "None"):
-                        outcome = 0.0
+                        outcome = cfg.TIE_OUTCOME_VALUE
                     elif winner == player_color:
                         outcome = 1.0
                     else:

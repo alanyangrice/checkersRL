@@ -118,6 +118,11 @@ class AlphaZeroTrainer:
 
         self.network.eval()
         self.mcts._root = None  # start each game with a fresh search tree
+        self.mcts.num_simulations = (
+            cfg.NUM_SIMULATIONS_CURRICULUM
+            if curriculum_options is not None
+            else cfg.NUM_SIMULATIONS
+        )
 
         while not done:
             if move_count >= cfg.MAX_GAME_MOVES:
@@ -185,13 +190,14 @@ class AlphaZeroTrainer:
         """Label game data with outcomes and add to the replay buffer.
 
         Each position is labeled with:
-            +1 if the player at that position won
-            -1 if the player at that position lost
-             0 if the game was a tie
+            +1   if the player at that position won
+            -1   if the player at that position lost
+            cfg.TIE_OUTCOME_VALUE  if the game was a tie (slightly negative
+                 to give the value head gradient signal from drawn games)
         """
         for state, mcts_policy, player_color in game_data:
             if winner == "Tie" or winner == "None":
-                outcome = 0.0
+                outcome = cfg.TIE_OUTCOME_VALUE
             elif winner == player_color:
                 outcome = 1.0
             else:

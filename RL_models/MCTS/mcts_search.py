@@ -297,26 +297,36 @@ class MCTSSearch:
     def _backup(self, search_path, leaf_value):
         """Propagate leaf value back up the search path.
 
-        Each node's value_sum accumulates the value from *its own player's*
-        perspective.  The sign flips only when consecutive nodes belong to
-        different players.  This correctly handles checkers multi-jump captures
-        where the same player acts at several consecutive tree levels.
+        Each child node stores value from its **parent's** perspective — the
+        player who chose the action leading to that child.  This is required
+        because PUCT selects argmax Q(s,a) at the parent, so Q must represent
+        "how good is this action for the player choosing it."
+
+        The sign is flipped *before* adding to a child whenever the child's
+        player-to-move differs from the parent's, i.e. when the turn changed
+        across that edge.  Multi-jump captures (same player at consecutive
+        nodes) leave the sign unchanged.
 
         Args:
             search_path: list of (MCTSNode, player_color) from root to leaf.
             leaf_value:  float in [-1, 1] from the leaf player's perspective.
         """
         value = leaf_value
-        for i in range(len(search_path) - 1, -1, -1):
+
+        for i in range(len(search_path) - 1, 0, -1):
             node, player = search_path[i]
+            _, parent_player = search_path[i - 1]
+
+            if parent_player != player:
+                value = -value
+
             node.visit_count += 1
             node.value_sum += value
 
-            if i > 0:
-                _, parent_player = search_path[i - 1]
-                if parent_player != player:
-                    value = -value
-                # Same player (multi-jump continuation): value sign unchanged
+        # Root node: value is now in the root player's perspective
+        root, _ = search_path[0]
+        root.visit_count += 1
+        root.value_sum += value
 
     def _outcome_value(self, winner, current_player):
         """Convert a game outcome to a value from *current_player*'s perspective.

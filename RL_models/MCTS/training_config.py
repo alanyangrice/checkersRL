@@ -21,11 +21,17 @@ DIRICHLET_EPSILON = 0.25    # Fraction of noise mixed into root priors
 # ---------------------------------------------------------------------------
 # Loss weighting
 # ---------------------------------------------------------------------------
-# The original AlphaZero paper weights policy and value losses equally (1.0).
-# A lower value (e.g. 0.5) under-trains the value head — since MCTS Q-values
-# are averages of backed-up network values, a poorly calibrated value head
-# means poor search guidance, which then produces poor policy targets.
-VALUE_LOSS_WEIGHT = 1.0
+# The AlphaZero paper weights policy and value losses equally (1.0), but their
+# training starts with a much stronger initial value signal.  In the previous
+# run, policy loss was ~1.0 while value loss was ~0.31 — the value head
+# received 3x less gradient.  Combined with 31% of samples having outcome=0
+# (ties) that produce zero value gradient, the value head stagnated.
+#
+# Weight 2.0 roughly triples the effective value gradient, which should break
+# the "predict zero → get ties → stay at zero" feedback loop.  Once the value
+# head improves, MCTS Q-values become informative, which sharpens policy
+# targets — a virtuous cycle.
+VALUE_LOSS_WEIGHT = 2.0
 
 # ---------------------------------------------------------------------------
 # Network architecture
@@ -38,7 +44,8 @@ VALUE_HEAD_CHANNELS = 1     # 1×1 conv output channels before the value linear 
 # ---------------------------------------------------------------------------
 # MCTS search
 # ---------------------------------------------------------------------------
-NUM_SIMULATIONS = 400       # Simulations per move during self-play
+NUM_SIMULATIONS = 400       # Simulations per move during self-play (full board)
+NUM_SIMULATIONS_CURRICULUM = 150  # Simulations during curriculum phases (smaller boards)
 C_PUCT = 1.5                # Exploration constant in the PUCT formula
 
 # ---------------------------------------------------------------------------
@@ -57,17 +64,30 @@ LR_ETA_MIN = 1e-6           # Minimum learning rate
 # ---------------------------------------------------------------------------
 # Replay buffer & training
 # ---------------------------------------------------------------------------
+
+# Tie outcome labeling:
+# In the previous run, 31% of games ended in ties.  All those positions were
+# labeled outcome=0.0, which produces zero gradient for the value head and
+# reinforces predicting near-zero.  A small negative label teaches the value
+# head that ties are undesirable — both sides learn to steer toward decisive
+# play.  -0.15 is mild enough not to distort the value scale but strong
+# enough to provide gradient signal from the ~30% of data that was wasted.
+TIE_OUTCOME_VALUE = -0.15
+
 BUFFER_SIZE = 500_000       # Maximum number of (state, policy, outcome) tuples
 # At 100 games/epoch × ~50 moves/game ≈ 5,000 new positions per epoch.
 # 50 K fills in ~10 epochs, causing the network to only see the last
 # 10 epochs of data — catastrophic forgetting for a 500-epoch run.
 # 500 K retains ~100 epochs of diversity (AlphaZero uses 500 K).
 BATCH_SIZE = 256            # Mini-batch size per gradient step
-# 200 gradient steps × 256 batch = 51,200 training samples per epoch.
-# With ~8,000 new positions added per epoch and a growing 500K buffer,
-# 100 steps covers only ~5% of the buffer at capacity; 200 steps doubles
-# utilisation with only a ~5–8% increase in total epoch time.
-TRAIN_STEPS_PER_EPOCH = 200 # Gradient updates performed after each epoch
+# 400 gradient steps × 256 batch = 102,400 training samples per epoch.
+# Previous run used 200 steps — each position seen ~0.1 times per epoch at
+# buffer capacity.  Doubling to 400 improves utilisation significantly while
+# adding only ~5–10s per epoch (training is <5% of total epoch wall-clock).
+# During curriculum phase 1, games are shorter (~10 moves × 100 games ≈ 1K
+# new positions), so the network can iterate more over a smaller, cleaner
+# dataset — exactly what the value head needs to bootstrap.
+TRAIN_STEPS_PER_EPOCH = 400 # Gradient updates performed after each epoch
 
 # ---------------------------------------------------------------------------
 # Self-play
@@ -75,13 +95,19 @@ TRAIN_STEPS_PER_EPOCH = 200 # Gradient updates performed after each epoch
 GAMES_PER_EPOCH = 100       # Self-play games generated before each update
 # Temperature controls how stochastically the final move is sampled from MCTS
 # visit counts.  T=1 samples proportionally (exploration); T→0 approaches argmax
-# (exploitation).  Keeping T=0.5 throughout the game (rather than near-argmax
-# 0.1) prevents both sides from collapsing onto the same deterministic lines and
-# drawing every game.  Note: temperature only affects MOVE SELECTION — the policy
-# training target is always the raw visit-count distribution regardless of T.
-TEMPERATURE_THRESHOLD = 30  # Moves before switching from T_EARLY to T_LATE
+# (exploitation).  The policy TRAINING TARGET is always the raw visit-count
+# distribution regardless of T, so low T doesn't reduce target diversity —
+# it only makes the played games more decisive, reducing the tie rate and
+# producing stronger win/loss labels for the value head.
+#
+# Previous run used T_LATE=0.5 and saw a 31% tie rate with flat value learning.
+# T_LATE=0.1 is near-greedy: a move with 2x visits has ~(2^10)x selection
+# probability, almost always picking the most-visited move.  Dirichlet noise
+# at the root still guarantees every legal move is explored *within MCTS*,
+# so the training targets remain diverse even with greedy play.
+TEMPERATURE_THRESHOLD = 15  # Moves before switching from T_EARLY to T_LATE
 TEMPERATURE_EARLY = 1.0     # Temperature for moves 0..TEMPERATURE_THRESHOLD-1
-TEMPERATURE_LATE = 0.5      # Temperature for moves >= TEMPERATURE_THRESHOLD
+TEMPERATURE_LATE = 0.1      # Temperature for moves >= TEMPERATURE_THRESHOLD
 # Maximum full turns per game before declaring a draw.  Prevents runaway
 # passive games from wasting compute; 150 full turns ≈ 300 half-moves which
 # is well above any realistic checkers game.
@@ -111,8 +137,15 @@ def get_num_workers_parallel():
 # ---------------------------------------------------------------------------
 # Curriculum learning phases  (used in get_curriculum_options)
 # ---------------------------------------------------------------------------
-CURRICULUM_PHASE1_END = 0          # Epochs 0–29: small endgame positions
-CURRICULUM_PHASE2_END = 0          # Epochs 30–79: medium positions
+# Phase 1: Simple endgames (2–5 pieces/side).  Games are short (5–15 moves),
+#   nearly always decisive, and teach the value head to distinguish won from
+#   lost positions.  This breaks the "predict zero → get ties → stay at zero"
+#   feedback loop that plagued the full-board-from-scratch run.
+# Phase 2: Mid-game complexity (4–9 pieces/side).  Teaches capturing chains,
+#   king play, and multi-piece tactics before tackling the full opening.
+# Phase 3 (epoch >= PHASE2_END): Full 12v12 standard board.
+CURRICULUM_PHASE1_END = 40         # Epochs 0–39: small endgame positions
+CURRICULUM_PHASE2_END = 100        # Epochs 40–99: medium positions
 CURRICULUM_PHASE1_PIECES = (2, 5)   # Random piece count range for phase 1
 CURRICULUM_PHASE2_PIECES = (4, 9)   # Random piece count range for phase 2
 # Epochs >= CURRICULUM_PHASE2_END: full board (options=None)

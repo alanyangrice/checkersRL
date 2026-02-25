@@ -183,10 +183,13 @@ class NumpyCheckersEnv:
                 {"turn": self._turn, "turn_complete": True, "winner": winner},
             )
 
-        # ── Validate / fall back for invalid action ────────────────────────
-        if self._action_mask[action] == 0:
-            valid = np.where(self._action_mask > 0)[0]
-            action = int(np.random.choice(valid))
+        # ── Validate action ─────────────────────────────────────────────────
+        # NumpyCheckersEnv is used inside MCTS simulations where actions come
+        # from expanded children — an illegal action here means a tree bug.
+        assert self._action_mask[action] != 0, (
+            f"MCTS selected illegal action {action} "
+            f"(mask sum={self._action_mask.sum()}, turn={self._turn})"
+        )
 
         from_sq, to_sq         = decode_action(action)
         from_row, from_col     = board_number_to_position(from_sq)
@@ -300,10 +303,11 @@ class NumpyCheckersEnv:
         if not has_red:
             return BLUE
 
-        # Current player (who just moved) has no more moves → opponent wins.
+        # Opponent (next player) has no legal moves → current player wins.
         # Mirrors Game.check_winner() which is called before switch_turn().
-        if not self._board_has_legal_moves(self._turn):
-            return BLUE if self._turn == RED else RED
+        next_player = BLUE if self._turn == RED else RED
+        if not self._board_has_legal_moves(next_player):
+            return self._turn
 
         return None
 
