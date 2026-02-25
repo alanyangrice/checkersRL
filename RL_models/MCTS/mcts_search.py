@@ -12,12 +12,13 @@ Four-phase loop per simulation
 
 Key correctness notes
 ---------------------
-* Value perspective: every node's value_sum accumulates values from the
-  perspective of the player who is *about to move* in that node's state.
-  The sign flip in backup therefore only occurs at player-change boundaries,
-  not unconditionally at every level.  Without this, multi-jump capture chains
-  -- where the same player acts at several consecutive nodes -- would corrupt
-  Q-values throughout the chain.
+* Value perspective: every child node's value_sum accumulates values from
+  its **parent's** perspective — the player who chose the action leading to
+  that child.  This is required because PUCT selects argmax Q(s,a) at the
+  parent, so Q must be "how good is this action for the chooser."  The sign
+  is flipped in backup *before* adding to a child whenever the child's
+  player-to-move differs from the parent's.  Multi-jump capture chains
+  (same player at consecutive levels) leave the sign unchanged.
 
 * Dirichlet noise: added to root priors during self-play so that MCTS always
   considers every legal move at least sometimes, preventing the training data

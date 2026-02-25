@@ -63,6 +63,7 @@ from checkers_game.constants import BLUE, RED, NUM_ACTIONS
 # available in worker processes when MCTSSearch.search() calls
 # NumpyCheckersEnv.from_env(env) for fast simulation cloning.
 from RL_models.numpy_checkers_env import NumpyCheckersEnv  # noqa: F401
+from RL_models.MCTS.evaluate import run_evaluation, print_evaluation
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -219,31 +220,42 @@ def _get_curriculum_options(epoch):
     return None
 
 
+def _adjudicate_move_cap(env):
+    """Determine winner at move cap based on material (zero-sum compatible).
+
+    Kings count as KING_MATERIAL_VALUE pieces.  Side with more material wins.
+    Equal material → Tie.
+    """
+    if not cfg.MOVE_CAP_ADJUDICATE:
+        return "Tie"
+    board = env.game.board.board
+    blue_mat = sum(
+        cfg.KING_MATERIAL_VALUE if (p != 0 and p.color == BLUE and p.king)
+        else (1.0 if p != 0 and p.color == BLUE else 0.0)
+        for row in board for p in row
+    )
+    red_mat = sum(
+        cfg.KING_MATERIAL_VALUE if (p != 0 and p.color == RED and p.king)
+        else (1.0 if p != 0 and p.color == RED else 0.0)
+        for row in board for p in row
+    )
+    if blue_mat > red_mat:
+        return BLUE
+    elif red_mat > blue_mat:
+        return RED
+    return "Tie"
+
+
 def _play_self_play_game(worker_id, request_queue, response_queue,
                           epoch, state_buf=None, mask_buf=None):
-    """Play one complete AlphaZero self-play game using the GPU inference server.
-
-    Each MCTS leaf evaluation is routed to the GPU server via IPC.
-    The outer game loop uses CheckersEnv; MCTS internally uses NumpyCheckersEnv
-    for fast_clone() across the 100 simulations per move.
-
-    Returns:
-        dict with keys:
-            game_data  — list of (state_np, mcts_policy_np, player_color)
-            winner     — BLUE / RED / "Tie"
-            num_moves  — number of completed turns
-            game_stats — dict of per-game diagnostic signals:
-                           avg_root_val_winner, avg_root_val_loser,
-                           avg_policy_entropy, move_sequence
-    """
+    """Play one complete AlphaZero self-play game using the GPU inference server."""
     evaluator = RemoteEvaluator(
         worker_id, request_queue, response_queue, state_buf, mask_buf
     )
 
     curriculum_opts = _get_curriculum_options(epoch)
-    num_sims = (cfg.NUM_SIMULATIONS_CURRICULUM
-                if curriculum_opts is not None
-                else cfg.NUM_SIMULATIONS)
+    num_sims = cfg.get_num_simulations(epoch)
+    temp_threshold, temp_late = cfg.get_temperature_config(epoch)
 
     mcts = MCTSSearch(
         evaluator=evaluator,
@@ -256,19 +268,16 @@ def _play_self_play_game(worker_id, request_queue, response_queue,
     env.reset(options=curriculum_opts)
 
     game_data   = []
-    value_log   = []   # (player_color, root_value) per move
-    entropy_log = []   # float per move
+    value_log   = []
+    entropy_log = []
     move_count  = 0
     done        = False
     info        = {}
     mcts._root  = None
 
     while not done:
-        # Hard cap: declare draw if the game exceeds MAX_GAME_MOVES full turns.
-        # Prevents runaway passive games from wasting compute and polluting the
-        # buffer with hundreds of near-identical draw positions.
         if move_count >= cfg.MAX_GAME_MOVES:
-            info = {"winner": "Tie"}
+            info = {"winner": _adjudicate_move_cap(env)}
             break
 
         action_mask = env.get_action_mask()
@@ -279,8 +288,8 @@ def _play_self_play_game(worker_id, request_queue, response_queue,
 
         temperature = (
             cfg.TEMPERATURE_EARLY
-            if move_count < cfg.TEMPERATURE_THRESHOLD
-            else cfg.TEMPERATURE_LATE
+            if move_count < temp_threshold
+            else temp_late
         )
 
         state          = env.get_board_state()
@@ -290,7 +299,6 @@ def _play_self_play_game(worker_id, request_queue, response_queue,
             env, temperature=temperature, add_noise=True
         )
 
-        # Per-step diagnostics
         eps = 1e-10
         entropy = float(-np.sum(mcts_policy * np.log(mcts_policy + eps)))
         value_log.append((current_player, root_value))
@@ -617,17 +625,21 @@ def train_alphazero_parallel(num_workers=None):
                 "avg_grad_norm", "policy_entropy_nats",
                 "avg_root_val_winner", "avg_root_val_loser",
                 "buffer_size", "num_workers", "epoch_time_s",
+                "eval_vs_random_wr", "eval_vs_best_wr", "eval_gate_accepted",
+                "mcts_test_passed",
             ])
+
+    # Best model state for gating (updated when a new net passes the gate)
+    best_state_dict = network.state_dict().copy() if not checkpoints else None
+    if checkpoints:
+        best_state_dict = network.state_dict().copy()
 
     # ── Spawn workers + inference server, run training ────────────────────
     with WorkerContext(network.state_dict(), device, num_workers) as ctx:
 
         for epoch in range(start_epoch, cfg.NUM_EPOCHS):
             epoch_start = time.perf_counter()
-            curriculum_opts = _get_curriculum_options(epoch)
-            epoch_sims = (cfg.NUM_SIMULATIONS_CURRICULUM
-                          if curriculum_opts is not None
-                          else cfg.NUM_SIMULATIONS)
+            epoch_sims = cfg.get_num_simulations(epoch)
             phase = ("phase1" if epoch < cfg.CURRICULUM_PHASE1_END
                      else "phase2" if epoch < cfg.CURRICULUM_PHASE2_END
                      else "full")
@@ -647,7 +659,7 @@ def train_alphazero_parallel(num_workers=None):
             )
 
             # ── Populate replay buffer + write detailed game CSV ─────────
-            blue_wins = red_wins = ties = total_moves = 0
+            blue_wins = red_wins = ties = total_moves = new_positions = 0
             total_root_val_winner = 0.0
             total_root_val_loser  = 0.0
             total_entropy         = 0.0
@@ -679,12 +691,13 @@ def train_alphazero_parallel(num_workers=None):
 
                 for state, mcts_policy, player_color in game_data:
                     if winner in ("Tie", "None"):
-                        outcome = cfg.TIE_OUTCOME_VALUE
+                        outcome = 0.0
                     elif winner == player_color:
                         outcome = 1.0
                     else:
                         outcome = -1.0
                     replay_buffer.append((state, mcts_policy, outcome))
+                    new_positions += 1
 
                 with open(detailed_csv_path, mode="a", newline="") as f:
                     csv.writer(f).writerow([
@@ -714,18 +727,15 @@ def train_alphazero_parallel(num_workers=None):
             epoch_avg_entropy   = total_entropy         / cfg.GAMES_PER_EPOCH
 
             # ── Training phase (GPU gradient updates) ────────────────────
+            train_steps = cfg.get_train_steps(new_positions)
             p_loss = v_loss = t_loss = avg_grad_norm = 0.0
             if len(replay_buffer) >= cfg.BATCH_SIZE:
                 network.train()
                 total_p = total_v = total_t = total_gn = 0.0
 
-                # Snapshot the deque to a list once so that random.sample can
-                # use O(1) index access.  deque.__getitem__(i) is O(n) for
-                # middle elements; sampling 256 items 200 times from a 500K
-                # deque would otherwise do millions of slow pointer walks.
                 buffer_snapshot = list(replay_buffer)
 
-                for _ in range(cfg.TRAIN_STEPS_PER_EPOCH):
+                for _ in range(train_steps):
                     batch = random.sample(buffer_snapshot, cfg.BATCH_SIZE)
                     states, policies, values = zip(*batch)
 
@@ -752,7 +762,7 @@ def train_alphazero_parallel(num_workers=None):
                     total_t  += loss.item()
                     total_gn += pre_clip_norm.item()
 
-                n = cfg.TRAIN_STEPS_PER_EPOCH
+                n = train_steps
                 p_loss       = total_p  / n
                 v_loss       = total_v  / n
                 t_loss       = total_t  / n
@@ -778,7 +788,9 @@ def train_alphazero_parallel(num_workers=None):
             print(f"  Epoch {epoch + 1} complete in {elapsed:.0f}s  "
                   f"({elapsed / cfg.GAMES_PER_EPOCH:.1f}s/game)")
             print(f"  Blue: {blue_wins}  Red: {red_wins}  Ties: {ties}  "
-                  f"Avg Moves: {avg_moves:.1f}")
+                  f"Avg Moves: {avg_moves:.1f}  "
+                  f"New Positions: {new_positions}  "
+                  f"Train Steps: {train_steps}")
             print(f"  Policy Loss: {p_loss:.4f}  Value Loss: {v_loss:.4f}  "
                   f"Total: {t_loss:.4f}")
             print(f"  Grad Norm (pre-clip): {avg_grad_norm:.4f}  "
@@ -792,6 +804,37 @@ def train_alphazero_parallel(num_workers=None):
             print(f"  LR: {scheduler.get_last_lr()[0]:.2e}  "
                   f"Buffer: {len(replay_buffer)}")
 
+            # ── Evaluation ─────────────────────────────────────────────────
+            eval_vs_random_wr = ""
+            eval_vs_best_wr = ""
+            eval_gate_accepted = ""
+            mcts_test_passed = ""
+
+            if (epoch + 1) % cfg.EVAL_INTERVAL == 0:
+                eval_result = run_evaluation(
+                    network, device,
+                    best_state_dict=(best_state_dict
+                                     if cfg.GATE_ENABLED else None),
+                    num_games_random=cfg.EVAL_GAMES_RANDOM,
+                    num_games_gate=cfg.EVAL_GAMES_GATE,
+                    eval_simulations=cfg.EVAL_SIMULATIONS,
+                )
+                print_evaluation(eval_result, epoch + 1)
+
+                eval_vs_random_wr = round(
+                    eval_result["vs_random"]["win_rate"], 4
+                )
+                mcts_test_passed = eval_result["mcts_test"]["passed"]
+
+                if eval_result["gate"] is not None:
+                    eval_vs_best_wr = round(
+                        eval_result["gate"]["win_rate"], 4
+                    )
+                    eval_gate_accepted = eval_result["gate_accepted"]
+                    if eval_result["gate_accepted"]:
+                        best_state_dict = network.state_dict().copy()
+                        print("  → Best model updated.")
+
             with open(csv_path, mode="a", newline="") as f:
                 csv.writer(f).writerow([
                     epoch + 1, cfg.GAMES_PER_EPOCH,
@@ -800,6 +843,8 @@ def train_alphazero_parallel(num_workers=None):
                     avg_grad_norm, buffer_entropy,
                     round(avg_root_val_winner, 4), round(avg_root_val_loser, 4),
                     len(replay_buffer), num_workers, round(elapsed, 1),
+                    eval_vs_random_wr, eval_vs_best_wr, eval_gate_accepted,
+                    mcts_test_passed,
                 ])
 
             # ── Checkpoint ────────────────────────────────────────────────

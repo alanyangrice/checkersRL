@@ -50,16 +50,14 @@ class AlphaZeroTrainer:
         weight_decay=cfg.WEIGHT_DECAY,
         buffer_size=cfg.BUFFER_SIZE,
         batch_size=cfg.BATCH_SIZE,
-        train_steps_per_epoch=cfg.TRAIN_STEPS_PER_EPOCH,
-        temperature_threshold=cfg.TEMPERATURE_THRESHOLD,
         device=None,
     ):
         self.device = device or get_device()
         self.num_simulations = num_simulations
         self.c_puct = c_puct
         self.batch_size = batch_size
-        self.train_steps_per_epoch = train_steps_per_epoch
-        self.temperature_threshold = temperature_threshold
+        self.temperature_threshold = cfg.TEMPERATURE_THRESHOLD_FULL
+        self._temp_late = cfg.TEMPERATURE_LATE_FULL
 
         # Network
         input_shape = (4, 8, 8)
@@ -117,29 +115,24 @@ class AlphaZeroTrainer:
         info        = {}
 
         self.network.eval()
-        self.mcts._root = None  # start each game with a fresh search tree
-        self.mcts.num_simulations = (
-            cfg.NUM_SIMULATIONS_CURRICULUM
-            if curriculum_options is not None
-            else cfg.NUM_SIMULATIONS
-        )
+        self.mcts._root = None
 
         while not done:
             if move_count >= cfg.MAX_GAME_MOVES:
-                info = {"winner": "Tie"}
+                from RL_models.MCTS.train_gpu_parallel import _adjudicate_move_cap
+                info = {"winner": _adjudicate_move_cap(env)}
                 break
 
             action_mask = env.get_action_mask()
 
             if action_mask.sum() == 0:
-                # No legal moves -- game over
                 _, _, done, _, info = env.step(0)
                 break
 
             temperature = (
                 cfg.TEMPERATURE_EARLY
                 if move_count < self.temperature_threshold
-                else cfg.TEMPERATURE_LATE
+                else self._temp_late
             )
 
             # Record the state and current player BEFORE the action
@@ -197,7 +190,7 @@ class AlphaZeroTrainer:
         """
         for state, mcts_policy, player_color in game_data:
             if winner == "Tie" or winner == "None":
-                outcome = cfg.TIE_OUTCOME_VALUE
+                outcome = 0.0
             elif winner == player_color:
                 outcome = 1.0
             else:
@@ -205,14 +198,23 @@ class AlphaZeroTrainer:
 
             self.replay_buffer.append((state, mcts_policy, outcome))
 
-    def train_network(self):
+    def train_network(self, new_positions=None):
         """Sample from replay buffer and update the network.
 
+        Args:
+            new_positions: number of positions added this epoch (for adaptive
+                           step count).  If None, uses TRAIN_STEPS_MAX.
+
         Returns:
-            avg_policy_loss, avg_value_loss, avg_total_loss, avg_grad_norm
+            avg_policy_loss, avg_value_loss, avg_total_loss, avg_grad_norm,
+            train_steps
         """
         if len(self.replay_buffer) < self.batch_size:
-            return 0.0, 0.0, 0.0, 0.0
+            return 0.0, 0.0, 0.0, 0.0, 0
+
+        train_steps = (cfg.get_train_steps(new_positions)
+                       if new_positions is not None
+                       else cfg.TRAIN_STEPS_MAX)
 
         self.network.train()
 
@@ -221,12 +223,9 @@ class AlphaZeroTrainer:
         total_loss = 0.0
         total_grad_norm = 0.0
 
-        # Snapshot deque → list once so random.sample uses O(1) index access
-        # instead of O(n) deque pointer walks for each of the batch items.
         buffer_snapshot = list(self.replay_buffer)
 
-        for _ in range(self.train_steps_per_epoch):
-            # Sample a mini-batch
+        for _ in range(train_steps):
             batch = random.sample(buffer_snapshot, self.batch_size)
             states, target_policies, target_values = zip(*batch)
 
@@ -234,42 +233,31 @@ class AlphaZeroTrainer:
             target_policies_t = torch.FloatTensor(np.array(target_policies)).to(self.device)
             target_values_t = torch.FloatTensor(np.array(target_values)).unsqueeze(1).to(self.device)
 
-            # Forward pass
             logits, values = self.network(states_t)
-
-            # Policy loss: cross-entropy with MCTS visit distribution
             log_probs = torch.log_softmax(logits, dim=1)
             policy_loss = -(target_policies_t * log_probs).sum(dim=1).mean()
-
-            # Value loss: MSE between predicted and actual outcome
             value_loss = nn.MSELoss()(values, target_values_t)
-
-            # Total loss
             loss = policy_loss + cfg.VALUE_LOSS_WEIGHT * value_loss
 
             self.optimizer.zero_grad()
             loss.backward()
-
-            # Measure pre-clip gradient norm to check whether the clip is binding.
-            # If avg_grad_norm << GRAD_CLIP_NORM the clip is a no-op; if it is
-            # close to or above it, clipping is actively changing the update.
             pre_clip_norm = nn.utils.clip_grad_norm_(
                 self.network.parameters(), max_norm=cfg.GRAD_CLIP_NORM
             )
             total_grad_norm += pre_clip_norm.item()
-
             self.optimizer.step()
 
             total_policy_loss += policy_loss.item()
             total_value_loss += value_loss.item()
             total_loss += loss.item()
 
-        n = self.train_steps_per_epoch
+        n = train_steps
         return (
             total_policy_loss / n,
             total_value_loss / n,
             total_loss / n,
             total_grad_norm / n,
+            train_steps,
         )
 
     def buffer_policy_entropy(self, sample_size=2048):
@@ -337,13 +325,10 @@ def main():
     """Main AlphaZero training loop."""
     num_epochs = cfg.NUM_EPOCHS
     games_per_epoch = cfg.GAMES_PER_EPOCH
-    num_simulations = cfg.NUM_SIMULATIONS
     batch_size = cfg.BATCH_SIZE
-    train_steps = cfg.TRAIN_STEPS_PER_EPOCH
     buffer_size = cfg.BUFFER_SIZE
     save_interval = cfg.SAVE_INTERVAL
 
-    # Directories
     base_dir     = os.path.dirname(os.path.abspath(__file__))
     model_dir    = os.path.join(base_dir, "alphazero_checkpoints")
     detailed_dir = os.path.join(base_dir, "az_detailed_games")
@@ -352,11 +337,8 @@ def main():
 
     csv_path = os.path.join(base_dir, "alphazero_training_progress.csv")
 
-    # Initialize trainer
     trainer = AlphaZeroTrainer(
-        num_simulations=num_simulations,
         batch_size=batch_size,
-        train_steps_per_epoch=train_steps,
         buffer_size=buffer_size,
     )
 
@@ -394,8 +376,9 @@ def main():
         total_root_val_loser  = 0.0
         total_entropy         = 0.0
 
+        epoch_sims = cfg.get_num_simulations(epoch)
         print(f"\nEpoch {epoch + 1}/{num_epochs} -- Self-play ({games_per_epoch} games, "
-              f"{num_simulations} sims/move)...")
+              f"{epoch_sims} sims/move)...")
 
         # Open per-epoch detailed game CSV (zipped after the epoch)
         detailed_csv_path = os.path.join(
@@ -405,12 +388,19 @@ def main():
             csv.writer(f).writerow(detailed_headers)
 
         # --- Self-play phase ---
+        new_positions = 0
         for game_idx in range(games_per_epoch):
             curriculum_opts = get_curriculum_options(epoch)
+            trainer.mcts.num_simulations = cfg.get_num_simulations(epoch)
+            temp_threshold, temp_late = cfg.get_temperature_config(epoch)
+            trainer.temperature_threshold = temp_threshold
+            trainer._temp_late = temp_late
+
             game_data, winner, num_moves, game_stats = trainer.self_play_game(
                 curriculum_opts
             )
             trainer.add_game_to_buffer(game_data, winner)
+            new_positions += len(game_data)
 
             total_moves += num_moves
             if winner == BLUE:
@@ -457,7 +447,9 @@ def main():
 
         # --- Training phase ---
         print(f"  Training on {len(trainer.replay_buffer)} positions...")
-        p_loss, v_loss, t_loss, avg_grad_norm = trainer.train_network()
+        p_loss, v_loss, t_loss, avg_grad_norm, train_steps = trainer.train_network(
+            new_positions=new_positions
+        )
         trainer.scheduler.step()
 
         # Buffer-level policy entropy (sampled from the full replay buffer,
