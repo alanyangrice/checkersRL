@@ -97,7 +97,7 @@ class MCTSSearch:
         Args:
             env:       CheckersEnv or NumpyCheckersEnv instance.
                        If a CheckersEnv is passed it is converted to
-                       NumpyCheckersEnv once here; all 100 simulations then
+                       NumpyCheckersEnv once here; all simulations then
                        use NumpyCheckersEnv.fast_clone() instead of
                        copy.deepcopy — a single 64-byte memcpy vs a full
                        Python object-graph traversal.
@@ -108,7 +108,7 @@ class MCTSSearch:
             action_probs: (NUM_ACTIONS,) visit-count distribution (sums to 1).
             root_value:   float - network's value estimate at the root.
         """
-        # Convert to numpy env once — negligible cost vs 100 simulations.
+        # Convert to numpy env once — negligible cost vs NUM_SIMULATIONS calls.
         if not isinstance(env, NumpyCheckersEnv):
             env = NumpyCheckersEnv.from_env(env)
 

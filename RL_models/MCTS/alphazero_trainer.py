@@ -120,6 +120,10 @@ class AlphaZeroTrainer:
         self.mcts._root = None  # start each game with a fresh search tree
 
         while not done:
+            if move_count >= cfg.MAX_GAME_MOVES:
+                info = {"winner": "Tie"}
+                break
+
             action_mask = env.get_action_mask()
 
             if action_mask.sum() == 0:
@@ -211,9 +215,13 @@ class AlphaZeroTrainer:
         total_loss = 0.0
         total_grad_norm = 0.0
 
+        # Snapshot deque → list once so random.sample uses O(1) index access
+        # instead of O(n) deque pointer walks for each of the batch items.
+        buffer_snapshot = list(self.replay_buffer)
+
         for _ in range(self.train_steps_per_epoch):
             # Sample a mini-batch
-            batch = random.sample(self.replay_buffer, self.batch_size)
+            batch = random.sample(buffer_snapshot, self.batch_size)
             states, target_policies, target_values = zip(*batch)
 
             states_t = torch.FloatTensor(np.array(states)).to(self.device)

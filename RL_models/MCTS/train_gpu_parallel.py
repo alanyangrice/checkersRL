@@ -260,6 +260,13 @@ def _play_self_play_game(worker_id, request_queue, response_queue,
     mcts._root  = None
 
     while not done:
+        # Hard cap: declare draw if the game exceeds MAX_GAME_MOVES full turns.
+        # Prevents runaway passive games from wasting compute and polluting the
+        # buffer with hundreds of near-identical draw positions.
+        if move_count >= cfg.MAX_GAME_MOVES:
+            info = {"winner": "Tie"}
+            break
+
         action_mask = env.get_action_mask()
 
         if action_mask.sum() == 0:
@@ -701,8 +708,14 @@ def train_alphazero_parallel(num_workers=None):
                 network.train()
                 total_p = total_v = total_t = total_gn = 0.0
 
+                # Snapshot the deque to a list once so that random.sample can
+                # use O(1) index access.  deque.__getitem__(i) is O(n) for
+                # middle elements; sampling 256 items 200 times from a 500K
+                # deque would otherwise do millions of slow pointer walks.
+                buffer_snapshot = list(replay_buffer)
+
                 for _ in range(cfg.TRAIN_STEPS_PER_EPOCH):
-                    batch = random.sample(replay_buffer, cfg.BATCH_SIZE)
+                    batch = random.sample(buffer_snapshot, cfg.BATCH_SIZE)
                     states, policies, values = zip(*batch)
 
                     st = torch.FloatTensor(np.array(states)).to(device)

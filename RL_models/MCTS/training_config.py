@@ -63,21 +63,35 @@ BUFFER_SIZE = 500_000       # Maximum number of (state, policy, outcome) tuples
 # 10 epochs of data — catastrophic forgetting for a 500-epoch run.
 # 500 K retains ~100 epochs of diversity (AlphaZero uses 500 K).
 BATCH_SIZE = 256            # Mini-batch size per gradient step
-TRAIN_STEPS_PER_EPOCH = 100 # Gradient updates performed after each epoch
+# 200 gradient steps × 256 batch = 51,200 training samples per epoch.
+# With ~8,000 new positions added per epoch and a growing 500K buffer,
+# 100 steps covers only ~5% of the buffer at capacity; 200 steps doubles
+# utilisation with only a ~5–8% increase in total epoch time.
+TRAIN_STEPS_PER_EPOCH = 200 # Gradient updates performed after each epoch
 
 # ---------------------------------------------------------------------------
 # Self-play
 # ---------------------------------------------------------------------------
 GAMES_PER_EPOCH = 100       # Self-play games generated before each update
-TEMPERATURE_THRESHOLD = 15  # Moves before switching from explore (T=1) to exploit (T=0.1)
+# Temperature controls how stochastically the final move is sampled from MCTS
+# visit counts.  T=1 samples proportionally (exploration); T→0 approaches argmax
+# (exploitation).  Keeping T=0.5 throughout the game (rather than near-argmax
+# 0.1) prevents both sides from collapsing onto the same deterministic lines and
+# drawing every game.  Note: temperature only affects MOVE SELECTION — the policy
+# training target is always the raw visit-count distribution regardless of T.
+TEMPERATURE_THRESHOLD = 30  # Moves before switching from T_EARLY to T_LATE
 TEMPERATURE_EARLY = 1.0     # Temperature for moves 0..TEMPERATURE_THRESHOLD-1
-TEMPERATURE_LATE = 0.1      # Temperature for moves >= TEMPERATURE_THRESHOLD
+TEMPERATURE_LATE = 0.5      # Temperature for moves >= TEMPERATURE_THRESHOLD
+# Maximum full turns per game before declaring a draw.  Prevents runaway
+# passive games from wasting compute; 150 full turns ≈ 300 half-moves which
+# is well above any realistic checkers game.
+MAX_GAME_MOVES = 150
 
 # ---------------------------------------------------------------------------
 # Training loop
 # ---------------------------------------------------------------------------
 NUM_EPOCHS = 500
-SAVE_INTERVAL = 1           # Save a checkpoint every N epochs
+SAVE_INTERVAL = 5           # Save a checkpoint every N epochs
 
 # ---------------------------------------------------------------------------
 # Parallel training  (train_parallel.py)
