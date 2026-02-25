@@ -83,6 +83,14 @@ TEMPERATURE_LATE_FULL = 0.3            # Moderate for full-board state diversity
 
 MAX_GAME_MOVES = 150
 
+# ---------------------------------------------------------------------------
+# Curriculum learning phases
+# ---------------------------------------------------------------------------
+CURRICULUM_PHASE1_END = 15
+CURRICULUM_PHASE2_END = 50
+CURRICULUM_PHASE1_PIECES = (3, 6)
+CURRICULUM_PHASE2_PIECES = (4, 9)
+
 
 def get_temperature_config(epoch):
     """Return (threshold, late_temperature) for the given epoch."""
@@ -127,7 +135,7 @@ SAVE_INTERVAL = 1
 # ---------------------------------------------------------------------------
 # Parallel training
 # ---------------------------------------------------------------------------
-NUM_WORKERS = 24
+NUM_WORKERS = 50
 
 
 def get_num_workers_parallel():
@@ -147,11 +155,3 @@ EVAL_GAMES_GATE = 50
 EVAL_SIMULATIONS = 100
 GATE_THRESHOLD = 0.55
 GATE_ENABLED = True
-
-# ---------------------------------------------------------------------------
-# Curriculum learning phases
-# ---------------------------------------------------------------------------
-CURRICULUM_PHASE1_END = 40
-CURRICULUM_PHASE2_END = 100
-CURRICULUM_PHASE1_PIECES = (2, 5)
-CURRICULUM_PHASE2_PIECES = (4, 9)

@@ -1,17 +1,20 @@
 """Evaluation utilities for AlphaZero checkers training.
 
-Provides three capabilities:
-  1. play_vs_random()   — absolute strength: win rate against a random opponent.
-  2. play_vs_network()  — relative strength (gating): new net vs previous best.
-  3. test_mcts_forced_win() — correctness: MCTS must pick the winning move in
-                              a trivially solvable position.
+Provides:
+  1. play_vs_random()          — absolute strength vs a random opponent.
+  2. play_vs_network() / gate  — relative strength (gating) vs previous best.
+  3. test_mcts_correctness()   — backup sign-convention sanity check using a
+                                  dummy (uniform) network on a 2-move position.
 
-All evaluation games use temperature=0 (greedy) and no Dirichlet noise, so
-results reflect the network's actual policy rather than exploration noise.
+Gating games use stochastic openings (temperature=1 for the first K moves)
+to produce diverse game lines even when policies are sharp.
 """
+
+import random as _random
 
 import numpy as np
 import torch
+import torch.nn as nn
 
 from RL_models.checkers_env import CheckersEnv
 from RL_models.MCTS.mcts_search import MCTSSearch
@@ -19,19 +22,64 @@ from RL_models.MCTS.AlphaZeroNetwork import AlphaZeroNetwork
 from RL_models.MCTS import training_config as cfg
 from checkers_game.constants import (
     BLUE, RED, NUM_ACTIONS, ROWS, COLS,
-    position_to_board_number, encode_action,
+    board_number_to_position, position_to_board_number, encode_action,
 )
 from checkers_game.piece import Piece
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Evaluation game runner (shared by all modes)
+# Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _play_eval_game(blue_agent, red_agent, max_moves=150):
+def freeze_state_dict(model):
+    """Deep-copy a model's state_dict so it is fully detached from the live model.
+
+    PyTorch's state_dict() returns references to the live parameter tensors.
+    A plain dict .copy() only copies the dict structure, not the tensors.
+    After freeze_state_dict(), no tensor in the returned dict shares storage
+    with the model — safe to keep across training epochs.
+    """
+    return {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+
+
+def _adjudicate_move_cap(env):
+    """Determine winner at move cap based on material (same rule as training)."""
+    if not cfg.MOVE_CAP_ADJUDICATE:
+        return "Tie"
+    board = env.game.board.board
+    blue_mat = sum(
+        cfg.KING_MATERIAL_VALUE if (p != 0 and p.color == BLUE and p.king)
+        else (1.0 if p != 0 and p.color == BLUE else 0.0)
+        for row in board for p in row
+    )
+    red_mat = sum(
+        cfg.KING_MATERIAL_VALUE if (p != 0 and p.color == RED and p.king)
+        else (1.0 if p != 0 and p.color == RED else 0.0)
+        for row in board for p in row
+    )
+    if blue_mat > red_mat:
+        return BLUE
+    elif red_mat > blue_mat:
+        return RED
+    return "Tie"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Game runner
+# ─────────────────────────────────────────────────────────────────────────────
+
+_EVAL_OPENING_MOVES = 6  # stochastic opening depth for gating diversity
+
+def _play_eval_game(blue_agent, red_agent, max_moves=150,
+                    stochastic_opening=0):
     """Play one evaluation game between two agents.
 
-    Each agent is a callable: agent(env) -> action.
+    Args:
+        blue_agent / red_agent: callable(env) -> action.
+        max_moves: move cap (uses training adjudication rule, not always Tie).
+        stochastic_opening: number of initial full moves played with
+            temperature=1 sampling (for gating diversity).  0 = fully greedy.
+
     Returns (winner, num_moves).
     """
     env = CheckersEnv()
@@ -43,7 +91,7 @@ def _play_eval_game(blue_agent, red_agent, max_moves=150):
 
     while not done:
         if move_count >= max_moves:
-            return "Tie", move_count
+            return _adjudicate_move_cap(env), move_count
 
         mask = env.get_action_mask()
         if mask.sum() == 0:
@@ -62,19 +110,37 @@ def _play_eval_game(blue_agent, red_agent, max_moves=150):
     return info.get("winner", "Tie"), move_count
 
 
-def _make_mcts_agent(network, device, num_simulations=None):
-    """Create an MCTS agent function: agent(env) -> action."""
+def _make_mcts_agent(network, device, num_simulations=None,
+                     stochastic_opening_moves=0):
+    """Create an MCTS agent: greedy after opening, stochastic for first K moves.
+
+    Args:
+        stochastic_opening_moves: number of full turns to use temperature=1.
+            After that, temperature=0 (greedy).  Provides game diversity for
+            gating without injecting Dirichlet noise.
+    """
     sims = num_simulations or cfg.NUM_SIMULATIONS
     mcts = MCTSSearch(
         network=network, num_simulations=sims,
         c_puct=cfg.C_PUCT, device=device,
     )
+    move_counter = [0]
 
     def agent(env):
         mcts._root = None
-        action, _, _ = mcts.select_action(env, temperature=0, add_noise=False)
+        temp = 1.0 if move_counter[0] < stochastic_opening_moves else 0
+        action, _, _ = mcts.select_action(
+            env, temperature=temp, add_noise=False,
+        )
+        if env.get_action_mask().sum() > 0:
+            info_peek = {}
+            move_counter[0] += 1
         return action
 
+    def reset():
+        move_counter[0] = 0
+
+    agent.reset = reset
     return agent
 
 
@@ -90,18 +156,9 @@ def _random_agent(env):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def play_vs_random(network, device, num_games=40, num_simulations=100):
-    """Play games against a random opponent and return win/tie/loss stats.
+    """Play games against a random opponent.  Half as BLUE, half as RED.
 
-    Half the games are played as BLUE, half as RED, to remove first-move bias.
-
-    Args:
-        network:         AlphaZeroNetwork in eval mode.
-        device:          torch device for inference.
-        num_games:       total games to play (split evenly BLUE/RED).
-        num_simulations: MCTS simulations per move during eval.
-
-    Returns:
-        dict with keys: wins, losses, ties, win_rate, games, avg_moves
+    Returns dict: wins, losses, ties, win_rate, score, games, avg_moves.
     """
     network.eval()
     mcts_agent = _make_mcts_agent(network, device, num_simulations)
@@ -126,11 +183,13 @@ def play_vs_random(network, device, num_games=40, num_simulations=100):
         else:
             losses += 1
 
+    n = max(num_games, 1)
     return {
         "wins": wins, "losses": losses, "ties": ties,
-        "win_rate": wins / num_games if num_games > 0 else 0.0,
+        "win_rate": wins / n,
+        "score": (wins + 0.5 * ties) / n,
         "games": num_games,
-        "avg_moves": total_moves / num_games if num_games > 0 else 0,
+        "avg_moves": total_moves / n,
     }
 
 
@@ -140,30 +199,31 @@ def play_vs_random(network, device, num_games=40, num_simulations=100):
 
 def play_vs_network(new_net, old_net, device, num_games=40,
                     num_simulations=100):
-    """Play games between two networks and return the new net's stats.
+    """Play games between two networks.  Half as BLUE, half as RED.
 
-    Half the games have new_net as BLUE, half as RED.
+    Uses stochastic openings (first K moves at temperature=1) to produce
+    diverse games even when both policies are sharp/deterministic.
 
-    Args:
-        new_net:         candidate AlphaZeroNetwork (eval mode).
-        old_net:         current best AlphaZeroNetwork (eval mode).
-        device:          torch device.
-        num_games:       total games.
-        num_simulations: MCTS sims per move.
-
-    Returns:
-        dict with keys: wins, losses, ties, win_rate, games, avg_moves
+    Returns dict: wins, losses, ties, win_rate, score, games, avg_moves.
     """
     new_net.eval()
     old_net.eval()
-    new_agent = _make_mcts_agent(new_net, device, num_simulations)
-    old_agent = _make_mcts_agent(old_net, device, num_simulations)
+    new_agent = _make_mcts_agent(
+        new_net, device, num_simulations,
+        stochastic_opening_moves=_EVAL_OPENING_MOVES,
+    )
+    old_agent = _make_mcts_agent(
+        old_net, device, num_simulations,
+        stochastic_opening_moves=_EVAL_OPENING_MOVES,
+    )
     half = num_games // 2
 
     wins = losses = ties = 0
     total_moves = 0
 
     for i in range(num_games):
+        new_agent.reset()
+        old_agent.reset()
         if i < half:
             winner, moves = _play_eval_game(new_agent, old_agent)
             new_color = BLUE
@@ -179,43 +239,77 @@ def play_vs_network(new_net, old_net, device, num_games=40,
         else:
             losses += 1
 
+    n = max(num_games, 1)
     return {
         "wins": wins, "losses": losses, "ties": ties,
-        "win_rate": wins / num_games if num_games > 0 else 0.0,
+        "win_rate": wins / n,
+        "score": (wins + 0.5 * ties) / n,
         "games": num_games,
-        "avg_moves": total_moves / num_games if num_games > 0 else 0,
+        "avg_moves": total_moves / n,
     }
 
 
 def gate_checkpoint(new_net, old_net, device, num_games=40,
                     num_simulations=100, threshold=0.55):
-    """Gating test: accept new_net if it beats old_net above threshold.
+    """Gating test: accept new_net if its score exceeds threshold.
 
-    Returns:
-        (accepted: bool, stats: dict)
+    score = (wins + 0.5 * ties) / games
+    This counts ties as half a win rather than punishing both sides.
+
+    Returns (accepted: bool, stats: dict).
     """
     stats = play_vs_network(new_net, old_net, device, num_games,
                             num_simulations)
-    accepted = stats["win_rate"] >= threshold
+    accepted = stats["score"] >= threshold
     return accepted, stats
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3) MCTS correctness: forced-win test
+# 3) MCTS correctness: backup sign-convention test
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _setup_forced_win_env():
-    """Create a trivial position: BLUE has one capture that wins the game.
+class _DummyNetwork(nn.Module):
+    """Uniform priors (logits=0) and value=0 for all states.
+
+    Strips out all network influence so the ONLY thing driving MCTS visit
+    counts is terminal backup math — exactly what we're testing.
+    """
+    def __init__(self):
+        super().__init__()
+        self._dummy = nn.Linear(1, 1)
+
+    def forward(self, x):
+        b = x.size(0)
+        logits = torch.zeros(b, NUM_ACTIONS, device=x.device)
+        value = torch.zeros(b, 1, device=x.device)
+        return logits, value
+
+
+def _setup_blocking_win_position():
+    """Construct a position with 4 legal regular moves, exactly 1 winning.
+
+    Mandatory captures in checkers make it nearly impossible to have 2+ legal
+    actions at depth 1 where exactly one wins via piece removal:
+      - 1 RED piece → all captures of it win (no discrimination)
+      - 2 RED pieces → capturing either leaves one alive (neither wins)
+
+    Instead, we use a "stalemate" win: BLUE's move BLOCKS the opponent's
+    only piece, leaving RED with no legal moves.
 
     Board:
-        BLUE piece at (5, 0) = square 21
-        RED  piece at (6, 1) = square 25
+        BLUE king at (1,2) = sq 6      (king — moves in all 4 directions)
+        RED  piece at (1,0) = sq 5      (regular — can only move to row 0)
 
-    BLUE must capture (mandatory captures): 21 → 30, jumping over RED at 25.
-    This removes RED's last piece → BLUE wins immediately.
+    No captures available (not diag-adjacent for a jump).  BLUE king has
+    4 legal regular moves:
+        (0,1)=sq1   → BLOCKS RED.  RED at (1,0) tries (0,1): occupied.
+                      (0,-1): off board.  No moves → BLUE wins.  [WIN]
+        (0,3)=sq2   → RED can still move (1,0)→(0,1).  Game continues.
+        (2,1)=sq9   → RED can still move (1,0)→(0,1).  Game continues.
+        (2,3)=sq10  → RED can still move (1,0)→(0,1).  Game continues.
 
-    With correct backup, MCTS should assign ~100% visits to the winning
-    action.  With inverted backup (the old bug), it would avoid it.
+    With a dummy network (uniform priors, value=0), correct backup should
+    direct >50% of visits to the winning move; inverted backup would avoid it.
     """
     from checkers_game.board import Board
 
@@ -225,8 +319,11 @@ def _setup_forced_win_env():
     board = Board.__new__(Board)
     board.board = [[0] * COLS for _ in range(ROWS)]
 
-    board.board[5][0] = Piece(5, 0, BLUE)
-    board.board[6][1] = Piece(6, 1, RED)
+    blue_king = Piece(1, 2, BLUE)
+    blue_king.make_king()
+    board.board[1][2] = blue_king
+
+    board.board[1][0] = Piece(1, 0, RED)
 
     env.game.board = board
     env.game.turn = BLUE
@@ -242,28 +339,37 @@ def _setup_forced_win_env():
     env._update_action_mask()
 
     winning_action = encode_action(
-        position_to_board_number(5, 0),  # sq 21
-        position_to_board_number(7, 2),  # sq 30
+        position_to_board_number(1, 2),  # sq 6  (BLUE king)
+        position_to_board_number(0, 1),  # sq 1  (blocking square)
     )
 
     return env, winning_action
 
 
-def test_mcts_forced_win(network, device, num_simulations=50):
-    """Verify MCTS selects the winning action in a forced-win position.
+def test_mcts_correctness(device, num_simulations=80):
+    """Verify MCTS selects the winning action using a dummy (uniform) network.
 
-    This is a correctness test for the backup sign convention.
-    With inverted backup, MCTS would pick a non-winning action.
+    Uses a hand-constructed position with 4 legal regular moves, exactly 1
+    of which wins by blocking the opponent's only piece (stalemate).  The
+    dummy network outputs uniform priors and value=0, so ONLY the terminal
+    backup math determines visit allocation.
 
-    Returns:
-        dict with passed (bool), action_selected, winning_action,
-        winning_visit_share (fraction of visits on the winning action)
+    With correct backup:  winning move gets majority of visits (>50%).
+    With inverted backup: winning move gets the FEWEST visits.
+
+    Returns dict: passed, action_selected, winning_action, winning_visit_share,
+                  root_value, num_legal_actions.
     """
-    network.eval()
-    env, winning_action = _setup_forced_win_env()
+    env, winning_action = _setup_blocking_win_position()
+
+    mask = env.get_action_mask()
+    num_legal = int(mask.sum())
+
+    dummy_net = _DummyNetwork().to(device)
+    dummy_net.eval()
 
     mcts = MCTSSearch(
-        network=network, num_simulations=num_simulations,
+        network=dummy_net, num_simulations=num_simulations,
         c_puct=cfg.C_PUCT, device=device,
     )
     mcts._root = None
@@ -272,7 +378,7 @@ def test_mcts_forced_win(network, device, num_simulations=50):
     selected = int(np.argmax(action_probs))
     winning_share = float(action_probs[winning_action])
 
-    passed = selected == winning_action
+    passed = selected == winning_action and winning_share > 0.5
 
     return {
         "passed": passed,
@@ -280,11 +386,12 @@ def test_mcts_forced_win(network, device, num_simulations=50):
         "winning_action": winning_action,
         "winning_visit_share": round(winning_share, 4),
         "root_value": round(root_value, 4),
+        "num_legal_actions": num_legal,
     }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Combined evaluation runner (called from training loop)
+# Combined evaluation runner
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_evaluation(network, device, best_state_dict=None,
@@ -295,30 +402,22 @@ def run_evaluation(network, device, best_state_dict=None,
     Args:
         network:          current AlphaZeroNetwork (eval mode).
         device:           torch device.
-        best_state_dict:  state_dict of the current best model for gating.
+        best_state_dict:  deep-frozen state_dict of the current best model.
                           If None, gating is skipped.
         num_games_random: games to play vs random.
         num_games_gate:   games to play for gating.
         eval_simulations: MCTS simulations per move during eval.
 
-    Returns:
-        dict with keys:
-            vs_random     — play_vs_random result dict
-            gate          — gate_checkpoint result dict (or None)
-            gate_accepted — bool (or None)
-            mcts_test     — test_mcts_forced_win result dict
+    Returns dict: vs_random, gate, gate_accepted, mcts_test.
     """
     network.eval()
 
-    # Correctness test
-    mcts_result = test_mcts_forced_win(network, device)
+    mcts_result = test_mcts_correctness(device)
 
-    # Absolute strength
     random_result = play_vs_random(
         network, device, num_games_random, eval_simulations
     )
 
-    # Gating
     gate_result = None
     gate_accepted = None
     if best_state_dict is not None:
@@ -346,15 +445,16 @@ def print_evaluation(eval_result, epoch):
     status = "PASS" if mt["passed"] else "FAIL"
     print(f"  MCTS correctness: {status}  "
           f"(winning_visits={mt['winning_visit_share']:.0%}, "
-          f"root_val={mt['root_value']:+.3f})")
+          f"root_val={mt['root_value']:+.3f}, "
+          f"legal={mt.get('num_legal_actions', '?')})")
 
     vr = eval_result["vs_random"]
     print(f"  vs Random: {vr['wins']}W / {vr['losses']}L / {vr['ties']}T  "
-          f"({vr['win_rate']:.0%} win rate, "
+          f"(score={vr['score']:.0%}, "
           f"avg {vr['avg_moves']:.0f} moves)")
 
     if eval_result["gate"] is not None:
         g = eval_result["gate"]
         accepted = "ACCEPTED" if eval_result["gate_accepted"] else "rejected"
         print(f"  vs Best: {g['wins']}W / {g['losses']}L / {g['ties']}T  "
-              f"({g['win_rate']:.0%}) → {accepted}")
+              f"(score={g['score']:.0%}) → {accepted}")

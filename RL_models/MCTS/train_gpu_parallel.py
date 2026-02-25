@@ -63,7 +63,9 @@ from checkers_game.constants import BLUE, RED, NUM_ACTIONS
 # available in worker processes when MCTSSearch.search() calls
 # NumpyCheckersEnv.from_env(env) for fast simulation cloning.
 from RL_models.numpy_checkers_env import NumpyCheckersEnv  # noqa: F401
-from RL_models.MCTS.evaluate import run_evaluation, print_evaluation
+from RL_models.MCTS.evaluate import (
+    run_evaluation, print_evaluation, freeze_state_dict,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -629,10 +631,7 @@ def train_alphazero_parallel(num_workers=None):
                 "mcts_test_passed",
             ])
 
-    # Best model state for gating (updated when a new net passes the gate)
-    best_state_dict = network.state_dict().copy() if not checkpoints else None
-    if checkpoints:
-        best_state_dict = network.state_dict().copy()
+    best_state_dict = freeze_state_dict(network)
 
     # ── Spawn workers + inference server, run training ────────────────────
     with WorkerContext(network.state_dict(), device, num_workers) as ctx:
@@ -832,7 +831,7 @@ def train_alphazero_parallel(num_workers=None):
                     )
                     eval_gate_accepted = eval_result["gate_accepted"]
                     if eval_result["gate_accepted"]:
-                        best_state_dict = network.state_dict().copy()
+                        best_state_dict = freeze_state_dict(network)
                         print("  → Best model updated.")
 
             with open(csv_path, mode="a", newline="") as f:
