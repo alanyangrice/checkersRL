@@ -406,21 +406,19 @@ def test_mcts_correctness(device, num_simulations=80):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_evaluation(network, device, best_state_dict=None,
-                   num_games_random=40, num_games_gate=40,
-                   eval_simulations=100, verbose=True):
-    """Run all evaluation suites and return a summary dict.
+                   num_games_gate=40, eval_simulations=100, verbose=True):
+    """Run gate evaluation and MCTS correctness test; return a summary dict.
 
     Args:
         network:          current AlphaZeroNetwork (eval mode).
         device:           torch device.
-        best_state_dict:  deep-frozen state_dict of the current best model.
+        best_state_dict:  deep-frozen state_dict of the reference model.
                           If None, gating is skipped.
-        num_games_random: games to play vs random.
         num_games_gate:   games to play for gating.
         eval_simulations: MCTS simulations per move during eval.
         verbose:          print per-game progress (default True).
 
-    Returns dict: vs_random, gate, gate_accepted, mcts_test.
+    Returns dict: gate, gate_accepted, mcts_test.
     """
     network.eval()
 
@@ -428,19 +426,11 @@ def run_evaluation(network, device, best_state_dict=None,
         print("  MCTS correctness test...", flush=True)
     mcts_result = test_mcts_correctness(device)
 
-    if verbose:
-        print(f"  vs Random ({num_games_random} games, "
-              f"{eval_simulations} sims/move)...", flush=True)
-    random_result = play_vs_random(
-        network, device, num_games_random, eval_simulations,
-        verbose=verbose,
-    )
-
     gate_result = None
     gate_accepted = None
     if best_state_dict is not None:
         if verbose:
-            print(f"  vs Best ({num_games_gate} games, "
+            print(f"  vs prev ({num_games_gate} games, "
                   f"{eval_simulations} sims/move)...", flush=True)
         input_shape = (4, 8, 8)
         best_net = AlphaZeroNetwork(input_shape, NUM_ACTIONS).to(device)
@@ -452,7 +442,6 @@ def run_evaluation(network, device, best_state_dict=None,
         )
 
     return {
-        "vs_random": random_result,
         "gate": gate_result,
         "gate_accepted": gate_accepted,
         "mcts_test": mcts_result,
@@ -470,13 +459,8 @@ def print_evaluation(eval_result, epoch):
           f"root_val={mt['root_value']:+.3f}, "
           f"legal={mt.get('num_legal_actions', '?')})")
 
-    vr = eval_result["vs_random"]
-    print(f"  vs Random: {vr['wins']}W / {vr['losses']}L / {vr['ties']}T  "
-          f"(score={vr['score']:.0%}, "
-          f"avg {vr['avg_moves']:.0f} moves)")
-
     if eval_result["gate"] is not None:
         g = eval_result["gate"]
         accepted = "ACCEPTED" if eval_result["gate_accepted"] else "rejected"
-        print(f"  vs Best: {g['wins']}W / {g['losses']}L / {g['ties']}T  "
+        print(f"  vs Prev: {g['wins']}W / {g['losses']}L / {g['ties']}T  "
               f"(score={g['score']:.0%}) → {accepted}")

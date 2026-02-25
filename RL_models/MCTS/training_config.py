@@ -7,6 +7,8 @@ All values are calibrated for 8×8 English draughts (checkers):
   - Multi-jump captures keep the same player active for several tree levels
 """
 
+import math
+
 
 # ---------------------------------------------------------------------------
 # Self-play exploration (Dirichlet noise added to root priors)
@@ -24,11 +26,10 @@ DIRICHLET_EPSILON  = 0.25
 # ---------------------------------------------------------------------------
 # Loss weighting
 # ---------------------------------------------------------------------------
-# Weight = 2.0 during bootstrapping to fix the value head faster.
-# Checkers has clear win/loss signals from short curriculum games,
-# so the extra value gradient will be useful. Can reduce to 1.5 after
-# the network starts showing value separation (winner avg > ±0.4).
-VALUE_LOSS_WEIGHT  = 2.0
+# Weight = 3.0: value component is only ~7% of total loss at 2.0, which
+# is too weak to calibrate the value head on harder Phase 2/3 positions.
+# At 3.0 it becomes ~11% — enough to drive calibration without harming policy.
+VALUE_LOSS_WEIGHT  = 3.0
 
 # ---------------------------------------------------------------------------
 # Network architecture
@@ -76,15 +77,51 @@ C_PUCT             = 1.5
 # ---------------------------------------------------------------------------
 # Network & optimiser
 # ---------------------------------------------------------------------------
-LEARNING_RATE      = 1e-3
+LEARNING_RATE      = 1e-3   # initial value; overridden per-epoch by get_lr()
 WEIGHT_DECAY       = 1e-4
 GRAD_CLIP_NORM     = 1.0
 
 # ---------------------------------------------------------------------------
-# LR scheduler (CosineAnnealingLR)
+# Per-phase LR schedule (cosine with warm restart at each curriculum boundary)
 # ---------------------------------------------------------------------------
-LR_T_MAX           = 500   # Anneal over full training run
-LR_ETA_MIN         = 1e-6
+# Each curriculum phase gets its own full cosine cycle so the model can
+# rapidly re-adapt when it encounters harder positions.
+#
+#  Phase 1 (epochs 0–14):   1e-3  → 1e-5  over 15 epochs
+#  Phase 2 (epochs 15–49):  1e-3  → 1e-5  over 35 epochs  ← warm restart
+#  Phase 3 (epochs 50–499): 5e-4  → 1e-6  over 450 epochs ← warm restart
+#                            (lower peak: model is mature, less re-exploration)
+LR_PHASE1_MAX = 1e-3
+LR_PHASE1_MIN = 1e-5
+LR_PHASE2_MAX = 1e-3
+LR_PHASE2_MIN = 1e-5
+LR_PHASE3_MAX = 5e-4
+LR_PHASE3_MIN = 1e-6
+
+
+def get_lr(epoch):
+    """Return the learning rate for the given epoch (0-indexed).
+
+    Uses a cosine schedule that warm-restarts at each curriculum phase
+    boundary, giving each phase its own full decay cycle.
+    """
+    if epoch < CURRICULUM_PHASE1_END:
+        t = epoch / CURRICULUM_PHASE1_END
+        return LR_PHASE1_MIN + 0.5 * (LR_PHASE1_MAX - LR_PHASE1_MIN) * (
+            1 + math.cos(math.pi * t)
+        )
+    elif epoch < CURRICULUM_PHASE2_END:
+        phase_len = CURRICULUM_PHASE2_END - CURRICULUM_PHASE1_END
+        t = (epoch - CURRICULUM_PHASE1_END) / phase_len
+        return LR_PHASE2_MIN + 0.5 * (LR_PHASE2_MAX - LR_PHASE2_MIN) * (
+            1 + math.cos(math.pi * t)
+        )
+    else:
+        phase_len = NUM_EPOCHS - CURRICULUM_PHASE2_END
+        t = (epoch - CURRICULUM_PHASE2_END) / phase_len
+        return LR_PHASE3_MIN + 0.5 * (LR_PHASE3_MAX - LR_PHASE3_MIN) * (
+            1 + math.cos(math.pi * t)
+        )
 
 # ---------------------------------------------------------------------------
 # Replay buffer & training
@@ -236,7 +273,6 @@ def get_num_workers_parallel():
 # Evaluation & gating
 # ---------------------------------------------------------------------------
 EVAL_INTERVAL      = 5     # Run evaluation every N epochs
-EVAL_GAMES_RANDOM  = 50    # Games vs random (25 as BLUE, 25 as RED)
 EVAL_GAMES_GATE    = 50    # Gating games (25 as BLUE, 25 as RED)
 EVAL_SIMULATIONS   = 100   # MCTS sims per move during eval
 GATE_THRESHOLD     = 0.55  # score = (wins + 0.5*ties) / games

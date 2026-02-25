@@ -41,7 +41,6 @@ import random
 import threading
 import time
 import argparse
-import zipfile
 from collections import deque
 from multiprocessing import Process, Queue, Event
 from multiprocessing import shared_memory as _shm_module
@@ -64,7 +63,7 @@ from checkers_game.constants import BLUE, RED, NUM_ACTIONS
 # NumpyCheckersEnv.from_env(env) for fast simulation cloning.
 from RL_models.numpy_checkers_env import NumpyCheckersEnv  # noqa: F401
 from RL_models.MCTS.evaluate import (
-    run_evaluation, print_evaluation, freeze_state_dict,
+    freeze_state_dict, test_mcts_correctness,
 )
 
 
@@ -565,6 +564,276 @@ class WorkerContext:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Parallel evaluation infrastructure  (two-network, mirroring WorkerContext)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_EVAL_MAX_MOVES         = 150
+_EVAL_STOCHASTIC_MOVES  = 6   # first N full-turn moves played at temperature=1
+
+
+def _play_eval_game_parallel(task, new_eval, old_eval):
+    """Play one evaluation game using two remote evaluators.
+
+    new_eval routes to the current-epoch inference server.
+    old_eval routes to the reference-model inference server.
+
+    task keys:
+        game_idx           int  — determines which color new_net plays
+        num_games          int  — total games in this eval run (for color split)
+        num_simulations    int
+        stochastic_opening int  — moves played at temperature=1
+    """
+    game_idx          = task["game_idx"]
+    num_games         = task["num_games"]
+    num_simulations   = task["num_simulations"]
+    stoch             = task.get("stochastic_opening", _EVAL_STOCHASTIC_MOVES)
+
+    new_color = BLUE if game_idx < num_games // 2 else RED
+
+    new_mcts = MCTSSearch(evaluator=new_eval, num_simulations=num_simulations,
+                          c_puct=cfg.C_PUCT)
+    old_mcts = MCTSSearch(evaluator=old_eval, num_simulations=num_simulations,
+                          c_puct=cfg.C_PUCT)
+
+    env = CheckersEnv()
+    env.reset()
+    new_mcts._root = old_mcts._root = None
+
+    move_count = 0
+    done       = False
+    info       = {}
+
+    while not done:
+        if move_count >= _EVAL_MAX_MOVES:
+            info = {"winner": _adjudicate_move_cap(env)}
+            break
+
+        mask = env.get_action_mask()
+        if mask.sum() == 0:
+            _, _, done, _, info = env.step(0)
+            break
+
+        temp         = 1.0 if move_count < stoch else 0.0
+        active_mcts  = new_mcts if env.game.turn == new_color else old_mcts
+        active_mcts._root = None   # no tree reuse across eval moves (matches sequential eval)
+
+        action, _, _ = active_mcts.select_action(env, temperature=temp,
+                                                  add_noise=False)
+        _, _, done, _, info = env.step(action)
+        if info.get("turn_complete", True):
+            move_count += 1
+
+    winner = info.get("winner", "Tie")
+    return {"game_idx": game_idx, "winner": winner,
+            "new_color": new_color, "num_moves": move_count}
+
+
+def eval_worker_fn(worker_id,
+                   new_req_q, new_resp_q,
+                   old_req_q, old_resp_q,
+                   task_queue, results_queue,
+                   shm_new_state_name, shm_old_state_name,
+                   num_workers):
+    """Persistent eval worker process.
+
+    Maintains one RemoteEvaluator per network (new / old) and plays eval games
+    until a _WORKER_EXIT sentinel arrives.
+    """
+    _shm_new      = _shm_module.SharedMemory(name=shm_new_state_name)
+    _shm_old      = _shm_module.SharedMemory(name=shm_old_state_name)
+    _state_buf_new = np.ndarray((num_workers, 4, 8, 8), dtype=np.float32,
+                                buffer=_shm_new.buf)
+    _state_buf_old = np.ndarray((num_workers, 4, 8, 8), dtype=np.float32,
+                                buffer=_shm_old.buf)
+
+    new_eval = RemoteEvaluator(worker_id, new_req_q, new_resp_q, _state_buf_new)
+    old_eval = RemoteEvaluator(worker_id, old_req_q, old_resp_q, _state_buf_old)
+
+    while True:
+        item = task_queue.get()
+        if item is _WORKER_EXIT:
+            break
+        if item == _WORKER_BATCH_DONE:
+            results_queue.put(_WORKER_BATCH_DONE)
+            continue
+
+        task_idx, task = item
+        result = _play_eval_game_parallel(task, new_eval, old_eval)
+        results_queue.put((task_idx, result))
+
+    _shm_new.close()
+    _shm_old.close()
+
+
+class EvalContext:
+    """Two-network GPU inference context for parallel evaluation games.
+
+    Mirrors WorkerContext but serves two networks (new and reference) via
+    separate inference server threads.  Workers interleave requests to both
+    servers within each game depending on the active player.
+
+    Usage:
+        with EvalContext(new_sd, old_sd, device, num_workers) as ectx:
+            stats = ectx.run_eval(num_games, num_simulations)
+    """
+
+    def __init__(self, new_state_dict, old_state_dict, device, num_workers):
+        self.device      = device
+        self.num_workers = num_workers
+
+        input_shape = (4, 8, 8)
+
+        self._new_model = AlphaZeroNetwork(input_shape, NUM_ACTIONS).to(device)
+        self._new_model.load_state_dict(new_state_dict)
+        self._new_model.eval()
+
+        self._old_model = AlphaZeroNetwork(input_shape, NUM_ACTIONS).to(device)
+        self._old_model.load_state_dict(old_state_dict)
+        self._old_model.eval()
+
+        # Per-network IPC queues
+        self._new_req_q   = Queue()
+        self._new_resp_qs = [Queue() for _ in range(num_workers)]
+        self._old_req_q   = Queue()
+        self._old_resp_qs = [Queue() for _ in range(num_workers)]
+
+        # Task / results queues
+        self._task_queue    = Queue()
+        self._results_queue = Queue()
+
+        # Shared-memory buffers (one slab per network)
+        _state_bytes = num_workers * 4 * 8 * 8 * 4   # float32
+        self._shm_new = _shm_module.SharedMemory(create=True, size=_state_bytes)
+        self._shm_old = _shm_module.SharedMemory(create=True, size=_state_bytes)
+        self._state_buf_new = np.ndarray((num_workers, 4, 8, 8), dtype=np.float32,
+                                         buffer=self._shm_new.buf)
+        self._state_buf_old = np.ndarray((num_workers, 4, 8, 8), dtype=np.float32,
+                                         buffer=self._shm_old.buf)
+
+        # Two inference server threads
+        self._stop_new = threading.Event()
+        self._stop_old = threading.Event()
+        self._new_server = AlphaZeroInferenceServer(
+            self._new_model, device,
+            self._new_req_q, self._new_resp_qs,
+            self._stop_new,
+            max_batch=num_workers * 2,
+            state_buf=self._state_buf_new,
+        )
+        self._old_server = AlphaZeroInferenceServer(
+            self._old_model, device,
+            self._old_req_q, self._old_resp_qs,
+            self._stop_old,
+            max_batch=num_workers * 2,
+            state_buf=self._state_buf_old,
+        )
+        self._new_server.start()
+        self._old_server.start()
+
+        # Worker processes
+        self._workers = []
+        for wid in range(num_workers):
+            p = Process(
+                target=eval_worker_fn,
+                args=(
+                    wid,
+                    self._new_req_q, self._new_resp_qs[wid],
+                    self._old_req_q, self._old_resp_qs[wid],
+                    self._task_queue, self._results_queue,
+                    self._shm_new.name, self._shm_old.name,
+                    num_workers,
+                ),
+            )
+            p.start()
+            self._workers.append(p)
+
+    def run_eval(self, num_games, num_simulations, label="eval"):
+        """Distribute eval games across workers; return aggregate stats dict."""
+        for i in range(num_games):
+            self._task_queue.put((i, {
+                "game_idx":          i,
+                "num_games":         num_games,
+                "num_simulations":   num_simulations,
+                "stochastic_opening": _EVAL_STOCHASTIC_MOVES,
+            }))
+        for _ in range(self.num_workers):
+            self._task_queue.put(_WORKER_BATCH_DONE)
+
+        result_map   = {}
+        reported     = 0
+        log_interval = max(10, num_games // 5)
+        idle_workers = 0
+
+        while idle_workers < self.num_workers or len(result_map) < num_games:
+            try:
+                item = self._results_queue.get(timeout=1.0)
+                if item == _WORKER_BATCH_DONE:
+                    idle_workers += 1
+                    continue
+                task_idx, result = item
+                result_map[task_idx] = result
+
+                done = len(result_map)
+                if done - reported >= log_interval or done == num_games:
+                    w = sum(1 for r in result_map.values()
+                            if r["winner"] == r["new_color"])
+                    l = sum(1 for r in result_map.values()
+                            if r["winner"] not in ("Tie", "None")
+                            and r["winner"] != r["new_color"])
+                    t = sum(1 for r in result_map.values()
+                            if r["winner"] in ("Tie", "None"))
+                    print(f"    {label}: {done}/{num_games} games  "
+                          f"({w}W/{l}L/{t}T so far)", flush=True)
+                    reported = done
+            except Exception:
+                if (not any(p.is_alive() for p in self._workers)
+                        and len(result_map) < num_games):
+                    raise RuntimeError(
+                        f"[{label}] All eval workers died after "
+                        f"{len(result_map)}/{num_games} games."
+                    )
+
+        results = [result_map[i] for i in range(num_games)]
+        wins   = sum(1 for r in results if r["winner"] == r["new_color"])
+        losses = sum(1 for r in results
+                     if r["winner"] not in ("Tie", "None")
+                     and r["winner"] != r["new_color"])
+        ties   = sum(1 for r in results if r["winner"] in ("Tie", "None"))
+        total_moves = sum(r["num_moves"] for r in results)
+        n = max(num_games, 1)
+        return {
+            "wins": wins, "losses": losses, "ties": ties,
+            "win_rate":  wins / n,
+            "score":     (wins + 0.5 * ties) / n,
+            "games":     num_games,
+            "avg_moves": total_moves / n,
+        }
+
+    def shutdown(self):
+        for _ in self._workers:
+            self._task_queue.put(_WORKER_EXIT)
+        for p in self._workers:
+            p.join(timeout=15)
+
+        self._stop_new.set()
+        self._new_req_q.put(_SHUTDOWN)
+        self._new_server.join(timeout=5)
+
+        self._stop_old.set()
+        self._old_req_q.put(_SHUTDOWN)
+        self._old_server.join(timeout=5)
+
+        self._shm_new.close(); self._shm_new.unlink()
+        self._shm_old.close(); self._shm_old.unlink()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.shutdown()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main training loop
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -594,10 +863,7 @@ def train_alphazero_parallel(num_workers=None):
     network = AlphaZeroNetwork(input_shape, NUM_ACTIONS).to(device)
     optimizer = optim.AdamW(
         network.parameters(),
-        lr=cfg.LEARNING_RATE, weight_decay=cfg.WEIGHT_DECAY,
-    )
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=cfg.LR_T_MAX, eta_min=cfg.LR_ETA_MIN
+        lr=cfg.get_lr(0), weight_decay=cfg.WEIGHT_DECAY,
     )
 
     replay_buffer = deque(maxlen=cfg.BUFFER_SIZE)
@@ -608,7 +874,9 @@ def train_alphazero_parallel(num_workers=None):
     detailed_dir = os.path.join(base_dir, "az_detailed_games_parallel")
     os.makedirs(model_dir, exist_ok=True)
     os.makedirs(detailed_dir, exist_ok=True)
-    csv_path = os.path.join(base_dir, "alphazero_training_progress_parallel.csv")
+    csv_path      = os.path.join(base_dir, "alphazero_training_progress_parallel.csv")
+    eval_csv_path = os.path.join(base_dir, "alphazero_eval_benchmarks.csv")
+    buffer_path   = os.path.join(model_dir, "replay_buffer.npz")
 
     # ── Resume from latest checkpoint ────────────────────────────────────
     start_epoch = 0
@@ -623,10 +891,22 @@ def train_alphazero_parallel(num_workers=None):
         )
         network.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-        if "scheduler_state_dict" in ckpt:
-            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        # LR is now computed from epoch number — no scheduler state to restore.
+        # Re-apply the correct LR for the resumed epoch immediately.
+        for pg in optimizer.param_groups:
+            pg["lr"] = cfg.get_lr(start_epoch)
         start_epoch = ckpt.get("epoch", 0)
         print(f"Resumed from epoch {start_epoch}")
+
+        # ── Restore replay buffer from disk ──────────────────────────────
+        if os.path.exists(buffer_path):
+            buf_data = np.load(buffer_path)
+            states, policies, outcomes = (
+                buf_data["states"], buf_data["policies"], buf_data["outcomes"]
+            )
+            for s, p, o in zip(states, policies, outcomes):
+                replay_buffer.append((s, p, float(o)))
+            print(f"  Replay buffer restored: {len(replay_buffer):,} positions")
     else:
         with open(csv_path, mode="w", newline="") as f:
             csv.writer(f).writerow([
@@ -635,19 +915,43 @@ def train_alphazero_parallel(num_workers=None):
                 "avg_grad_norm", "policy_entropy_nats",
                 "avg_root_val_winner", "avg_root_val_loser",
                 "buffer_size", "num_workers", "epoch_time_s",
-                "eval_vs_random_wr", "eval_vs_prev_wr", "eval_vs_prev_score_ge_gate",
-                "mcts_test_passed",
+            ])
+        with open(eval_csv_path, mode="w", newline="") as f:
+            csv.writer(f).writerow([
+                "epoch", "prev_eval_epoch",
+                "gate_wins", "gate_losses", "gate_ties",
+                "gate_win_rate", "gate_score", "gate_accepted",
+                "mcts_test_passed", "mcts_winning_visit_share", "mcts_root_value",
             ])
 
-    # Sliding-window gate: always compare against the model from EVAL_INTERVAL
-    # epochs ago (updated unconditionally after every evaluation).
-    prev_eval_state_dict = freeze_state_dict(network)
+    # ── Reference model (sliding-window gate) ────────────────────────────
+    # Mirrors the PPO pattern: persisted to disk so a resume always loads the
+    # correct N-epochs-ago snapshot rather than re-using the latest checkpoint.
+    reference_model_path = os.path.join(model_dir, "az_reference_model.pt")
+    if os.path.exists(reference_model_path):
+        ref_ckpt = torch.load(reference_model_path,
+                               map_location=device, weights_only=False)
+        prev_eval_state_dict = ref_ckpt["model_state_dict"]
+        prev_eval_epoch      = ref_ckpt["epoch"]
+        print(f"Loaded reference model from epoch {prev_eval_epoch}")
+    else:
+        prev_eval_state_dict = freeze_state_dict(network)
+        prev_eval_epoch      = start_epoch
+        torch.save({"model_state_dict": prev_eval_state_dict,
+                    "epoch": prev_eval_epoch},
+                   reference_model_path)
+        print(f"Saved initial reference model (epoch {prev_eval_epoch})")
 
     # ── Spawn workers + inference server, run training ────────────────────
     with WorkerContext(network.state_dict(), device, num_workers) as ctx:
 
         for epoch in range(start_epoch, cfg.NUM_EPOCHS):
             epoch_start = time.perf_counter()
+            # Apply per-epoch LR (warm restarts at curriculum phase boundaries)
+            current_lr = cfg.get_lr(epoch)
+            for pg in optimizer.param_groups:
+                pg["lr"] = current_lr
+
             epoch_sims = cfg.get_num_simulations(epoch)
             phase = ("phase1" if epoch < cfg.CURRICULUM_PHASE1_END
                      else "phase2" if epoch < cfg.CURRICULUM_PHASE2_END
@@ -721,14 +1025,6 @@ def train_alphazero_parallel(num_workers=None):
                         game_stats["move_sequence"],
                     ])
 
-            # Compress and remove the per-epoch detailed CSV
-            epoch_zip_path = os.path.join(
-                detailed_dir, f"az_games_epoch_{epoch + 1}.zip"
-            )
-            with zipfile.ZipFile(epoch_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                zf.write(detailed_csv_path,
-                         arcname=os.path.basename(detailed_csv_path))
-            os.remove(detailed_csv_path)
 
             avg_moves           = total_moves           / cfg.GAMES_PER_EPOCH
             avg_root_val_winner = total_root_val_winner / cfg.GAMES_PER_EPOCH
@@ -790,7 +1086,6 @@ def train_alphazero_parallel(num_workers=None):
             else:
                 buffer_entropy = 0.0
 
-            scheduler.step()
             elapsed = time.perf_counter() - epoch_start
 
             # ── Logging ───────────────────────────────────────────────────
@@ -810,45 +1105,61 @@ def train_alphazero_parallel(num_workers=None):
             print(f"  Value calibration — winner avg: {avg_root_val_winner:+.3f}  "
                   f"loser avg: {avg_root_val_loser:+.3f}  "
                   f"(ideal: +1.0 / -1.0)")
-            print(f"  LR: {scheduler.get_last_lr()[0]:.2e}  "
+            print(f"  LR: {current_lr:.2e}  "
                   f"Buffer: {len(replay_buffer)}")
 
             # ── Evaluation ─────────────────────────────────────────────────
-            eval_vs_random_wr = ""
-            eval_vs_best_wr = ""
-            eval_gate_accepted = ""
-            mcts_test_passed = ""
-
             if (epoch + 1) % cfg.EVAL_INTERVAL == 0:
-                prev_epoch = epoch + 1 - cfg.EVAL_INTERVAL
-                gate_label = (f"epoch-{prev_epoch} model"
-                              if prev_epoch > 0 else "initial model")
-                print(f"\n  Running evaluation (gate vs {gate_label})...",
+                gate_label = (f"epoch-{prev_eval_epoch} model"
+                              if prev_eval_epoch > 0 else "initial model")
+                print(f"\n  Running evaluation (gate vs {gate_label}, "
+                      f"{cfg.EVAL_GAMES_GATE} games, {num_workers} workers)...",
                       flush=True)
-                eval_result = run_evaluation(
-                    network, device,
-                    best_state_dict=(prev_eval_state_dict
-                                     if cfg.GATE_ENABLED else None),
-                    num_games_random=cfg.EVAL_GAMES_RANDOM,
-                    num_games_gate=cfg.EVAL_GAMES_GATE,
-                    eval_simulations=cfg.EVAL_SIMULATIONS,
-                    verbose=True,
-                )
+
+                # MCTS correctness test — single position, fast, stays sequential
+                mt = test_mcts_correctness(device)
+                mt_status = "PASS" if mt["passed"] else "FAIL"
+                print(f"  MCTS correctness: {mt_status}  "
+                      f"(winning_visits={mt['winning_visit_share']:.0%}, "
+                      f"root_val={mt['root_value']:+.3f})", flush=True)
+
+                # Gate evaluation — fully parallel
+                gate_result   = None
+                gate_accepted = None
+                if cfg.GATE_ENABLED:
+                    with EvalContext(network.state_dict(), prev_eval_state_dict,
+                                     device, num_workers) as ectx:
+                        gate_result = ectx.run_eval(
+                            cfg.EVAL_GAMES_GATE, cfg.EVAL_SIMULATIONS,
+                            label="vs-prev",
+                        )
+                    gate_accepted = gate_result["score"] >= cfg.GATE_THRESHOLD
+                    g = gate_result
+                    verdict = "ACCEPTED" if gate_accepted else "rejected"
+                    print(f"  vs Prev: {g['wins']}W / {g['losses']}L / {g['ties']}T  "
+                          f"(score={g['score']:.0%}) → {verdict}", flush=True)
+
                 network.train()
-                # Slide the window: current model becomes the new reference
+                # Advance the reference to the current epoch (slide the window)
                 prev_eval_state_dict = freeze_state_dict(network)
-                print_evaluation(eval_result, epoch + 1)
+                prev_eval_epoch      = epoch + 1
+                torch.save({"model_state_dict": prev_eval_state_dict,
+                            "epoch": prev_eval_epoch},
+                           reference_model_path)
+                print(f"  Reference model advanced to epoch {prev_eval_epoch}")
 
-                eval_vs_random_wr = round(
-                    eval_result["vs_random"]["win_rate"], 4
-                )
-                mcts_test_passed = eval_result["mcts_test"]["passed"]
-
-                if eval_result["gate"] is not None:
-                    eval_vs_best_wr = round(
-                        eval_result["gate"]["win_rate"], 4
-                    )
-                    eval_gate_accepted = eval_result["gate_accepted"]
+                g = gate_result or {}
+                with open(eval_csv_path, mode="a", newline="") as f:
+                    csv.writer(f).writerow([
+                        epoch + 1, prev_eval_epoch - cfg.EVAL_INTERVAL,
+                        g.get("wins", ""), g.get("losses", ""), g.get("ties", ""),
+                        round(g["win_rate"], 4) if g else "",
+                        round(g["score"],    4) if g else "",
+                        gate_accepted if g else "",
+                        mt["passed"],
+                        mt["winning_visit_share"],
+                        mt["root_value"],
+                    ])
 
             with open(csv_path, mode="a", newline="") as f:
                 csv.writer(f).writerow([
@@ -858,9 +1169,21 @@ def train_alphazero_parallel(num_workers=None):
                     avg_grad_norm, buffer_entropy,
                     round(avg_root_val_winner, 4), round(avg_root_val_loser, 4),
                     len(replay_buffer), num_workers, round(elapsed, 1),
-                    eval_vs_random_wr, eval_vs_best_wr, eval_gate_accepted,
-                    mcts_test_passed,
                 ])
+
+            # ── Replay buffer — save every epoch ─────────────────────────
+            if len(replay_buffer) > 0:
+                buf_list = list(replay_buffer)
+                np.savez_compressed(
+                    buffer_path,
+                    states   = np.array([x[0] for x in buf_list],
+                                        dtype=np.float32),
+                    policies = np.array([x[1] for x in buf_list],
+                                        dtype=np.float32),
+                    outcomes = np.array([x[2] for x in buf_list],
+                                        dtype=np.float32),
+                )
+                print(f"  Replay buffer saved: {len(replay_buffer):,} positions")
 
             # ── Checkpoint ────────────────────────────────────────────────
             if (epoch + 1) % cfg.SAVE_INTERVAL == 0:
@@ -869,7 +1192,6 @@ def train_alphazero_parallel(num_workers=None):
                     "epoch":                epoch + 1,
                     "model_state_dict":     network.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
-                    "scheduler_state_dict": scheduler.state_dict(),
                     "blue_wins":            blue_wins,
                     "red_wins":             red_wins,
                     "ties":                 ties,
