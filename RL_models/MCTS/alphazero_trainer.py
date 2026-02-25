@@ -42,42 +42,31 @@ class AlphaZeroTrainer:
         4. Repeat.
     """
 
-    def __init__(
-        self,
-        num_simulations=cfg.NUM_SIMULATIONS,
-        c_puct=cfg.C_PUCT,
-        lr=cfg.LEARNING_RATE,
-        weight_decay=cfg.WEIGHT_DECAY,
-        buffer_size=cfg.BUFFER_SIZE,
-        batch_size=cfg.BATCH_SIZE,
-        device=None,
-    ):
+    def __init__(self, batch_size=cfg.BATCH_SIZE, buffer_size=cfg.BUFFER_SIZE,
+                 device=None):
         self.device = device or get_device()
-        self.num_simulations = num_simulations
-        self.c_puct = c_puct
         self.batch_size = batch_size
+        # Temperature config is set per-game by self_play_game() via
+        # cfg.get_temperature_config(epoch); these are just defaults.
         self.temperature_threshold = cfg.TEMPERATURE_THRESHOLD_FULL
         self._temp_late = cfg.TEMPERATURE_LATE_FULL
 
         # Network
         input_shape = (4, 8, 8)
         self.network = AlphaZeroNetwork(input_shape, NUM_ACTIONS).to(self.device)
-        # AdamW applies weight decay decoupled from the gradient update,
-        # which is correct regularisation for adaptive-moment optimisers.
-        # torch.optim.Adam with weight_decay adds λ·θ to the gradient *before*
-        # the adaptive scaling, making the effective decay vary per-parameter.
         self.optimizer = optim.AdamW(
-            self.network.parameters(), lr=lr, weight_decay=weight_decay
+            self.network.parameters(),
+            lr=cfg.LEARNING_RATE, weight_decay=cfg.WEIGHT_DECAY,
         )
         self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
             self.optimizer, T_max=cfg.LR_T_MAX, eta_min=cfg.LR_ETA_MIN
         )
 
-        # MCTS
+        # MCTS — sim count is overridden per-game by cfg.get_num_simulations(epoch)
         self.mcts = MCTSSearch(
             self.network,
-            num_simulations=num_simulations,
-            c_puct=c_puct,
+            num_simulations=cfg.NUM_SIMULATIONS,
+            c_puct=cfg.C_PUCT,
             dirichlet_alpha=cfg.DIRICHLET_ALPHA,
             dirichlet_epsilon=cfg.DIRICHLET_EPSILON,
             device=self.device,
@@ -86,7 +75,7 @@ class AlphaZeroTrainer:
         # Replay buffer: stores (state, mcts_policy, outcome)
         self.replay_buffer = deque(maxlen=buffer_size)
 
-    def self_play_game(self, curriculum_options=None):
+    def self_play_game(self, curriculum_options=None, epoch=0):
         """Play one game using MCTS, collecting training data.
 
         Returns:
@@ -118,7 +107,7 @@ class AlphaZeroTrainer:
         self.mcts._root = None
 
         while not done:
-            if move_count >= cfg.MAX_GAME_MOVES:
+            if move_count >= cfg.get_max_game_moves(epoch):
                 from RL_models.MCTS.train_gpu_parallel import _adjudicate_move_cap
                 info = {"winner": _adjudicate_move_cap(env)}
                 break
@@ -183,10 +172,9 @@ class AlphaZeroTrainer:
         """Label game data with outcomes and add to the replay buffer.
 
         Each position is labeled with:
-            +1   if the player at that position won
-            -1   if the player at that position lost
-            cfg.TIE_OUTCOME_VALUE  if the game was a tie (slightly negative
-                 to give the value head gradient signal from drawn games)
+            +1  if the player at that position won
+            -1  if the player at that position lost
+             0  if the game was a tie
         """
         for state, mcts_policy, player_color in game_data:
             if winner == "Tie" or winner == "None":
@@ -310,13 +298,15 @@ class AlphaZeroTrainer:
 
 
 def get_curriculum_options(epoch):
-    """Curriculum phases for AlphaZero training."""
+    """Curriculum phases for AlphaZero training (asymmetric piece counts)."""
     if epoch < cfg.CURRICULUM_PHASE1_END:
         lo, hi = cfg.CURRICULUM_PHASE1_PIECES
-        return {"num_pieces": random.randint(lo, hi)}
+        return {"num_blue": random.randint(lo, hi),
+                "num_red":  random.randint(lo, hi)}
     elif epoch < cfg.CURRICULUM_PHASE2_END:
         lo, hi = cfg.CURRICULUM_PHASE2_PIECES
-        return {"num_pieces": random.randint(lo, hi)}
+        return {"num_blue": random.randint(lo, hi),
+                "num_red":  random.randint(lo, hi)}
     else:
         return None
 
@@ -397,7 +387,7 @@ def main():
             trainer._temp_late = temp_late
 
             game_data, winner, num_moves, game_stats = trainer.self_play_game(
-                curriculum_opts
+                curriculum_opts, epoch=epoch
             )
             trainer.add_game_to_buffer(game_data, winner)
             new_positions += len(game_data)

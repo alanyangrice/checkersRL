@@ -24,15 +24,13 @@ def zip_csv_file(csv_file_path, zip_file_path):
 def get_curriculum_options(epoch):
     """Return env.reset() options for the current curriculum phase.
 
-    Phase 1 (epochs 0-99):   Mid-game, 4-9 pieces per side.
+    Phase 1 (epochs 0-99):   Asymmetric mid-game boards (4-9 pieces per side,
+                             drawn independently).
     Phase 2 (epochs 100+):   Full game, 12 pieces per side (standard).
-
-    NOTE: The old 2-5 piece endgame phase was removed because small-piece
-    positions are often theoretical draws, causing the agent to converge on
-    passive play before learning aggression.
     """
     if epoch < 100:
-        return {"num_pieces": random.randint(4, 9)}
+        return {"num_blue": random.randint(4, 9),
+                "num_red":  random.randint(4, 9)}
     else:
         return None  # standard 12v12
 

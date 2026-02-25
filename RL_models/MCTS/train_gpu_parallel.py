@@ -213,12 +213,20 @@ class RemoteEvaluator:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _get_curriculum_options(epoch):
+    """Generate asymmetric random board options for the current curriculum phase.
+
+    Each side independently draws a piece count from the phase range, producing
+    positions like 3v6, 5v4, etc.  This forces the value head to learn that
+    material advantage matters rather than memorising symmetric patterns.
+    """
     if epoch < cfg.CURRICULUM_PHASE1_END:
         lo, hi = cfg.CURRICULUM_PHASE1_PIECES
-        return {"num_pieces": random.randint(lo, hi)}
+        return {"num_blue": random.randint(lo, hi),
+                "num_red":  random.randint(lo, hi)}
     elif epoch < cfg.CURRICULUM_PHASE2_END:
         lo, hi = cfg.CURRICULUM_PHASE2_PIECES
-        return {"num_pieces": random.randint(lo, hi)}
+        return {"num_blue": random.randint(lo, hi),
+                "num_red":  random.randint(lo, hi)}
     return None
 
 
@@ -278,7 +286,7 @@ def _play_self_play_game(worker_id, request_queue, response_queue,
     mcts._root  = None
 
     while not done:
-        if move_count >= cfg.MAX_GAME_MOVES:
+        if move_count >= cfg.get_max_game_moves(epoch):
             info = {"winner": _adjudicate_move_cap(env)}
             break
 

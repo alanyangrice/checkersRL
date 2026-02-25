@@ -250,7 +250,7 @@ def play_vs_network(new_net, old_net, device, num_games=40,
 
 
 def gate_checkpoint(new_net, old_net, device, num_games=40,
-                    num_simulations=100, threshold=0.55):
+                    num_simulations=100, threshold=None):
     """Gating test: accept new_net if its score exceeds threshold.
 
     score = (wins + 0.5 * ties) / games
@@ -258,6 +258,8 @@ def gate_checkpoint(new_net, old_net, device, num_games=40,
 
     Returns (accepted: bool, stats: dict).
     """
+    if threshold is None:
+        threshold = cfg.GATE_THRESHOLD
     stats = play_vs_network(new_net, old_net, device, num_games,
                             num_simulations)
     accepted = stats["score"] >= threshold
