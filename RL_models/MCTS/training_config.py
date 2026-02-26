@@ -259,10 +259,34 @@ def get_num_simulations(epoch):
 # ---------------------------------------------------------------------------
 # Move-cap adjudication
 # ---------------------------------------------------------------------------
-# Zero-sum: winner = side with more material; equal → Tie.
-# Kings count as 1.5 regular pieces (standard checkers valuation).
-MOVE_CAP_ADJUDICATE  = True
+# When False (recommended): cap → Tie for BOTH MCTS simulations and training
+# labels.  This is correct because the cap is a training infrastructure
+# artifact — real checkers is won by capturing all pieces or blocking the
+# opponent, not by having more material when time expires.  Declaring cap
+# games as draws forces the network to learn actual winning play (conversion)
+# rather than a stalling meta-strategy that doesn't exist in real checkers.
+#
+# When True: cap → material adjudication (more pieces = win).  This sounds
+# informative but creates a destructive incentive in MCTS: a player ahead in
+# material will search for ways to stall rather than capture, corrupting both
+# the policy and value heads.
+#
+# Kings count as KING_MATERIAL_VALUE pieces (only used when True).
+MOVE_CAP_ADJUDICATE  = False
 KING_MATERIAL_VALUE  = 1.5
+
+# ---------------------------------------------------------------------------
+# No-progress draw rule
+# ---------------------------------------------------------------------------
+# Mirrors the WCDF (World Checkers Draughts Federation) rule: if neither
+# player captures a piece within N consecutive full turns, the game is
+# declared a draw.  Applied in both the outer self-play loop and inside
+# NumpyCheckersEnv MCTS simulations so the two stay consistent.
+#
+# Standard English draughts uses 40 moves.  This also terminates the
+# king-vs-king oscillation games that caused ~45 % of phase-2 games to
+# reach the move cap, without requiring any curriculum change.
+NO_PROGRESS_DRAW_MOVES = 40
 
 # ---------------------------------------------------------------------------
 # Contempt factor
@@ -271,16 +295,43 @@ KING_MATERIAL_VALUE  = 1.5
 # as an unknown one.  Setting CONTEMPT_VALUE to a small negative number makes
 # the agent prefer any winning attempt over a certain draw.
 #
-# Applied consistently in two places:
-#   1. MCTS terminal backup (_outcome_value): the search tree itself prefers
-#      winning lines over drawing lines during self-play.
-#   2. Replay buffer outcome label: the value head is trained to predict
-#      draws as slightly negative, reinforcing the preference.
+# CONTEMPT_VALUE: base contempt applied when material is approximately equal
+#   at the time of the draw (repetition, no-progress, or move-cap).
+#   -0.1: a draw is worth 10 % less than a neutral position.
 #
-# -0.05 is a mild contempt: a draw is worth 5% less than a neutral position.
-# Increase toward -0.2 for stronger draw-avoidance (at the cost of more
-# speculative / risky play).  Set to 0.0 to restore pure game-theory.
-CONTEMPT_VALUE = -0.05
+# CONTEMPT_MATERIAL_SCALE: extra contempt added for the side that held a
+#   material advantage at the draw.  The penalty scales linearly with the
+#   material share above 50 %, reaching a maximum of
+#   |CONTEMPT_VALUE| + CONTEMPT_MATERIAL_SCALE * 0.5 when one side has
+#   all the pieces.  This teaches the stronger side that failing to convert
+#   a material advantage is a significant failure.
+#
+#   Example at scale = 0.8:
+#     6v6 tie  (share = 0.50) → contempt = -0.10   (fair draw)
+#     8v4 tie  (share = 0.67) → contempt = -0.23   (should have converted)
+#     9v3 tie  (share = 0.75) → contempt = -0.30   (clear failure to win)
+#     10v2 tie (share = 0.83) → contempt = -0.37   (badly failed to convert)
+#   The weaker/trailing side always receives only the base contempt (-0.10).
+#
+# Contempt is applied only in training labels (replay buffer), NOT in the
+# MCTS terminal backup (which must stay zero-sum).  See _outcome_value().
+CONTEMPT_VALUE          = -0.1
+CONTEMPT_MATERIAL_SCALE = 0.8
+
+
+def get_contempt_value(my_material, opp_material):
+    """Variable contempt for the player at *my_material* in a drawn game.
+
+    Returns a value in [-|CONTEMPT_VALUE|, -(|CONTEMPT_VALUE| + CONTEMPT_MATERIAL_SCALE/2)].
+    Only the side that was AHEAD in material is penalised more; the trailing
+    side always receives the base contempt.
+    """
+    total = my_material + opp_material
+    if total <= 0:
+        return CONTEMPT_VALUE
+    my_share = my_material / total          # 0.5 for equal, → 1.0 as I dominate
+    extra = CONTEMPT_MATERIAL_SCALE * max(0.0, my_share - 0.5)
+    return -(abs(CONTEMPT_VALUE) + extra)
 
 # ---------------------------------------------------------------------------
 # Training loop

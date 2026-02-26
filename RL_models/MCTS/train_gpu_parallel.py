@@ -229,14 +229,8 @@ def _get_curriculum_options(epoch):
     return None
 
 
-def _adjudicate_move_cap(env):
-    """Determine winner at move cap based on material (zero-sum compatible).
-
-    Kings count as KING_MATERIAL_VALUE pieces.  Side with more material wins.
-    Equal material → Tie.
-    """
-    if not cfg.MOVE_CAP_ADJUDICATE:
-        return "Tie"
+def _get_material(env):
+    """Return (blue_material, red_material), kings weighted by KING_MATERIAL_VALUE."""
     board = env.game.board.board
     blue_mat = sum(
         cfg.KING_MATERIAL_VALUE if (p != 0 and p.color == BLUE and p.king)
@@ -248,6 +242,18 @@ def _adjudicate_move_cap(env):
         else (1.0 if p != 0 and p.color == RED else 0.0)
         for row in board for p in row
     )
+    return blue_mat, red_mat
+
+
+def _adjudicate_move_cap(env):
+    """Determine winner at move cap based on material (zero-sum compatible).
+
+    Kings count as KING_MATERIAL_VALUE pieces.  Side with more material wins.
+    Equal material → Tie.
+    """
+    if not cfg.MOVE_CAP_ADJUDICATE:
+        return "Tie"
+    blue_mat, red_mat = _get_material(env)
     if blue_mat > red_mat:
         return BLUE
     elif red_mat > blue_mat:
@@ -272,18 +278,20 @@ def _play_self_play_game(worker_id, request_queue, response_queue,
         c_puct=cfg.C_PUCT,
         dirichlet_alpha=cfg.DIRICHLET_ALPHA,
         dirichlet_epsilon=cfg.DIRICHLET_EPSILON,
+        move_cap=cfg.get_max_game_moves(epoch),
     )
     env = CheckersEnv()
     env.reset(options=curriculum_opts)
 
-    game_data      = []   # (state, policy, player, mcts_q_value)
-    value_log      = []
-    entropy_log    = []
-    move_count     = 0
-    done           = False
-    info           = {}
-    mcts._root     = None
-    cap_terminated = False   # True when the game ended by hitting the move cap
+    game_data         = []   # (state, policy, player, mcts_q_value)
+    value_log         = []
+    entropy_log       = []
+    move_count        = 0
+    no_progress_count = 0    # turns since last capture or promotion
+    done              = False
+    info              = {}
+    mcts._root        = None
+    cap_terminated    = False   # True when the game ended by hitting the move cap
 
     while not done:
         if move_count >= cfg.get_max_game_moves(epoch):
@@ -307,7 +315,8 @@ def _play_self_play_game(worker_id, request_queue, response_queue,
         current_player = env.game.turn
 
         action, mcts_policy, root_value = mcts.select_action(
-            env, temperature=temperature, add_noise=True
+            env, temperature=temperature, add_noise=True,
+            no_progress_count=no_progress_count,
         )
 
         # MCTS Q-value: the backed-up mean value after all simulations —
@@ -345,8 +354,29 @@ def _play_self_play_game(worker_id, request_queue, response_queue,
 
         if info.get("turn_complete", True):
             move_count += 1
+            # No-progress tracking: detect captures ('x' in move notation) and
+            # promotions (king count increases).  Reset counter on any progress,
+            # increment otherwise.  Declare a draw at the WCDF 40-move threshold.
+            last_move = env.game.moves[-1] if env.game.moves else ""
+            if 'x' in last_move or info.get("promotion", False):
+                no_progress_count = 0
+            else:
+                no_progress_count += 1
+            if not done and no_progress_count >= cfg.NO_PROGRESS_DRAW_MOVES:
+                info = {"winner": "Tie"}
+                done = True
 
     winner = info.get("winner", "Tie")
+
+    # Per-player contempt for tie games: the side ahead in material at the
+    # time of the draw receives stronger contempt (failed to convert advantage).
+    tie_contempts = {BLUE: cfg.CONTEMPT_VALUE, RED: cfg.CONTEMPT_VALUE}
+    if winner in ("Tie", "None"):
+        blue_mat, red_mat = _get_material(env)
+        tie_contempts = {
+            BLUE: cfg.get_contempt_value(blue_mat, red_mat),
+            RED:  cfg.get_contempt_value(red_mat,  blue_mat),
+        }
 
     is_decisive = winner not in ("Tie", "None")
     winner_vals = [v for p, v in value_log if is_decisive and p == winner]
@@ -374,9 +404,10 @@ def _play_self_play_game(worker_id, request_queue, response_queue,
     return {
         "game_data":      game_data,
         "cap_terminated": cap_terminated,
-        "winner":     winner,
-        "num_moves":  move_count,
-        "game_stats": game_stats,
+        "winner":         winner,
+        "num_moves":      move_count,
+        "game_stats":     game_stats,
+        "tie_contempts":  tie_contempts,
     }
 
 
@@ -630,9 +661,9 @@ def _play_eval_game_parallel(task, new_eval, old_eval):
     new_color = BLUE if game_idx < num_games // 2 else RED
 
     new_mcts = MCTSSearch(evaluator=new_eval, num_simulations=num_simulations,
-                          c_puct=cfg.C_PUCT)
+                          c_puct=cfg.C_PUCT, move_cap=_EVAL_MAX_MOVES)
     old_mcts = MCTSSearch(evaluator=old_eval, num_simulations=num_simulations,
-                          c_puct=cfg.C_PUCT)
+                          c_puct=cfg.C_PUCT, move_cap=_EVAL_MAX_MOVES)
 
     env = CheckersEnv()
     env.reset()
@@ -1042,9 +1073,15 @@ def train_alphazero_parallel(num_workers=None):
                 total_root_val_loser  += game_stats["avg_root_val_loser"]
                 total_entropy         += game_stats["avg_policy_entropy"]
 
+                tie_contempts = res.get(
+                    "tie_contempts",
+                    {BLUE: cfg.CONTEMPT_VALUE, RED: cfg.CONTEMPT_VALUE},
+                )
                 for state, mcts_policy, player_color, mcts_qval in game_data:
                     if winner in ("Tie", "None"):
-                        outcome = cfg.CONTEMPT_VALUE
+                        # Variable contempt: side ahead in material at draw
+                        # receives a stronger penalty for failing to convert.
+                        outcome = tie_contempts.get(player_color, cfg.CONTEMPT_VALUE)
                     elif winner == player_color:
                         outcome = 1.0
                     else:

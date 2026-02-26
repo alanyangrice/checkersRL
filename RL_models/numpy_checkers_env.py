@@ -36,7 +36,7 @@ The class exposes the same subset of CheckersEnv that MCTSSearch needs:
     fast_clone()       → independent NumpyCheckersEnv copy
 
 Rewards are always 0.0 — MCTS ignores them entirely.
-Board-repetition tie detection is omitted; the 250-move cap still applies.
+Board-repetition tie detection is omitted; the move cap is configurable.
 """
 
 import types
@@ -98,7 +98,8 @@ class NumpyCheckersEnv:
     # ── Construction ──────────────────────────────────────────────────────────
 
     @classmethod
-    def from_env(cls, env):
+    def from_env(cls, env, move_cap=250, adjudicate_cap=False,
+                 no_progress_count=0, no_progress_draw_moves=40):
         """Convert a running CheckersEnv snapshot to NumpyCheckersEnv.
 
         Called once per MCTS search call — the conversion cost is negligible
@@ -108,6 +109,14 @@ class NumpyCheckersEnv:
         to bytes-keyed _base_counts so MCTS correctly handles any position that
         is one step from a 5th repetition — not just the root.  _base_counts is
         shared read-only across all simulation branches spawned by fast_clone().
+
+        Args:
+            move_cap:       Stop simulations at this many completed full turns
+                            (should match the training-phase cap so MCTS sees
+                            the same termination condition as the outer game loop).
+            adjudicate_cap: When True, resolve cap terminations by material
+                            count (matching _adjudicate_move_cap in training).
+                            When False, cap terminations become Ties.
         """
         board = np.zeros((ROWS, COLS), dtype=np.int8)
         for row in range(ROWS):
@@ -143,6 +152,10 @@ class NumpyCheckersEnv:
             is_capture_turn=env._is_capture_turn,
             action_mask=env._action_mask.copy(),
             base_counts=base_counts,
+            move_cap=move_cap,
+            adjudicate_cap=adjudicate_cap,
+            no_progress_count=no_progress_count,
+            no_progress_draw_moves=no_progress_draw_moves,
         )
 
     @classmethod
@@ -150,7 +163,9 @@ class NumpyCheckersEnv:
                    capture_in_progress=False, capturing_piece_sq=None,
                    visited_squares=None, current_move_chain=None,
                    is_capture_turn=False, action_mask=None,
-                   base_counts=None, delta_counts=None):
+                   base_counts=None, delta_counts=None,
+                   move_cap=250, adjudicate_cap=False,
+                   no_progress_count=0, no_progress_draw_moves=40):
         """Internal factory used by from_env() and fast_clone().
 
         Repetition tracking uses two dicts:
@@ -170,6 +185,11 @@ class NumpyCheckersEnv:
         env._is_capture_turn     = is_capture_turn
         env._base_counts         = base_counts  if base_counts  is not None else {}
         env._delta_counts        = delta_counts if delta_counts is not None else {}
+        env._move_cap               = move_cap
+        env._adjudicate_cap         = adjudicate_cap
+        env._no_progress_count      = no_progress_count
+        env._no_progress_draw_moves = no_progress_draw_moves
+        env._had_promotion          = False
         if action_mask is not None:
             env._action_mask = action_mask
         else:
@@ -267,10 +287,12 @@ class NumpyCheckersEnv:
             self._board[mid_row, mid_col] = EMPTY
 
         # King promotion
-        if   cell == BLUE_PIECE and to_row == ROWS - 1:
+        if cell == BLUE_PIECE and to_row == ROWS - 1:
             self._board[to_row, to_col] = BLUE_KING
-        elif cell == RED_PIECE  and to_row == 0:
+            self._had_promotion = True
+        elif cell == RED_PIECE and to_row == 0:
             self._board[to_row, to_col] = RED_KING
+            self._had_promotion = True
 
         self._current_move_chain.append(to_sq)
         self._visited_squares.add((to_row, to_col))
@@ -315,13 +337,27 @@ class NumpyCheckersEnv:
         c._action_mask         = self._action_mask.copy()
         c._base_counts         = self._base_counts          # shared, read-only
         c._delta_counts        = self._delta_counts.copy()  # per-branch
-        c._game_proxy          = types.SimpleNamespace(turn=c._turn)
+        c._move_cap               = self._move_cap
+        c._adjudicate_cap         = self._adjudicate_cap
+        c._no_progress_count      = self._no_progress_count
+        c._no_progress_draw_moves = self._no_progress_draw_moves
+        c._had_promotion          = self._had_promotion
+        c._game_proxy             = types.SimpleNamespace(turn=c._turn)
         return c
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _finish_turn(self):
-        self._move_count          += 1
+        self._move_count += 1
+
+        # No-progress tracking: reset on any capture or promotion, else increment.
+        # Must be evaluated before _is_capture_turn and _had_promotion are cleared.
+        if self._is_capture_turn or self._had_promotion:
+            self._no_progress_count = 0
+        else:
+            self._no_progress_count += 1
+        self._had_promotion = False
+
         self._capture_in_progress  = False
         self._capturing_piece_sq   = None
         self._visited_squares      = set()
@@ -348,7 +384,7 @@ class NumpyCheckersEnv:
         """Return winner colour, 'Tie', or None (game continues).
 
         Check order — decisive results first, draws last:
-          1. 250-move hard cap → Tie.
+          1. Move cap (_move_cap) → material adjudication or Tie.
           2. One side has no pieces → other side wins.
           3. Next player has no legal moves → current player wins.
           4. 5-fold repetition → Tie.
@@ -368,7 +404,12 @@ class NumpyCheckersEnv:
           _delta_counts — counts added within this simulation path only;
                           copied in fast_clone() so branches stay independent.
         """
-        if self._move_count > 250:
+        if self._move_count >= self._move_cap:
+            return self._adjudicate_by_material() if self._adjudicate_cap else "Tie"
+
+        # No-progress draw: N consecutive turns without a capture or promotion.
+        # Mirrors the WCDF 40-move rule; eliminates king-oscillation endgames.
+        if self._no_progress_count >= self._no_progress_draw_moves:
             return "Tie"
 
         # Decisive checks first ────────────────────────────────────────────
@@ -394,6 +435,24 @@ class NumpyCheckersEnv:
             return "Tie"
 
         return None
+
+    def _adjudicate_by_material(self):
+        """Resolve a cap termination by piece count, mirroring _adjudicate_move_cap.
+
+        Kings count as KING_MATERIAL_VALUE regular pieces.
+        Equal material → "Tie".
+        """
+        from RL_models.MCTS import training_config as cfg  # local import avoids circular dep
+        b = self._board
+        blue_mat = (float(np.sum(b == BLUE_PIECE)) +
+                    cfg.KING_MATERIAL_VALUE * float(np.sum(b == BLUE_KING)))
+        red_mat  = (float(np.sum(b == RED_PIECE)) +
+                    cfg.KING_MATERIAL_VALUE * float(np.sum(b == RED_KING)))
+        if blue_mat > red_mat:
+            return BLUE
+        elif red_mat > blue_mat:
+            return RED
+        return "Tie"
 
     def _board_has_legal_moves(self, turn):
         capture_mandatory = self._is_capture_possible(turn)

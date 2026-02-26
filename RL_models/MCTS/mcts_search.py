@@ -49,6 +49,7 @@ class MCTSSearch:
         dirichlet_epsilon=cfg.DIRICHLET_EPSILON,
         device=None,
         evaluator=None,
+        move_cap=cfg.MAX_GAME_MOVES_FULL,
     ):
         """Create an MCTS search object.
 
@@ -58,6 +59,11 @@ class MCTSSearch:
           evaluator — callable(state, action_mask) -> (logits_np, value_float);
                       inference is delegated to a remote GPU server
                       (used by worker processes in train_parallel.py).
+
+        Args:
+            move_cap: Maximum full turns per simulation — must match the outer
+                      game loop's cap so MCTS sees the same terminal condition.
+                      Pass cfg.get_max_game_moves(epoch) from the game loop.
         """
         if network is None and evaluator is None:
             raise ValueError("Provide either network or evaluator")
@@ -71,6 +77,7 @@ class MCTSSearch:
         self.dirichlet_alpha = dirichlet_alpha
         self.dirichlet_epsilon = dirichlet_epsilon
         self.device = device or torch.device("cpu")
+        self.move_cap = move_cap
 
         self._root = None  # cached root node for tree reuse between moves
 
@@ -92,7 +99,7 @@ class MCTSSearch:
         else:
             self._root = None
 
-    def search(self, env, add_noise=False):
+    def search(self, env, add_noise=False, no_progress_count=0):
         """Run MCTS from the current env state and return a policy.
 
         Args:
@@ -110,8 +117,16 @@ class MCTSSearch:
             root_value:   float - network's value estimate at the root.
         """
         # Convert to numpy env once — negligible cost vs NUM_SIMULATIONS calls.
+        # Pass the phase cap and no-progress state so simulation terminals fire
+        # at the same conditions as the outer game loop.
         if not isinstance(env, NumpyCheckersEnv):
-            env = NumpyCheckersEnv.from_env(env)
+            env = NumpyCheckersEnv.from_env(
+                env,
+                move_cap=self.move_cap,
+                adjudicate_cap=cfg.MOVE_CAP_ADJUDICATE,
+                no_progress_count=no_progress_count,
+                no_progress_draw_moves=cfg.NO_PROGRESS_DRAW_MOVES,
+            )
 
         # ------------------------------------------------------------------ #
         # Root: reuse cached node or create fresh
@@ -190,7 +205,7 @@ class MCTSSearch:
         action_probs = root.visit_count_distribution(NUM_ACTIONS)
         return action_probs, root_value
 
-    def select_action(self, env, temperature=1.0, add_noise=False):
+    def select_action(self, env, temperature=1.0, add_noise=False, no_progress_count=0):
         """Run MCTS and select an action.
 
         Args:
@@ -209,7 +224,8 @@ class MCTSSearch:
                           from the perspective of the current player.  Useful for
                           tracking value-head calibration over training.
         """
-        action_probs, root_value = self.search(env, add_noise=add_noise)
+        action_probs, root_value = self.search(env, add_noise=add_noise,
+                                               no_progress_count=no_progress_count)
 
         if temperature == 0:
             action = int(np.argmax(action_probs))
