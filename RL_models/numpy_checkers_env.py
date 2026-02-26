@@ -67,6 +67,31 @@ def _is_red(cell):   return int(cell) in _RED_CELLS
 def _is_king(cell):  return int(cell) in _KING_CELLS
 
 
+def _board_hash_to_bytes(board_hash_tuple):
+    """Convert Board.get_board_hash() tuple-of-tuples to NumpyCheckersEnv bytes.
+
+    Board.get_board_hash() encodes each cell as:
+        0                    — empty square
+        (color_rgb, is_king) — piece (color is one of the RGB tuples from constants)
+
+    We map to the same int8 encoding used by NumpyCheckersEnv:
+        0=EMPTY, 1=BLUE_PIECE, 2=BLUE_KING, 3=RED_PIECE, 4=RED_KING
+
+    Used in from_env() to convert the full env.game.board_states history into
+    the bytes-keyed _base_counts dict so MCTS simulation sees complete history.
+    """
+    arr = np.zeros((ROWS, COLS), dtype=np.int8)
+    for r, row in enumerate(board_hash_tuple):
+        for c, cell in enumerate(row):
+            if cell != 0:
+                color, king = cell
+                if color == BLUE:
+                    arr[r, c] = BLUE_KING if king else BLUE_PIECE
+                else:
+                    arr[r, c] = RED_KING if king else RED_PIECE
+    return arr.tobytes()
+
+
 class NumpyCheckersEnv:
     """Lightweight checkers env for MCTS — numpy board, ultra-fast clone."""
 
@@ -78,6 +103,11 @@ class NumpyCheckersEnv:
 
         Called once per MCTS search call — the conversion cost is negligible
         compared with the 100 simulations that follow.
+
+        Repetition seeding: the full env.game.board_states history is converted
+        to bytes-keyed _base_counts so MCTS correctly handles any position that
+        is one step from a 5th repetition — not just the root.  _base_counts is
+        shared read-only across all simulation branches spawned by fast_clone().
         """
         board = np.zeros((ROWS, COLS), dtype=np.int8)
         for row in range(ROWS):
@@ -89,6 +119,19 @@ class NumpyCheckersEnv:
                     else:
                         board[row, col] = RED_KING if piece.king else RED_PIECE
 
+        # Seed base_counts from the full real-game repetition history.
+        # Board.get_board_hash() uses (color_rgb, is_king) tuples without the
+        # side-to-move, matching our board.tobytes() key (same information,
+        # cheaper to compute).  Converting the entire board_states dict is
+        # O(history * 64) — negligible compared with the simulations ahead.
+        # This ensures MCTS correctly detects *any* position that is one step
+        # away from a 5th repetition, not just the root position.
+        base_counts = {
+            _board_hash_to_bytes(h): cnt
+            for h, cnt in env.game.board_states.items()
+            if cnt > 0
+        }
+
         return cls._construct(
             board=board,
             turn=env.game.turn,
@@ -99,14 +142,23 @@ class NumpyCheckersEnv:
             current_move_chain=env._current_move_chain[:],
             is_capture_turn=env._is_capture_turn,
             action_mask=env._action_mask.copy(),
+            base_counts=base_counts,
         )
 
     @classmethod
     def _construct(cls, board, turn, move_count=0,
                    capture_in_progress=False, capturing_piece_sq=None,
                    visited_squares=None, current_move_chain=None,
-                   is_capture_turn=False, action_mask=None):
-        """Internal factory used by from_env() and fast_clone()."""
+                   is_capture_turn=False, action_mask=None,
+                   base_counts=None, delta_counts=None):
+        """Internal factory used by from_env() and fast_clone().
+
+        Repetition tracking uses two dicts:
+          _base_counts  — seeded from the real game; shared across all branches;
+                          never written after construction (safe as shared ref).
+          _delta_counts — positions visited within this simulation path only;
+                          copied in fast_clone() so branches stay independent.
+        """
         env = cls.__new__(cls)
         env._board               = board
         env._turn                = turn
@@ -116,6 +168,8 @@ class NumpyCheckersEnv:
         env._visited_squares     = visited_squares or set()
         env._current_move_chain  = current_move_chain or []
         env._is_capture_turn     = is_capture_turn
+        env._base_counts         = base_counts  if base_counts  is not None else {}
+        env._delta_counts        = delta_counts if delta_counts is not None else {}
         if action_mask is not None:
             env._action_mask = action_mask
         else:
@@ -239,10 +293,15 @@ class NumpyCheckersEnv:
         return self._finish_turn()
 
     def fast_clone(self):
-        """Return an independent copy in O(1) — a single 64-byte numpy memcpy.
+        """Return an independent copy — board is a single 64-byte numpy memcpy.
 
         This is the core performance gain over copy.deepcopy(CheckersEnv):
-        no Python object graph traversal, no dict/list deep-copy.
+        no Python object graph traversal, no deep dict copy.
+
+        Repetition dicts:
+          _base_counts  — shared reference; never written, so no copy needed.
+          _delta_counts — per-branch; shallow-copied so branches accumulate
+                          counts independently (values are plain ints).
         """
         c = NumpyCheckersEnv.__new__(NumpyCheckersEnv)
         c._board               = self._board.copy()       # 64-byte memcpy
@@ -254,6 +313,8 @@ class NumpyCheckersEnv:
         c._current_move_chain  = self._current_move_chain[:]
         c._is_capture_turn     = self._is_capture_turn
         c._action_mask         = self._action_mask.copy()
+        c._base_counts         = self._base_counts          # shared, read-only
+        c._delta_counts        = self._delta_counts.copy()  # per-branch
         c._game_proxy          = types.SimpleNamespace(turn=c._turn)
         return c
 
@@ -286,13 +347,31 @@ class NumpyCheckersEnv:
     def _check_winner(self):
         """Return winner colour, 'Tie', or None (game continues).
 
-        Board-repetition tie detection is intentionally omitted — MCTS
-        simulations are too short to encounter 5-fold repetition, and the
-        board_states dict is the most expensive part to clone.
+        Check order — decisive results first, draws last:
+          1. 250-move hard cap → Tie.
+          2. One side has no pieces → other side wins.
+          3. Next player has no legal moves → current player wins.
+          4. 5-fold repetition → Tie.
+
+        Wins before repetition ensures a terminal win is never downgraded to a
+        draw.  (In practice pieces can only disappear via captures, so a
+        piece-count win is always a fresh board state and can never be a
+        repetition.  The legal-moves win could theoretically coincide with a
+        repeated position, but checking wins first matches standard rules.)
+
+        Hash key: board bytes only (no side-to-move), matching
+        Board.get_board_hash() which also omits the moving player.
+
+        Two-dict design (base + delta):
+          _base_counts  — seeded from the real game's count for the root
+                          position; shared across all branches, never written.
+          _delta_counts — counts added within this simulation path only;
+                          copied in fast_clone() so branches stay independent.
         """
         if self._move_count > 250:
             return "Tie"
 
+        # Decisive checks first ────────────────────────────────────────────
         has_blue = bool(np.any((self._board == BLUE_PIECE) |
                                (self._board == BLUE_KING)))
         has_red  = bool(np.any((self._board == RED_PIECE)  |
@@ -303,11 +382,16 @@ class NumpyCheckersEnv:
         if not has_red:
             return BLUE
 
-        # Opponent (next player) has no legal moves → current player wins.
-        # Mirrors Game.check_winner() which is called before switch_turn().
         next_player = BLUE if self._turn == RED else RED
         if not self._board_has_legal_moves(next_player):
             return self._turn
+
+        # Repetition draw ──────────────────────────────────────────────────
+        board_hash  = self._board.tobytes()
+        delta_after = self._delta_counts.get(board_hash, 0) + 1
+        self._delta_counts[board_hash] = delta_after
+        if self._base_counts.get(board_hash, 0) + delta_after >= 5:
+            return "Tie"
 
         return None
 

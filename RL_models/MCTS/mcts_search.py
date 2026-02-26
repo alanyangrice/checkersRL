@@ -332,7 +332,18 @@ class MCTSSearch:
     def _outcome_value(self, winner, current_player):
         """Convert a game outcome to a value from *current_player*'s perspective.
 
-        Returns +1 if current_player won, -1 if current_player lost, 0 for tie.
+        Returns +1 if current_player won, -1 if current_player lost, 0.0 for ties.
+
+        Ties intentionally use 0.0, not cfg.CONTEMPT_VALUE.  Contempt is
+        non-zero-sum (both players get -0.05) but the backup sign-flip assumes
+        zero-sum ("bad for opponent = good for me").  Applying a negative tie
+        value here causes the flip to convert it to a positive reward for the
+        player who triggered the tie — the opposite of the desired effect.
+
+        Contempt is instead applied only to training labels (replay buffer
+        outcomes), where the value head learns to output slightly negative
+        values for drawn positions.  That signal flows through non-terminal
+        MCTS evaluation correctly via the standard sign-flip mechanism.
         """
         if winner == "Tie" or winner == "None":
             return 0.0

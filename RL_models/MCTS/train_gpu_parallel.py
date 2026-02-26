@@ -276,17 +276,19 @@ def _play_self_play_game(worker_id, request_queue, response_queue,
     env = CheckersEnv()
     env.reset(options=curriculum_opts)
 
-    game_data   = []
-    value_log   = []
-    entropy_log = []
-    move_count  = 0
-    done        = False
-    info        = {}
-    mcts._root  = None
+    game_data      = []   # (state, policy, player, mcts_q_value)
+    value_log      = []
+    entropy_log    = []
+    move_count     = 0
+    done           = False
+    info           = {}
+    mcts._root     = None
+    cap_terminated = False   # True when the game ended by hitting the move cap
 
     while not done:
         if move_count >= cfg.get_max_game_moves(epoch):
             info = {"winner": _adjudicate_move_cap(env)}
+            cap_terminated = True
             break
 
         action_mask = env.get_action_mask()
@@ -308,12 +310,35 @@ def _play_self_play_game(worker_id, request_queue, response_queue,
             env, temperature=temperature, add_noise=True
         )
 
+        # MCTS Q-value: the backed-up mean value after all simulations —
+        # a better estimate than the raw network value (root_value) because
+        # it incorporates actual tree search.  Used as the training target
+        # for non-natural game terminations (Fix 1 + Fix 4).
+        mcts_q_value = mcts._root.q_value if mcts._root is not None else root_value
+
+        # AlphaZero policy target: apply the same temperature used for action
+        # selection so that π_target ∝ N^(1/τ), not the raw visit fractions.
+        # This makes late-game targets near-deterministic (τ → 0), giving the
+        # policy head a cleaner signal on forcing / tactical lines.
+        # select_action() returns N/ΣN so (N/ΣN)^(1/τ) ∝ N^(1/τ) — correct.
+        if temperature <= 1e-6:
+            policy_target = np.zeros_like(mcts_policy)
+            policy_target[action] = 1.0
+        elif temperature == 1.0:
+            policy_target = mcts_policy
+        else:
+            # Clamp near-zero entries before the power to avoid float32
+            # underflow when temperature is small (e.g. 0.2 → exponent = 5).
+            powered = np.power(np.maximum(mcts_policy, 1e-12), 1.0 / temperature)
+            total   = powered.sum()
+            policy_target = powered / total if total > 0 else mcts_policy
+
         eps = 1e-10
-        entropy = float(-np.sum(mcts_policy * np.log(mcts_policy + eps)))
+        entropy = float(-np.sum(policy_target * np.log(policy_target + eps)))
         value_log.append((current_player, root_value))
         entropy_log.append(entropy)
 
-        game_data.append((state, mcts_policy, current_player))
+        game_data.append((state, policy_target, current_player, mcts_q_value))
 
         _, _, done, _, info = env.step(action)
         mcts.update_root(action)
@@ -326,15 +351,29 @@ def _play_self_play_game(worker_id, request_queue, response_queue,
     is_decisive = winner not in ("Tie", "None")
     winner_vals = [v for p, v in value_log if is_decisive and p == winner]
     loser_vals  = [v for p, v in value_log if is_decisive and p != winner]
+
+    # MCTS Q-values (root.q_value after all sims) grouped by winner/loser.
+    # Comparable to avg_root_val_* but reflects search-improved estimates.
+    winner_qvals = [q for s, _, p, q in game_data if is_decisive and p == winner]
+    loser_qvals  = [q for s, _, p, q in game_data if is_decisive and p != winner]
+
+    # Per-move Q-value sequence — one value per turn, from the mover's perspective.
+    # Useful for visualising how value estimates evolve during a game.
+    mcts_q_sequence = [q for _, _, _, q in game_data]
+
     game_stats = {
-        "avg_root_val_winner": float(np.mean(winner_vals)) if winner_vals else 0.0,
-        "avg_root_val_loser":  float(np.mean(loser_vals))  if loser_vals  else 0.0,
-        "avg_policy_entropy":  float(np.mean(entropy_log)) if entropy_log  else 0.0,
+        "avg_root_val_winner": float(np.mean(winner_vals))  if winner_vals  else 0.0,
+        "avg_root_val_loser":  float(np.mean(loser_vals))   if loser_vals   else 0.0,
+        "avg_mcts_q_winner":   float(np.mean(winner_qvals)) if winner_qvals else 0.0,
+        "avg_mcts_q_loser":    float(np.mean(loser_qvals))  if loser_qvals  else 0.0,
+        "avg_policy_entropy":  float(np.mean(entropy_log))  if entropy_log  else 0.0,
         "move_sequence":       ", ".join(env.game.moves),
+        "mcts_q_sequence":     ", ".join(f"{q:.4f}" for q in mcts_q_sequence),
     }
 
     return {
-        "game_data":  game_data,
+        "game_data":      game_data,
+        "cap_terminated": cap_terminated,
         "winner":     winner,
         "num_moves":  move_count,
         "game_stats": game_stats,
@@ -983,7 +1022,8 @@ def train_alphazero_parallel(num_workers=None):
             detailed_headers = [
                 "game_id", "epoch", "game_num", "winner", "num_moves",
                 "avg_root_val_winner", "avg_root_val_loser",
-                "avg_policy_entropy_nats", "move_sequence",
+                "avg_mcts_q_winner", "avg_mcts_q_loser",
+                "avg_policy_entropy_nats", "move_sequence", "mcts_q_sequence",
             ]
             with open(detailed_csv_path, mode="w", newline="") as f:
                 csv.writer(f).writerow(detailed_headers)
@@ -1002,9 +1042,9 @@ def train_alphazero_parallel(num_workers=None):
                 total_root_val_loser  += game_stats["avg_root_val_loser"]
                 total_entropy         += game_stats["avg_policy_entropy"]
 
-                for state, mcts_policy, player_color in game_data:
+                for state, mcts_policy, player_color, mcts_qval in game_data:
                     if winner in ("Tie", "None"):
-                        outcome = 0.0
+                        outcome = cfg.CONTEMPT_VALUE
                     elif winner == player_color:
                         outcome = 1.0
                     else:
@@ -1021,8 +1061,11 @@ def train_alphazero_parallel(num_workers=None):
                         res["num_moves"],
                         round(game_stats["avg_root_val_winner"], 4),
                         round(game_stats["avg_root_val_loser"],  4),
+                        round(game_stats["avg_mcts_q_winner"],   4),
+                        round(game_stats["avg_mcts_q_loser"],    4),
                         round(game_stats["avg_policy_entropy"],  4),
                         game_stats["move_sequence"],
+                        game_stats["mcts_q_sequence"],
                     ])
 
 

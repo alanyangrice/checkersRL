@@ -19,9 +19,10 @@ import math
 # α = 1.2 keeps noise near-uniform across the ~7-8 legal moves, ensuring
 # every move is explored while not swamping strong priors entirely.
 DIRICHLET_ALPHA    = 1.2
-# Standard ε = 0.25 from AlphaZero.  With α = 1.2 (near-uniform noise) a
-# higher ε would make the root prior close to random; 0.25 is a good balance.
-DIRICHLET_EPSILON  = 0.25
+# ε = 0.35: increased from 0.25 to counteract policy collapse onto a single
+# opening move.  With α = 1.2 and ~7 legal moves, each move gets ~14% noise
+# so ε = 0.35 adds meaningful exploration without drowning the learned prior.
+DIRICHLET_EPSILON  = 0.35
 
 # ---------------------------------------------------------------------------
 # Loss weighting
@@ -30,6 +31,12 @@ DIRICHLET_EPSILON  = 0.25
 # is too weak to calibrate the value head on harder Phase 2/3 positions.
 # At 3.0 it becomes ~11% — enough to drive calibration without harming policy.
 VALUE_LOSS_WEIGHT  = 3.0
+
+# Weight applied to the MCTS-Q auxiliary value loss (see Fix 1).
+# The primary value target is the final game outcome (±1/0).
+# For non-natural terminations (cap, repetition), the MCTS Q-value replaces
+# the outcome entirely (MCTS_VALUE_WEIGHT is not used as a blend weight here).
+MCTS_VALUE_WEIGHT  = 1.0   # reserved for future blending; currently a flag
 
 # ---------------------------------------------------------------------------
 # Network architecture
@@ -41,8 +48,13 @@ VALUE_LOSS_WEIGHT  = 3.0
 # the original head design.
 BACKBONE_CHANNELS  = 256
 NUM_RES_BLOCKS     = 5
-POLICY_HEAD_CHANNELS = 2   # 1×1 conv → 2 channels before policy linear
-VALUE_HEAD_CHANNELS  = 1   # 1×1 conv → 1 channel before value linear
+POLICY_HEAD_CHANNELS = 2    # 1×1 conv → 2 channels before policy linear
+# 32 channels (vs previous 1): the 1-channel bottleneck compressed 256×8×8
+# backbone features down to 64 scalars before the hidden layer — far too
+# little capacity for complex positional evaluation.  32 channels gives 2048
+# features, matching AlphaZero's original value head design intent.
+# NOTE: changing this requires training from scratch (checkpoint incompatible).
+VALUE_HEAD_CHANNELS  = 32  # 1×1 conv → 32 channels (2048 features) before value FC
 
 # ---------------------------------------------------------------------------
 # MCTS search
@@ -61,9 +73,14 @@ VALUE_HEAD_CHANNELS  = 1   # 1×1 conv → 1 channel before value linear
 #   AlphaZero used 800 sims for chess (much larger tree), but checkers'
 #   smaller branching means 300 already reaches ~4–5 ply with selective
 #   deepening. 400 can be used if wall-clock is not a bottleneck.
-NUM_SIMULATIONS               = 400
-NUM_SIMULATIONS_CURRICULUM_P1 = 75
-NUM_SIMULATIONS_CURRICULUM_P2 = 200
+# Doubled at every phase so MCTS can see deeper into game trees:
+#   Phase 1 (3–6 pieces, ~35 move games): 150 sims ≈ 6-ply effective depth
+#   Phase 2 (4–9 pieces, ~55 move games): 400 sims ≈ 7-8-ply
+#   Phase 3 (12v12, 80+ move games):      800 sims ≈ 9-10-ply
+# Epoch time roughly doubles vs previous values at each phase.
+NUM_SIMULATIONS               = 800
+NUM_SIMULATIONS_CURRICULUM_P1 = 150
+NUM_SIMULATIONS_CURRICULUM_P2 = 400
 
 # PUCT exploration constant.
 # U(s,a) = c_puct × P(s,a) × sqrt(N(s)) / (1 + N(s,a))
@@ -192,17 +209,17 @@ TEMPERATURE_LATE_FULL             = 0.4
 # ---------------------------------------------------------------------------
 # Cap prevents runaway passive games; adjudication produces a winner.
 #
-# Curriculum phase 1 (3–6 pieces): decisive games expected in 8–20 moves.
-#   Cap at 40 — generous enough not to truncate genuine long endgame fights,
-#   tight enough to kill truly passive positions quickly.
+# Curriculum phase 1 (3–6 pieces): decisive games expected in 8–30 moves.
+#   Cap at 40 — short enough to kill passive cycling quickly; Phase 1 games
+#   naturally finish at ~35 moves so the cap is rarely the deciding factor.
 #
-# Curriculum phase 2 (4–9 pieces): 15–40 moves expected.
+# Curriculum phase 2 (4–9 pieces): 20–60 moves expected.
 #   Cap at 80.
 #
-# Full board (12v12): 40–80 moves; cap at 150 (standard for tournament play).
-MAX_GAME_MOVES_CURRICULUM_P1 = 40
-MAX_GAME_MOVES_CURRICULUM_P2 = 80
-MAX_GAME_MOVES_FULL          = 150
+# Full board (12v12): 50–120 moves; cap at 150 (standard for tournament play).
+MAX_GAME_MOVES_CURRICULUM_P1 = 80
+MAX_GAME_MOVES_CURRICULUM_P2 = 160
+MAX_GAME_MOVES_FULL          = 250
 
 
 def get_max_game_moves(epoch):
@@ -246,6 +263,24 @@ def get_num_simulations(epoch):
 # Kings count as 1.5 regular pieces (standard checkers valuation).
 MOVE_CAP_ADJUDICATE  = True
 KING_MATERIAL_VALUE  = 1.5
+
+# ---------------------------------------------------------------------------
+# Contempt factor
+# ---------------------------------------------------------------------------
+# AlphaZero treats draws as value 0, which means a drawn position is as good
+# as an unknown one.  Setting CONTEMPT_VALUE to a small negative number makes
+# the agent prefer any winning attempt over a certain draw.
+#
+# Applied consistently in two places:
+#   1. MCTS terminal backup (_outcome_value): the search tree itself prefers
+#      winning lines over drawing lines during self-play.
+#   2. Replay buffer outcome label: the value head is trained to predict
+#      draws as slightly negative, reinforcing the preference.
+#
+# -0.05 is a mild contempt: a draw is worth 5% less than a neutral position.
+# Increase toward -0.2 for stronger draw-avoidance (at the cost of more
+# speculative / risky play).  Set to 0.0 to restore pure game-theory.
+CONTEMPT_VALUE = -0.05
 
 # ---------------------------------------------------------------------------
 # Training loop
