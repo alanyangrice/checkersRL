@@ -104,9 +104,9 @@ GRAD_CLIP_NORM     = 1.0
 # Each curriculum phase gets its own full cosine cycle so the model can
 # rapidly re-adapt when it encounters harder positions.
 #
-#  Phase 1 (epochs 0–14):   1e-3  → 1e-5  over 15 epochs
-#  Phase 2 (epochs 15–49):  1e-3  → 1e-5  over 35 epochs  ← warm restart
-#  Phase 3 (epochs 50–499): 5e-4  → 1e-6  over 450 epochs ← warm restart
+#  Phase 1 (epochs  0–14):   1e-3  → 1e-5  over 15 epochs
+#  Phase 2 (epochs 15–49):   1e-3  → 1e-5  over 35 epochs  ← warm restart
+#  Phase 3 (epochs 50–499):  5e-4  → 1e-6  over 450 epochs ← warm restart
 #                            (lower peak: model is mature, less re-exploration)
 LR_PHASE1_MAX = 1e-3
 LR_PHASE1_MIN = 1e-5
@@ -246,10 +246,32 @@ def get_max_game_moves(epoch):
 # ---------------------------------------------------------------------------
 # Curriculum learning phases
 # ---------------------------------------------------------------------------
-CURRICULUM_PHASE1_END    = 0   # Epochs 0–14:  3–6 pieces/side
-CURRICULUM_PHASE2_END    = 15   # Epochs 15–49: 4–9 pieces/side
-CURRICULUM_PHASE1_PIECES = (3, 6)
-CURRICULUM_PHASE2_PIECES = (4, 9)
+CURRICULUM_PHASE1_END    = 15   # Epochs 0–14:  asymmetric, weak 1–5 vs strong (weak+1)–6
+CURRICULUM_PHASE2_END    = 65   # Epochs 15–64: asymmetric, weak 5–8 vs strong (weak+1)–9
+
+# Dependent-draw curriculum: the weak side draws first from its range, then the
+# strong side draws from [weak+1, STRONG_MAX].  This guarantees a strict material
+# advantage of at least 1 piece on every game, eliminating the equal-material
+# king-oscillation draws that stall into no-progress ties.
+#
+# The color assignment flips 50/50 each game so both BLUE and RED learn to play
+# from both material situations equally.
+#
+# Phase 1 — endgame positions (at least 1 piece advantage guaranteed)
+#   weak:   uniform [1, 5]         (1 to 5 pieces)
+#   strong: uniform [weak+1, 6]    (always strictly more than weak, max 6)
+#   Advantages range: 1 (weak=5,strong=6) to 5 (weak=1,strong=6)
+CURRICULUM_PHASE1_WEAK_MIN   = 1
+CURRICULUM_PHASE1_WEAK_MAX   = 5   # weak draws from [1, this]
+CURRICULUM_PHASE1_STRONG_MAX = 6   # strong draws from [weak+1, this]
+
+# Phase 2 — mid-game positions (minimum 5 pieces per side guaranteed)
+#   weak:   uniform [5, 8]         (5 to 8 pieces)
+#   strong: uniform [weak+1, 9]    (always strictly more than weak, max 9)
+#   Advantages range: 1 (weak=8,strong=9) to 4 (weak=5,strong=9)
+CURRICULUM_PHASE2_WEAK_MIN   = 5   # weak draws from [this, WEAK_MAX]
+CURRICULUM_PHASE2_WEAK_MAX   = 9
+CURRICULUM_PHASE2_STRONG_MAX = 10
 
 
 def get_temperature_config(epoch):

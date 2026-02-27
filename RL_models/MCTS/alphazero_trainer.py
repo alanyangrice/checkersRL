@@ -58,8 +58,14 @@ class AlphaZeroTrainer:
             self.network.parameters(),
             lr=cfg.LEARNING_RATE, weight_decay=cfg.WEIGHT_DECAY,
         )
-        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer, T_max=cfg.LR_T_MAX, eta_min=cfg.LR_ETA_MIN
+        # Per-phase cosine LR schedule with warm restarts at curriculum boundaries.
+        # cfg.get_lr() returns an absolute LR; LambdaLR needs a multiplier relative
+        # to the initial base_lr, so we normalise by LEARNING_RATE.
+        # PyTorch calls step() once during construction, so after __init__ the
+        # optimizer LR is already set correctly for epoch 0.
+        self.scheduler = optim.lr_scheduler.LambdaLR(
+            self.optimizer,
+            lr_lambda=lambda epoch: cfg.get_lr(epoch) / cfg.LEARNING_RATE,
         )
 
         # MCTS — sim count is overridden per-game by cfg.get_num_simulations(epoch)
@@ -130,7 +136,8 @@ class AlphaZeroTrainer:
 
             # Run MCTS with Dirichlet noise (self-play exploration)
             action, mcts_policy, root_value = self.mcts.select_action(
-                env, temperature=temperature, add_noise=True
+                env, temperature=temperature, add_noise=True,
+                no_progress_count=env.game._no_progress_count,
             )
 
             # Per-step diagnostics
@@ -280,7 +287,6 @@ class AlphaZeroTrainer:
             "epoch": epoch,
             "model_state_dict": self.network.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
-            "scheduler_state_dict": self.scheduler.state_dict(),
         }
         if stats:
             data.update(stats)
@@ -291,24 +297,42 @@ class AlphaZeroTrainer:
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         self.network.load_state_dict(checkpoint["model_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        if "scheduler_state_dict" in checkpoint:
-            self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         self.mcts.network = self.network
-        return checkpoint.get("epoch", 0)
+        loaded_epoch = checkpoint.get("epoch", 0)
+        # Reconstruct the scheduler at the correct epoch.  last_epoch=(loaded_epoch-1)
+        # causes LambdaLR.__init__'s internal step() to advance it to loaded_epoch,
+        # so the LR is correct for the first training batch after resuming.
+        self.scheduler = optim.lr_scheduler.LambdaLR(
+            self.optimizer,
+            lr_lambda=lambda e: cfg.get_lr(e) / cfg.LEARNING_RATE,
+            last_epoch=loaded_epoch - 1,
+        )
+        return loaded_epoch
 
 
 def get_curriculum_options(epoch):
-    """Curriculum phases for AlphaZero training (asymmetric piece counts)."""
+    """Generate guaranteed-asymmetric board options for the current curriculum phase.
+
+    The weak side draws its piece count first, then the strong side draws from
+    [weak+1, strong_max], guaranteeing a strict material advantage on every game.
+    Which color is the strong side is re-rolled 50/50 each game so both BLUE and
+    RED learn to play from both material situations equally.
+
+    Phase 1: weak ∈ [1, 5],  strong ∈ [weak+1, 6]  — endgame positions
+    Phase 2: weak ∈ [5, 8],  strong ∈ [weak+1, 9]  — mid-game positions (≥5 pieces/side)
+    """
     if epoch < cfg.CURRICULUM_PHASE1_END:
-        lo, hi = cfg.CURRICULUM_PHASE1_PIECES
-        return {"num_blue": random.randint(lo, hi),
-                "num_red":  random.randint(lo, hi)}
+        weak   = random.randint(1, cfg.CURRICULUM_PHASE1_WEAK_MAX)
+        strong = random.randint(weak + 1, cfg.CURRICULUM_PHASE1_STRONG_MAX)
     elif epoch < cfg.CURRICULUM_PHASE2_END:
-        lo, hi = cfg.CURRICULUM_PHASE2_PIECES
-        return {"num_blue": random.randint(lo, hi),
-                "num_red":  random.randint(lo, hi)}
+        weak   = random.randint(cfg.CURRICULUM_PHASE2_WEAK_MIN, cfg.CURRICULUM_PHASE2_WEAK_MAX)
+        strong = random.randint(weak + 1, cfg.CURRICULUM_PHASE2_STRONG_MAX)
     else:
         return None
+
+    if random.random() < 0.5:
+        return {"num_blue": strong, "num_red": weak}
+    return {"num_blue": weak, "num_red": strong}
 
 
 def main():
@@ -440,7 +464,6 @@ def main():
         p_loss, v_loss, t_loss, avg_grad_norm, train_steps = trainer.train_network(
             new_positions=new_positions
         )
-        trainer.scheduler.step()
 
         # Buffer-level policy entropy (sampled from the full replay buffer,
         # complementing the per-game entropy from self-play above)
@@ -461,7 +484,8 @@ def main():
         print(f"  Value calibration — winner avg: {avg_root_val_winner:+.3f}  "
               f"loser avg: {avg_root_val_loser:+.3f}  "
               f"(ideal: +1.0 / -1.0)")
-        print(f"  LR: {trainer.scheduler.get_last_lr()[0]:.2e}, "
+        current_lr = trainer.scheduler.get_last_lr()[0]
+        print(f"  LR: {current_lr:.2e}, "
               f"Buffer: {len(trainer.replay_buffer)}")
 
         # Log to CSV
@@ -485,6 +509,9 @@ def main():
                 "ties": ties,
             })
             print(f"  Checkpoint saved: {path}")
+
+        # Advance the LR schedule for the next epoch
+        trainer.scheduler.step()
 
     print("\nAlphaZero training complete.")
 

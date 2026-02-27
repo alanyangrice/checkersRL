@@ -131,6 +131,7 @@ def _make_mcts_agent(network, device, num_simulations=None,
         temp = 1.0 if move_counter[0] < stochastic_opening_moves else 0
         action, _, _ = mcts.select_action(
             env, temperature=temp, add_noise=False,
+            no_progress_count=env.game._no_progress_count,
         )
         if env.get_action_mask().sum() > 0:
             info_peek = {}

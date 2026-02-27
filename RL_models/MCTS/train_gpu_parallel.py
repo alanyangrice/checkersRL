@@ -212,21 +212,28 @@ class RemoteEvaluator:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _get_curriculum_options(epoch):
-    """Generate asymmetric random board options for the current curriculum phase.
+    """Generate guaranteed-asymmetric board options for the current curriculum phase.
 
-    Each side independently draws a piece count from the phase range, producing
-    positions like 3v6, 5v4, etc.  This forces the value head to learn that
-    material advantage matters rather than memorising symmetric patterns.
+    The weak side draws its piece count first, then the strong side draws from
+    [weak+1, strong_max], guaranteeing a strict material advantage on every game.
+    Which color is the strong side is re-rolled 50/50 each game so both BLUE and
+    RED learn to play from both material situations equally.
+
+    Phase 1: weak ∈ [1, 5],  strong ∈ [weak+1, 6]  — endgame positions
+    Phase 2: weak ∈ [5, 8],  strong ∈ [weak+1, 9]  — mid-game positions (≥5 pieces/side)
     """
     if epoch < cfg.CURRICULUM_PHASE1_END:
-        lo, hi = cfg.CURRICULUM_PHASE1_PIECES
-        return {"num_blue": random.randint(lo, hi),
-                "num_red":  random.randint(lo, hi)}
+        weak   = random.randint(1, cfg.CURRICULUM_PHASE1_WEAK_MAX)
+        strong = random.randint(weak + 1, cfg.CURRICULUM_PHASE1_STRONG_MAX)
     elif epoch < cfg.CURRICULUM_PHASE2_END:
-        lo, hi = cfg.CURRICULUM_PHASE2_PIECES
-        return {"num_blue": random.randint(lo, hi),
-                "num_red":  random.randint(lo, hi)}
-    return None
+        weak   = random.randint(cfg.CURRICULUM_PHASE2_WEAK_MIN, cfg.CURRICULUM_PHASE2_WEAK_MAX)
+        strong = random.randint(weak + 1, cfg.CURRICULUM_PHASE2_STRONG_MAX)
+    else:
+        return None
+
+    if random.random() < 0.5:
+        return {"num_blue": strong, "num_red": weak}
+    return {"num_blue": weak, "num_red": strong}
 
 
 def _get_material(env):
@@ -943,9 +950,10 @@ def train_alphazero_parallel(num_workers=None):
     detailed_dir = os.path.join(base_dir, "az_detailed_games_parallel")
     os.makedirs(model_dir, exist_ok=True)
     os.makedirs(detailed_dir, exist_ok=True)
-    csv_path      = os.path.join(base_dir, "alphazero_training_progress_parallel.csv")
-    eval_csv_path = os.path.join(base_dir, "alphazero_eval_benchmarks.csv")
-    buffer_path   = os.path.join(model_dir, "replay_buffer.npz")
+    csv_path               = os.path.join(base_dir, "alphazero_training_progress_parallel.csv")
+    eval_csv_path          = os.path.join(base_dir, "alphazero_eval_benchmarks.csv")
+    buffer_path            = os.path.join(model_dir, "replay_buffer.npz")
+    reference_buffer_path  = os.path.join(model_dir, "az_reference_buffer.npz")
 
     # ── Resume from latest checkpoint ────────────────────────────────────
     start_epoch = 0
@@ -1006,9 +1014,21 @@ def train_alphazero_parallel(num_workers=None):
     else:
         prev_eval_state_dict = freeze_state_dict(network)
         prev_eval_epoch      = start_epoch
-        torch.save({"model_state_dict": prev_eval_state_dict,
-                    "epoch": prev_eval_epoch},
-                   reference_model_path)
+        torch.save({
+            "model_state_dict":     prev_eval_state_dict,
+            "optimizer_state_dict": optimizer.state_dict(),
+            "epoch":                prev_eval_epoch,
+        }, reference_model_path)
+        # Snapshot the buffer as it stands now (empty on first run, or pre-loaded
+        # from replay_buffer.npz on a resume) so a gate rejection can revert to it.
+        _init_buf = list(replay_buffer)
+        if _init_buf:
+            np.savez_compressed(
+                reference_buffer_path,
+                states   = np.array([x[0] for x in _init_buf], dtype=np.float32),
+                policies = np.array([x[1] for x in _init_buf], dtype=np.float32),
+                outcomes = np.array([x[2] for x in _init_buf], dtype=np.float32),
+            )
         print(f"Saved initial reference model (epoch {prev_eval_epoch})")
 
     # ── Spawn workers + inference server, run training ────────────────────
@@ -1219,18 +1239,54 @@ def train_alphazero_parallel(num_workers=None):
                           f"(score={g['score']:.0%}) → {verdict}", flush=True)
 
                 network.eval()
-                # Advance the reference to the current epoch (slide the window)
-                prev_eval_state_dict = freeze_state_dict(network)
-                prev_eval_epoch      = epoch + 1
-                torch.save({"model_state_dict": prev_eval_state_dict,
-                            "epoch": prev_eval_epoch},
-                           reference_model_path)
-                print(f"  Reference model advanced to epoch {prev_eval_epoch}")
+                ref_epoch_for_log = prev_eval_epoch
+                should_advance = (not cfg.GATE_ENABLED) or (gate_accepted is True)
+                if should_advance:
+                    # Gate passed: advance reference model, optimizer state, and buffer.
+                    prev_eval_state_dict = freeze_state_dict(network)
+                    prev_eval_epoch      = epoch + 1
+                    torch.save({
+                        "model_state_dict":     prev_eval_state_dict,
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "epoch":                prev_eval_epoch,
+                    }, reference_model_path)
+                    # Snapshot the buffer so we can revert to it if a future gate fails.
+                    _ref_buf = list(replay_buffer)
+                    np.savez_compressed(
+                        reference_buffer_path,
+                        states   = np.array([x[0] for x in _ref_buf], dtype=np.float32),
+                        policies = np.array([x[1] for x in _ref_buf], dtype=np.float32),
+                        outcomes = np.array([x[2] for x in _ref_buf], dtype=np.float32),
+                    )
+                    print(f"  Reference model advanced to epoch {prev_eval_epoch}")
+                else:
+                    # Gate rejected: revert the network, optimizer, and replay buffer
+                    # to the last accepted reference so training resumes from solid ground.
+                    print(f"  Gate rejected — reverting to epoch-{prev_eval_epoch} "
+                          f"reference...", flush=True)
+                    network.load_state_dict(prev_eval_state_dict)
+                    _ref_ckpt = torch.load(reference_model_path,
+                                           map_location=device, weights_only=False)
+                    if "optimizer_state_dict" in _ref_ckpt:
+                        optimizer.load_state_dict(_ref_ckpt["optimizer_state_dict"])
+                    if os.path.exists(reference_buffer_path):
+                        replay_buffer.clear()
+                        _bd = np.load(reference_buffer_path)
+                        for s, p, o in zip(_bd["states"], _bd["policies"],
+                                           _bd["outcomes"]):
+                            replay_buffer.append((s, p, float(o)))
+                        print(f"  Replay buffer reverted: "
+                              f"{len(replay_buffer):,} positions")
+                    else:
+                        replay_buffer.clear()
+                        print(f"  Replay buffer cleared (no reference snapshot found)")
+                    network.eval()
+                    print(f"  Reverted to epoch-{prev_eval_epoch} model")
 
                 g = gate_result or {}
                 with open(eval_csv_path, mode="a", newline="") as f:
                     csv.writer(f).writerow([
-                        epoch + 1, prev_eval_epoch - cfg.EVAL_INTERVAL,
+                        epoch + 1, ref_epoch_for_log,
                         g.get("wins", ""), g.get("losses", ""), g.get("ties", ""),
                         round(g["win_rate"], 4) if g else "",
                         round(g["score"],    4) if g else "",
