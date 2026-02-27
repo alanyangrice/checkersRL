@@ -287,7 +287,6 @@ def _play_self_play_game(worker_id, request_queue, response_queue,
     value_log         = []
     entropy_log       = []
     move_count        = 0
-    no_progress_count = 0    # turns since last capture or promotion
     done              = False
     info              = {}
     mcts._root        = None
@@ -316,7 +315,7 @@ def _play_self_play_game(worker_id, request_queue, response_queue,
 
         action, mcts_policy, root_value = mcts.select_action(
             env, temperature=temperature, add_noise=True,
-            no_progress_count=no_progress_count,
+            no_progress_count=env.game._no_progress_count,
         )
 
         # MCTS Q-value: the backed-up mean value after all simulations —
@@ -325,25 +324,23 @@ def _play_self_play_game(worker_id, request_queue, response_queue,
         # for non-natural game terminations (Fix 1 + Fix 4).
         mcts_q_value = mcts._root.q_value if mcts._root is not None else root_value
 
-        # AlphaZero policy target: apply the same temperature used for action
-        # selection so that π_target ∝ N^(1/τ), not the raw visit fractions.
-        # This makes late-game targets near-deterministic (τ → 0), giving the
-        # policy head a cleaner signal on forcing / tactical lines.
-        # select_action() returns N/ΣN so (N/ΣN)^(1/τ) ∝ N^(1/τ) — correct.
-        if temperature <= 1e-6:
-            policy_target = np.zeros_like(mcts_policy)
-            policy_target[action] = 1.0
-        elif temperature == 1.0:
-            policy_target = mcts_policy
-        else:
-            # Clamp near-zero entries before the power to avoid float32
-            # underflow when temperature is small (e.g. 0.2 → exponent = 5).
-            powered = np.power(np.maximum(mcts_policy, 1e-12), 1.0 / temperature)
-            total   = powered.sum()
-            policy_target = powered / total if total > 0 else mcts_policy
+        # AlphaZero policy target: always use the raw visit-count distribution
+        # N(s,a)/ΣN — never temperature-sharpened.
+        #
+        # Temperature only governs *action selection* (which board positions
+        # appear in the replay buffer, for state diversity).  Applying the
+        # same low temperature (e.g. T=0.5, exponent 2) to the training
+        # label too would sharpen even mild visit preferences into near-delta
+        # functions, collapsing training distribution entropy and teaching the
+        # network to be overconfident regardless of how uncertain the search
+        # actually was.  Storing raw N/ΣN preserves the full distributional
+        # information from all simulations and matches the AlphaZero paper.
+        policy_target = mcts_policy
 
+        # Entropy logged from the raw visit distribution (not action-selection
+        # temperature) so it reflects true MCTS uncertainty over moves.
         eps = 1e-10
-        entropy = float(-np.sum(policy_target * np.log(policy_target + eps)))
+        entropy = float(-np.sum(mcts_policy * np.log(mcts_policy + eps)))
         value_log.append((current_player, root_value))
         entropy_log.append(entropy)
 
@@ -354,15 +351,13 @@ def _play_self_play_game(worker_id, request_queue, response_queue,
 
         if info.get("turn_complete", True):
             move_count += 1
-            # No-progress tracking: detect captures ('x' in move notation) and
-            # promotions (king count increases).  Reset counter on any progress,
-            # increment otherwise.  Declare a draw at the WCDF 40-move threshold.
-            last_move = env.game.moves[-1] if env.game.moves else ""
-            if 'x' in last_move or info.get("promotion", False):
-                no_progress_count = 0
-            else:
-                no_progress_count += 1
-            if not done and no_progress_count >= cfg.NO_PROGRESS_DRAW_MOVES:
+            # Safety-net no-progress draw: game.check_winner() (called inside
+            # env.step()) is the primary handler for the 40-move rule, but
+            # this outer check catches any edge case where it returns None
+            # despite the threshold being reached (e.g. a decisive check
+            # firing first on the same move).  It reads game._no_progress_count
+            # directly so there is a single canonical counter with no drift.
+            if not done and env.game._no_progress_count >= cfg.NO_PROGRESS_DRAW_MOVES:
                 info = {"winner": "Tie"}
                 done = True
 
@@ -669,9 +664,9 @@ def _play_eval_game_parallel(task, new_eval, old_eval):
     env.reset()
     new_mcts._root = old_mcts._root = None
 
-    move_count = 0
-    done       = False
-    info       = {}
+    move_count        = 0
+    done              = False
+    info              = {}
 
     while not done:
         if move_count >= _EVAL_MAX_MOVES:
@@ -688,10 +683,14 @@ def _play_eval_game_parallel(task, new_eval, old_eval):
         active_mcts._root = None   # no tree reuse across eval moves (matches sequential eval)
 
         action, _, _ = active_mcts.select_action(env, temperature=temp,
-                                                  add_noise=False)
+                                                  add_noise=False,
+                                                  no_progress_count=env.game._no_progress_count)
         _, _, done, _, info = env.step(action)
         if info.get("turn_complete", True):
             move_count += 1
+            if not done and env.game._no_progress_count >= cfg.NO_PROGRESS_DRAW_MOVES:
+                info = {"winner": "Tie"}
+                done = True
 
     winner = info.get("winner", "Tie")
     return {"game_idx": game_idx, "winner": winner,
@@ -1219,7 +1218,7 @@ def train_alphazero_parallel(num_workers=None):
                     print(f"  vs Prev: {g['wins']}W / {g['losses']}L / {g['ties']}T  "
                           f"(score={g['score']:.0%}) → {verdict}", flush=True)
 
-                network.train()
+                network.eval()
                 # Advance the reference to the current epoch (slide the window)
                 prev_eval_state_dict = freeze_state_dict(network)
                 prev_eval_epoch      = epoch + 1

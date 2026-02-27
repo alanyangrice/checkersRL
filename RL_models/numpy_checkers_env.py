@@ -77,8 +77,11 @@ def _board_hash_to_bytes(board_hash_tuple):
     We map to the same int8 encoding used by NumpyCheckersEnv:
         0=EMPTY, 1=BLUE_PIECE, 2=BLUE_KING, 3=RED_PIECE, 4=RED_KING
 
+    Returns only the board bytes; callers pair this with the turn to form the
+    full (bytes, turn) key used in _base_counts / _delta_counts.
+
     Used in from_env() to convert the full env.game.board_states history into
-    the bytes-keyed _base_counts dict so MCTS simulation sees complete history.
+    the (bytes, turn)-keyed _base_counts dict so MCTS simulation sees complete history.
     """
     arr = np.zeros((ROWS, COLS), dtype=np.int8)
     for r, row in enumerate(board_hash_tuple):
@@ -129,15 +132,16 @@ class NumpyCheckersEnv:
                         board[row, col] = RED_KING if piece.king else RED_PIECE
 
         # Seed base_counts from the full real-game repetition history.
-        # Board.get_board_hash() uses (color_rgb, is_king) tuples without the
-        # side-to-move, matching our board.tobytes() key (same information,
-        # cheaper to compute).  Converting the entire board_states dict is
-        # O(history * 64) — negligible compared with the simulations ahead.
-        # This ensures MCTS correctly detects *any* position that is one step
-        # away from a 5th repetition, not just the root position.
+        # game.board_states keys are (Board.get_board_hash() tuple, turn) pairs
+        # so that positions with the same pieces but different sides to move are
+        # counted separately (matching standard repetition rules).  We convert
+        # the board portion to bytes and keep the turn, producing (bytes, turn)
+        # keys that match _check_winner()'s (board.tobytes(), self._turn) keys.
+        # Converting the entire board_states dict is O(history * 64) — negligible
+        # compared with the simulations ahead.
         base_counts = {
-            _board_hash_to_bytes(h): cnt
-            for h, cnt in env.game.board_states.items()
+            (_board_hash_to_bytes(board_hash), turn): cnt
+            for (board_hash, turn), cnt in env.game.board_states.items()
             if cnt > 0
         }
 
@@ -395,8 +399,10 @@ class NumpyCheckersEnv:
         repetition.  The legal-moves win could theoretically coincide with a
         repeated position, but checking wins first matches standard rules.)
 
-        Hash key: board bytes only (no side-to-move), matching
-        Board.get_board_hash() which also omits the moving player.
+        Hash key: (board bytes, turn) — includes the side-to-move so that
+        "position P with Blue to move" and "position P with Red to move" are
+        counted as separate states (matching standard repetition rules and
+        game.check_winner()'s (Board.get_board_hash(), turn) keys).
 
         Two-dict design (base + delta):
           _base_counts  — seeded from the real game's count for the root
@@ -407,12 +413,8 @@ class NumpyCheckersEnv:
         if self._move_count >= self._move_cap:
             return self._adjudicate_by_material() if self._adjudicate_cap else "Tie"
 
-        # No-progress draw: N consecutive turns without a capture or promotion.
-        # Mirrors the WCDF 40-move rule; eliminates king-oscillation endgames.
-        if self._no_progress_count >= self._no_progress_draw_moves:
-            return "Tie"
-
-        # Decisive checks first ────────────────────────────────────────────
+        # Decisive checks before draw claims — a player cornering or eliminating
+        # the opponent always wins, regardless of how long the game has taken.
         has_blue = bool(np.any((self._board == BLUE_PIECE) |
                                (self._board == BLUE_KING)))
         has_red  = bool(np.any((self._board == RED_PIECE)  |
@@ -427,8 +429,15 @@ class NumpyCheckersEnv:
         if not self._board_has_legal_moves(next_player):
             return self._turn
 
+        # Draw claims — only reached when neither side has a decisive advantage.
+
+        # No-progress draw: N consecutive turns without a capture or promotion.
+        # Mirrors the WCDF 40-move rule; eliminates king-oscillation endgames.
+        if self._no_progress_count >= self._no_progress_draw_moves:
+            return "Tie"
+
         # Repetition draw ──────────────────────────────────────────────────
-        board_hash  = self._board.tobytes()
+        board_hash  = (self._board.tobytes(), self._turn)
         delta_after = self._delta_counts.get(board_hash, 0) + 1
         self._delta_counts[board_hash] = delta_after
         if self._base_counts.get(board_hash, 0) + delta_after >= 5:

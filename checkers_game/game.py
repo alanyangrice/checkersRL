@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 class Game:
-    def __init__(self):
+    def __init__(self, no_progress_draw_moves=40):
         self.board = Board()
 
         self.turn = BLUE  # Blue starts first
@@ -32,6 +32,12 @@ class Game:
         self.board_states = {}
         self.num_moves = 0
         self.moves = []
+
+        # No-progress draw: declare a tie after this many consecutive full turns
+        # without a capture or king promotion (WCDF 40-move rule).
+        self._no_progress_draw_moves = no_progress_draw_moves
+        self._no_progress_count      = 0   # turns since last capture/promotion
+        self._prev_king_count        = 0   # for promotion detection each turn
 
     def switch_turn(self):
         """Switches the player's turn."""
@@ -234,14 +240,30 @@ class Game:
         # Use the larger of num_moves (GUI) and len(self.moves) (RL env)
         # so the 250-move limit works in both contexts.
         move_count = max(self.num_moves, len(self.moves))
-        if move_count > 250:
+        if move_count >= 250:
             return "Tie"
 
-        # Check board state repetition
-        board_hash = self.board.get_board_hash()
-        self.board_states[board_hash] = self.board_states.get(board_hash, 0) + 1
-        if self.board_states[board_hash] >= 5:
-            return "Tie"
+        # No-progress tracking — always update the counter first so draw claims
+        # below have the correct count, regardless of which condition fires.
+        #
+        # Captures: detected by 'x' in the last move string (appended to
+        #   self.moves by both the GUI path and CheckersEnv before this call).
+        # Promotions: detected by an increase in total king count vs last turn.
+        #
+        # Note: a capture *of* a king reduces the king count; that is already
+        # caught by the 'x' check, so we only look for king-count *increases*.
+        last_move     = self.moves[-1] if self.moves else ""
+        curr_kings    = sum(1 for row in self.board.board
+                            for p in row if isinstance(p, Piece) and p.king)
+        was_progress  = ('x' in last_move) or (curr_kings > self._prev_king_count)
+        self._prev_king_count = curr_kings
+        if was_progress:
+            self._no_progress_count = 0
+        else:
+            self._no_progress_count += 1
+
+        # Decisive checks before draw claims — a player cornering or eliminating
+        # the opponent always wins, regardless of how long the game has taken.
 
         # Check for presence of pieces for each color
         red_pieces_found, blue_pieces_found = False, False
@@ -269,6 +291,20 @@ class Game:
         next_player = RED if self.turn == BLUE else BLUE
         if not self.board.has_legal_moves(next_player):
             return self.turn  # current player wins; opponent is stuck
+
+        # Draw claims — only reached when neither side has a decisive advantage.
+
+        # No-progress draw (WCDF 40-move rule)
+        if self._no_progress_count >= self._no_progress_draw_moves:
+            return "Tie"
+
+        # Board state repetition — key includes the side-to-move so that
+        # "position P with Blue to move" and "position P with Red to move"
+        # are counted as separate states (matching standard repetition rules).
+        board_hash = (self.board.get_board_hash(), self.turn)
+        self.board_states[board_hash] = self.board_states.get(board_hash, 0) + 1
+        if self.board_states[board_hash] >= 5:
+            return "Tie"
 
         return None
 

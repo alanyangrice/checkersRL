@@ -78,9 +78,9 @@ VALUE_HEAD_CHANNELS  = 32  # 1×1 conv → 32 channels (2048 features) before va
 #   Phase 2 (4–9 pieces, ~55 move games): 400 sims ≈ 7-8-ply
 #   Phase 3 (12v12, 80+ move games):      800 sims ≈ 9-10-ply
 # Epoch time roughly doubles vs previous values at each phase.
-NUM_SIMULATIONS               = 800
-NUM_SIMULATIONS_CURRICULUM_P1 = 150
-NUM_SIMULATIONS_CURRICULUM_P2 = 400
+NUM_SIMULATIONS               = 400
+NUM_SIMULATIONS_CURRICULUM_P1 = 75
+NUM_SIMULATIONS_CURRICULUM_P2 = 200
 
 # PUCT exploration constant.
 # U(s,a) = c_puct × P(s,a) × sqrt(N(s)) / (1 + N(s,a))
@@ -186,11 +186,19 @@ def get_train_steps(new_positions):
 #   T=LATE (near-greedy) after the threshold → favour decisive outcomes and
 #       stabilise the late-game training signal.
 #
-# Curriculum phases have short games (10–30 moves), so:
-#   • Use a lower threshold (switch to near-greedy after move 8) to keep
-#     most of the game decisive.
-#   • T_LATE = 0.2 is near-greedy but retains a tiny bit of variation so
-#     not every game following the same endgame line.
+# Curriculum phases have short games (~60–80 moves with 3–6 pieces):
+#   • Threshold = 15 keeps the first ~20% of a game fully exploratory.
+#     The original threshold of 8 was too low — it made 88%+ of moves
+#     greedy, generating homogeneous game trajectories.
+#   • T_LATE = 0.5 (was 0.2): with T=0.2 the exponent is 5, collapsing even
+#     mild visit preferences to near-delta-function actions and preventing
+#     diverse endgame exploration.  T=0.5 (exponent 2) meaningfully focuses
+#     the distribution on the best move while still sampling occasionally from
+#     second-best lines, giving the replay buffer richer state coverage.
+#
+#   NOTE: Temperature here only governs ACTION SELECTION (which states appear
+#   in the replay buffer).  The policy training TARGET is always the raw
+#   N/ΣN visit distribution, independent of temperature — see train loop.
 #
 # Full board (50–80 move games):
 #   • Threshold = 20 keeps ~25–40% of moves fully exploratory, matching
@@ -199,26 +207,30 @@ def get_train_steps(new_positions):
 #     selection ratio.  Meaningfully focused but not deterministic —
 #     prevents both sides from repeating the same opening every game.
 TEMPERATURE_EARLY                 = 1.0
-TEMPERATURE_THRESHOLD_CURRICULUM  = 8
+TEMPERATURE_THRESHOLD_CURRICULUM  = 15
 TEMPERATURE_THRESHOLD_FULL        = 20
-TEMPERATURE_LATE_CURRICULUM       = 0.2
+TEMPERATURE_LATE_CURRICULUM       = 0.5
 TEMPERATURE_LATE_FULL             = 0.4
 
 # ---------------------------------------------------------------------------
-# Move caps (phase-dependent)
+# Move caps (all phases)
 # ---------------------------------------------------------------------------
-# Cap prevents runaway passive games; adjudication produces a winner.
+# The 40-move no-progress rule (NO_PROGRESS_DRAW_MOVES) now terminates all
+# passive/stalling games.  The cap's only remaining purpose is as a hard
+# safety net for games still making *active* progress (captures or promotions
+# continuing) that nonetheless take a very long time to resolve.
 #
-# Curriculum phase 1 (3–6 pieces): decisive games expected in 8–30 moves.
-#   Cap at 40 — short enough to kill passive cycling quickly; Phase 1 games
-#   naturally finish at ~35 moves so the cap is rarely the deciding factor.
-#
-# Curriculum phase 2 (4–9 pieces): 20–60 moves expected.
-#   Cap at 80.
-#
-# Full board (12v12): 50–120 moves; cap at 150 (standard for tournament play).
-MAX_GAME_MOVES_CURRICULUM_P1 = 80
-MAX_GAME_MOVES_CURRICULUM_P2 = 160
+# All phases use 250 because:
+#   • Endgame conversion is harder with fewer pieces — a 3v1 king endgame
+#     can require 15–20 moves of maneuvering between each capture, pushing
+#     a decisive game well past 80 or 160 turns.
+#   • The old lower phase caps were sized to prevent oscillation, which the
+#     no-progress rule now handles.  They were prematurely terminating active
+#     decisive games.
+#   • Epoch training time is protected by the no-progress rule; stall games
+#     end within 40 moves instead of running to cap.
+MAX_GAME_MOVES_CURRICULUM_P1 = 250
+MAX_GAME_MOVES_CURRICULUM_P2 = 250
 MAX_GAME_MOVES_FULL          = 250
 
 
@@ -234,8 +246,8 @@ def get_max_game_moves(epoch):
 # ---------------------------------------------------------------------------
 # Curriculum learning phases
 # ---------------------------------------------------------------------------
-CURRICULUM_PHASE1_END    = 15   # Epochs 0–14:  3–6 pieces/side
-CURRICULUM_PHASE2_END    = 50   # Epochs 15–49: 4–9 pieces/side
+CURRICULUM_PHASE1_END    = 0   # Epochs 0–14:  3–6 pieces/side
+CURRICULUM_PHASE2_END    = 15   # Epochs 15–49: 4–9 pieces/side
 CURRICULUM_PHASE1_PIECES = (3, 6)
 CURRICULUM_PHASE2_PIECES = (4, 9)
 
@@ -297,41 +309,56 @@ NO_PROGRESS_DRAW_MOVES = 40
 #
 # CONTEMPT_VALUE: base contempt applied when material is approximately equal
 #   at the time of the draw (repetition, no-progress, or move-cap).
-#   -0.1: a draw is worth 10 % less than a neutral position.
+#   -0.3 (was -0.1): ratio of draw signal to win signal drops from 10:1 to
+#   3.3:1.  With 57% draw games flooding the buffer the old -0.1 created
+#   near-zero signal for the majority of training positions.  At -0.3 draws
+#   are clearly undesirable but not catastrophic — the agent learns to press
+#   advantages without becoming reckless about losing.
 #
 # CONTEMPT_MATERIAL_SCALE: extra contempt added for the side that held a
-#   material advantage at the draw.  The penalty scales linearly with the
-#   material share above 50 %, reaching a maximum of
-#   |CONTEMPT_VALUE| + CONTEMPT_MATERIAL_SCALE * 0.5 when one side has
-#   all the pieces.  This teaches the stronger side that failing to convert
-#   a material advantage is a significant failure.
+#   material advantage at the draw.  Scales linearly with material share
+#   above 50%.  The trailing side always receives only the base contempt.
+#   Clamped at -0.95 in get_contempt_value() so targets stay within [-1, 1]
+#   (required for MSE against tanh value head — see that function's docstring).
 #
-#   Example at scale = 0.8:
-#     6v6 tie  (share = 0.50) → contempt = -0.10   (fair draw)
-#     8v4 tie  (share = 0.67) → contempt = -0.23   (should have converted)
-#     9v3 tie  (share = 0.75) → contempt = -0.30   (clear failure to win)
-#     10v2 tie (share = 0.83) → contempt = -0.37   (badly failed to convert)
-#   The weaker/trailing side always receives only the base contempt (-0.10).
+#   Examples at CONTEMPT_VALUE=-0.3, CONTEMPT_MATERIAL_SCALE=1.2:
+#     6v6 draw  (share=0.50) → -0.30   (fair draw)
+#     8v4 draw  (share=0.67) → -0.54   (clear failure to convert)
+#     9v3 draw  (share=0.75) → -0.66   (strong advantage wasted)
+#     11v1 draw (share=0.92) → -0.85   (dominant position thrown away)
+#   The weaker side always receives only the base contempt (-0.30).
 #
 # Contempt is applied only in training labels (replay buffer), NOT in the
 # MCTS terminal backup (which must stay zero-sum).  See _outcome_value().
-CONTEMPT_VALUE          = -0.1
-CONTEMPT_MATERIAL_SCALE = 0.8
+CONTEMPT_VALUE          = -0.3
+CONTEMPT_MATERIAL_SCALE = 1.2
 
 
 def get_contempt_value(my_material, opp_material):
     """Variable contempt for the player at *my_material* in a drawn game.
 
-    Returns a value in [-|CONTEMPT_VALUE|, -(|CONTEMPT_VALUE| + CONTEMPT_MATERIAL_SCALE/2)].
+    Returns a value in [-|CONTEMPT_VALUE|, -0.95].
     Only the side that was AHEAD in material is penalised more; the trailing
     side always receives the base contempt.
+
+    Hard-clamped to -0.95 so value targets never exceed the tanh output
+    range [-1, 1].  Pushing targets below -1.0 would saturate the value
+    head (gradient → 0 at tanh → -1), destabilising training.
+
+    Examples with CONTEMPT_VALUE=-0.3, CONTEMPT_MATERIAL_SCALE=1.2:
+      6v6 draw  (share=0.50) → -0.30  (fair draw)
+      7v5 draw  (share=0.58) → -0.40  (slight advantage wasted)
+      8v4 draw  (share=0.67) → -0.54  (clear failure to convert)
+      9v3 draw  (share=0.75) → -0.66  (strong advantage wasted)
+      11v1 draw (share=0.92) → -0.85  (dominant position thrown away)
     """
     total = my_material + opp_material
     if total <= 0:
         return CONTEMPT_VALUE
     my_share = my_material / total          # 0.5 for equal, → 1.0 as I dominate
     extra = CONTEMPT_MATERIAL_SCALE * max(0.0, my_share - 0.5)
-    return -(abs(CONTEMPT_VALUE) + extra)
+    raw = -(abs(CONTEMPT_VALUE) + extra)
+    return max(raw, -0.95)                  # clamp: value targets must stay in [-1, 1]
 
 # ---------------------------------------------------------------------------
 # Training loop
