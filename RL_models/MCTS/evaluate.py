@@ -1,10 +1,12 @@
 """Evaluation utilities for AlphaZero checkers training.
 
 Provides:
-  1. play_vs_random()          — absolute strength vs a random opponent.
-  2. play_vs_network() / gate  — relative strength (gating) vs previous best.
-  3. test_mcts_correctness()   — backup sign-convention sanity check using a
-                                  dummy (uniform) network on a 2-move position.
+  1. play_vs_random()              — absolute strength vs a random opponent.
+  2. play_vs_network() / gate      — relative strength (gating) vs previous best.
+  3. test_mcts_correctness()       — backup sign-convention sanity check using a
+                                      dummy (uniform) network on a 2-move position.
+  4. test_value_head_calibration() — checks value head on positions with known
+                                      outcome bias (4v1, 1v4, 3v3 piece counts).
 
 Gating games use stochastic openings (temperature=1 for the first K moves)
 to produce diverse game lines even when policies are sharp.
@@ -277,7 +279,64 @@ def gate_checkpoint(new_net, old_net, device, num_games=40,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3) MCTS correctness: backup sign-convention test
+# 3) Value head calibration: raw network output on known-outcome positions
+# ─────────────────────────────────────────────────────────────────────────────
+
+@torch.no_grad()
+def test_value_head_calibration(network, device, n_boards=10):
+    """Evaluate the raw value head (no MCTS) on positions with known outcome bias.
+
+    Three scenarios, each averaged over n_boards random board layouts:
+      clear_win:  4 Blue pieces vs 1 Red  → value from Blue's POV should be > 0
+      clear_loss: 1 Blue piece  vs 4 Red  → value from Blue's POV should be < 0
+      equal:      3 Blue pieces vs 3 Red  → value should be near 0
+
+    All boards are reset with Blue to move, so the network sees everything from
+    Blue's perspective.  Averaging over n_boards reduces sensitivity to the
+    exact random piece placement produced by create_random_board().
+
+    Calibration thresholds (calibrated = True when all three pass):
+      val_clear_win  > 0.0  — network recognises material advantage
+      val_clear_loss < 0.0  — network recognises material deficit
+      val_clear_win  > val_equal   — advantage > ambiguity
+      val_clear_loss < val_equal   — deficit    < ambiguity
+
+    Interpretation guide as training progresses:
+      Early training (epochs 1–5):   val_clear_win ≈ +0.1–0.3
+      Mid Phase 1 (epochs 5–15):     val_clear_win ≈ +0.4–0.6
+      Well-trained Phase 1:          val_clear_win ≈ +0.6–0.8
+    """
+    network.eval()
+
+    scenarios = {
+        "clear_win":  {"num_blue": 4, "num_red": 1},
+        "clear_loss": {"num_blue": 1, "num_red": 4},
+        "equal":      {"num_blue": 3, "num_red": 3},
+    }
+
+    results = {}
+    for key, opts in scenarios.items():
+        states = []
+        for _ in range(n_boards):
+            env = CheckersEnv()
+            env.reset(options=opts)
+            states.append(env.get_board_state())   # (4, 8, 8) from Blue's PoV
+
+        states_t = torch.FloatTensor(np.array(states)).to(device)
+        _, values = network(states_t)              # (n_boards, 1)
+        results[f"val_{key}"] = round(float(values.mean().item()), 4)
+
+    results["val_calibrated"] = (
+        results["val_clear_win"]  > 0.0
+        and results["val_clear_loss"] < 0.0
+        and results["val_clear_win"]  > results["val_equal"]
+        and results["val_clear_loss"] < results["val_equal"]
+    )
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4) MCTS correctness: backup sign-convention test
 # ─────────────────────────────────────────────────────────────────────────────
 
 class _DummyNetwork(nn.Module):

@@ -64,6 +64,7 @@ from checkers_game.constants import BLUE, RED, NUM_ACTIONS
 from RL_models.numpy_checkers_env import NumpyCheckersEnv  # noqa: F401
 from RL_models.MCTS.evaluate import (
     freeze_state_dict, test_mcts_correctness,
+    play_vs_random, test_value_head_calibration,
 )
 
 
@@ -223,7 +224,7 @@ def _get_curriculum_options(epoch):
     Phase 2: weak ∈ [5, 8],  strong ∈ [weak+1, 9]  — mid-game positions (≥5 pieces/side)
     """
     if epoch < cfg.CURRICULUM_PHASE1_END:
-        weak   = random.randint(1, cfg.CURRICULUM_PHASE1_WEAK_MAX)
+        weak   = random.randint(cfg.CURRICULUM_PHASE1_WEAK_MIN, cfg.CURRICULUM_PHASE1_WEAK_MAX)
         strong = random.randint(weak + 1, cfg.CURRICULUM_PHASE1_STRONG_MAX)
     elif epoch < cfg.CURRICULUM_PHASE2_END:
         weak   = random.randint(cfg.CURRICULUM_PHASE2_WEAK_MIN, cfg.CURRICULUM_PHASE2_WEAK_MAX)
@@ -999,6 +1000,9 @@ def train_alphazero_parallel(num_workers=None):
                 "gate_wins", "gate_losses", "gate_ties",
                 "gate_win_rate", "gate_score", "gate_accepted",
                 "mcts_test_passed", "mcts_winning_visit_share", "mcts_root_value",
+                "vs_random_wins", "vs_random_losses", "vs_random_ties",
+                "vs_random_score",
+                "val_clear_win", "val_clear_loss", "val_equal", "val_calibrated",
             ])
 
     # ── Reference model (sliding-window gate) ────────────────────────────
@@ -1222,6 +1226,20 @@ def train_alphazero_parallel(num_workers=None):
                       f"(winning_visits={mt['winning_visit_share']:.0%}, "
                       f"root_val={mt['root_value']:+.3f})", flush=True)
 
+                # Value head calibration — raw network output on known positions
+                vc = test_value_head_calibration(network, device)
+                vc_status = "PASS" if vc["val_calibrated"] else "FAIL"
+                print(f"  Value calibration: {vc_status}  "
+                      f"(4v1={vc['val_clear_win']:+.3f}, "
+                      f"1v4={vc['val_clear_loss']:+.3f}, "
+                      f"3v3={vc['val_equal']:+.3f})", flush=True)
+
+                # Absolute strength — network vs random opponent (sequential)
+                vr = play_vs_random(network, device, num_games=40,
+                                    num_simulations=100)
+                print(f"  vs Random: {vr['wins']}W / {vr['losses']}L / {vr['ties']}T  "
+                      f"(score={vr['score']:.0%})", flush=True)
+
                 # Gate evaluation — fully parallel
                 gate_result   = None
                 gate_accepted = None
@@ -1294,6 +1312,10 @@ def train_alphazero_parallel(num_workers=None):
                         mt["passed"],
                         mt["winning_visit_share"],
                         mt["root_value"],
+                        vr["wins"], vr["losses"], vr["ties"],
+                        round(vr["score"], 4),
+                        vc["val_clear_win"], vc["val_clear_loss"],
+                        vc["val_equal"], vc["val_calibrated"],
                     ])
 
             with open(csv_path, mode="a", newline="") as f:
