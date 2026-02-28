@@ -63,7 +63,7 @@ class CheckersEnv(gym.Env):
         self._capture_bonus      = cfg.get("capture_bonus",      10.0)
         self._capture_penalty    = cfg.get("capture_penalty",    -5.0)
         self._king_bonus         = cfg.get("king_bonus",         15.0)
-        self._tie_base           = cfg.get("tie_base",          -200)
+        self._tie_base           = cfg.get("tie_base",          -80.0)
         self._shaping_scale      = cfg.get("shaping_scale",       0.5)
         self._time_penalty_scale = cfg.get("time_penalty_scale",  1.0)
 
@@ -78,19 +78,32 @@ class CheckersEnv(gym.Env):
             num_pieces (int): Number of pieces per side for curriculum learning.
                               If omitted or 12, uses the standard starting position.
                               Values 1-11 create a random board with that many pieces per side.
+            num_blue (int):   Override piece count for BLUE (asymmetric boards).
+            num_red  (int):   Override piece count for RED  (asymmetric boards).
             king_prob (float): Probability of promoting pieces placed in mid-board (default 0.15).
         """
         super().reset(seed=seed)
         self.game = Game()
 
-        # Curriculum: optionally use a random board with fewer pieces
-        if options and options.get("num_pieces") is not None:
-            num_pieces = options["num_pieces"]
-            if 1 <= num_pieces < 12:
+        if options:
+            num_pieces = options.get("num_pieces")
+            num_blue = options.get("num_blue")
+            num_red = options.get("num_red")
+            needs_random = (
+                (num_pieces is not None and 1 <= num_pieces < 12)
+                or num_blue is not None
+                or num_red is not None
+            )
+            if needs_random:
                 king_prob = options.get("king_prob", 0.15)
                 from checkers_game.board import Board
                 self.game.board = Board()
-                self.game.board.create_random_board(num_pieces, king_prob=king_prob)
+                self.game.board.create_random_board(
+                    num_pieces if num_pieces is not None else 6,
+                    king_prob=king_prob,
+                    num_blue=num_blue,
+                    num_red=num_red,
+                )
 
         self._capture_in_progress = False
         self._capturing_piece_sq = None
@@ -211,6 +224,10 @@ class CheckersEnv(gym.Env):
         old_board = self._turn_start_board
         new_board = copy.deepcopy(self.game.board)
 
+        # Detect king promotion before any state is cleared so the result can
+        # be reported in info["promotion"] for the no-progress draw counter.
+        was_promotion = bool(self._king_promoted(old_board.board))
+
         # Build move string for logging
         delimiter = "x" if self._is_capture_turn else "-"
         move_str = delimiter.join(map(str, self._current_move_chain))
@@ -228,7 +245,7 @@ class CheckersEnv(gym.Env):
         shaped_reward = 0.0
 
         # King promotion: one-time bonus for advancing a piece
-        shaped_reward += self.reward_king_promotion(old_board)
+        shaped_reward += self._king_bonus if was_promotion else 0.0
 
         # capture_bonus for the final capture hop (intermediates already got it)
         if self._is_capture_turn:
@@ -312,6 +329,7 @@ class CheckersEnv(gym.Env):
             "turn": self.game.turn,
             "turn_complete": True,
             "winner": copy.deepcopy(winner) if winner else "None",
+            "promotion": was_promotion,
             "blue_reward_adjustment": blue_adj,
             "red_reward_adjustment": red_adj,
         }
@@ -443,6 +461,13 @@ class CheckersEnv(gym.Env):
         g.board_states  = {}
         g.moves         = []
         g.num_moves     = self.game.num_moves   # int — copy by value
+
+        # No-progress draw state: copy so clones see the real accumulated count.
+        # moves is reset to [] above, so _no_progress_count is the only signal
+        # for how close the clone is to the 40-move threshold.
+        g._no_progress_draw_moves = self.game._no_progress_draw_moves
+        g._no_progress_count      = self.game._no_progress_count
+        g._prev_king_count        = self.game._prev_king_count
 
         # GUI / move-tree state — not used by env.step(); zero cost to reset
         g.selected_piece     = None

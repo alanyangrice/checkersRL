@@ -203,10 +203,9 @@ def get_curriculum_options(epoch):
     """Return env.reset() options for the current curriculum phase.
 
     Phase 1 (epochs 0 to CURRICULUM_PHASE1_END_EPOCH - 1):
-        Random boards with 4-9 pieces per side. Forces the agent to learn
-        decisive mid-game play before encountering full 12v12 games.
-        NOTE: 2-5 piece (endgame) positions are intentionally skipped —
-        they are often theoretical draws and reinforce passive play.
+        Random boards with asymmetric piece counts (each side draws
+        independently from PHASE1_PIECES_MIN..MAX).  Asymmetry forces the
+        value head to learn that material advantage matters.
     Phase 2 (CURRICULUM_PHASE1_END_EPOCH+):
         Standard 12v12 starting position.
     """
@@ -214,7 +213,9 @@ def get_curriculum_options(epoch):
         return None
     if epoch < CURRICULUM_PHASE1_END_EPOCH:
         import random as _random
-        return {"num_pieces": _random.randint(CURRICULUM_PHASE1_PIECES_MIN,
-                                              CURRICULUM_PHASE1_PIECES_MAX)}
+        return {"num_blue": _random.randint(CURRICULUM_PHASE1_PIECES_MIN,
+                                            CURRICULUM_PHASE1_PIECES_MAX),
+                "num_red":  _random.randint(CURRICULUM_PHASE1_PIECES_MIN,
+                                            CURRICULUM_PHASE1_PIECES_MAX)}
     return None  # full 12v12
 

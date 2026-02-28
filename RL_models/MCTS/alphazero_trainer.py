@@ -42,44 +42,37 @@ class AlphaZeroTrainer:
         4. Repeat.
     """
 
-    def __init__(
-        self,
-        num_simulations=cfg.NUM_SIMULATIONS,
-        c_puct=cfg.C_PUCT,
-        lr=cfg.LEARNING_RATE,
-        weight_decay=cfg.WEIGHT_DECAY,
-        buffer_size=cfg.BUFFER_SIZE,
-        batch_size=cfg.BATCH_SIZE,
-        train_steps_per_epoch=cfg.TRAIN_STEPS_PER_EPOCH,
-        temperature_threshold=cfg.TEMPERATURE_THRESHOLD,
-        device=None,
-    ):
+    def __init__(self, batch_size=cfg.BATCH_SIZE, buffer_size=cfg.BUFFER_SIZE,
+                 device=None):
         self.device = device or get_device()
-        self.num_simulations = num_simulations
-        self.c_puct = c_puct
         self.batch_size = batch_size
-        self.train_steps_per_epoch = train_steps_per_epoch
-        self.temperature_threshold = temperature_threshold
+        # Temperature config is set per-game by self_play_game() via
+        # cfg.get_temperature_config(epoch); these are just defaults.
+        self.temperature_threshold = cfg.TEMPERATURE_THRESHOLD_FULL
+        self._temp_late = cfg.TEMPERATURE_LATE_FULL
 
         # Network
         input_shape = (4, 8, 8)
         self.network = AlphaZeroNetwork(input_shape, NUM_ACTIONS).to(self.device)
-        # AdamW applies weight decay decoupled from the gradient update,
-        # which is correct regularisation for adaptive-moment optimisers.
-        # torch.optim.Adam with weight_decay adds λ·θ to the gradient *before*
-        # the adaptive scaling, making the effective decay vary per-parameter.
         self.optimizer = optim.AdamW(
-            self.network.parameters(), lr=lr, weight_decay=weight_decay
+            self.network.parameters(),
+            lr=cfg.LEARNING_RATE, weight_decay=cfg.WEIGHT_DECAY,
         )
-        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer, T_max=cfg.LR_T_MAX, eta_min=cfg.LR_ETA_MIN
+        # Per-phase cosine LR schedule with warm restarts at curriculum boundaries.
+        # cfg.get_lr() returns an absolute LR; LambdaLR needs a multiplier relative
+        # to the initial base_lr, so we normalise by LEARNING_RATE.
+        # PyTorch calls step() once during construction, so after __init__ the
+        # optimizer LR is already set correctly for epoch 0.
+        self.scheduler = optim.lr_scheduler.LambdaLR(
+            self.optimizer,
+            lr_lambda=lambda epoch: cfg.get_lr(epoch) / cfg.LEARNING_RATE,
         )
 
-        # MCTS
+        # MCTS — sim count is overridden per-game by cfg.get_num_simulations(epoch)
         self.mcts = MCTSSearch(
             self.network,
-            num_simulations=num_simulations,
-            c_puct=c_puct,
+            num_simulations=cfg.NUM_SIMULATIONS,
+            c_puct=cfg.C_PUCT,
             dirichlet_alpha=cfg.DIRICHLET_ALPHA,
             dirichlet_epsilon=cfg.DIRICHLET_EPSILON,
             device=self.device,
@@ -88,7 +81,7 @@ class AlphaZeroTrainer:
         # Replay buffer: stores (state, mcts_policy, outcome)
         self.replay_buffer = deque(maxlen=buffer_size)
 
-    def self_play_game(self, curriculum_options=None):
+    def self_play_game(self, curriculum_options=None, epoch=0):
         """Play one game using MCTS, collecting training data.
 
         Returns:
@@ -117,24 +110,24 @@ class AlphaZeroTrainer:
         info        = {}
 
         self.network.eval()
-        self.mcts._root = None  # start each game with a fresh search tree
+        self.mcts._root = None
 
         while not done:
-            if move_count >= cfg.MAX_GAME_MOVES:
-                info = {"winner": "Tie"}
+            if move_count >= cfg.get_max_game_moves(epoch):
+                from RL_models.MCTS.train_gpu_parallel import _adjudicate_move_cap
+                info = {"winner": _adjudicate_move_cap(env)}
                 break
 
             action_mask = env.get_action_mask()
 
             if action_mask.sum() == 0:
-                # No legal moves -- game over
                 _, _, done, _, info = env.step(0)
                 break
 
             temperature = (
                 cfg.TEMPERATURE_EARLY
                 if move_count < self.temperature_threshold
-                else cfg.TEMPERATURE_LATE
+                else self._temp_late
             )
 
             # Record the state and current player BEFORE the action
@@ -143,7 +136,8 @@ class AlphaZeroTrainer:
 
             # Run MCTS with Dirichlet noise (self-play exploration)
             action, mcts_policy, root_value = self.mcts.select_action(
-                env, temperature=temperature, add_noise=True
+                env, temperature=temperature, add_noise=True,
+                no_progress_count=env.game._no_progress_count,
             )
 
             # Per-step diagnostics
@@ -185,9 +179,9 @@ class AlphaZeroTrainer:
         """Label game data with outcomes and add to the replay buffer.
 
         Each position is labeled with:
-            +1 if the player at that position won
-            -1 if the player at that position lost
-             0 if the game was a tie
+            +1  if the player at that position won
+            -1  if the player at that position lost
+             0  if the game was a tie
         """
         for state, mcts_policy, player_color in game_data:
             if winner == "Tie" or winner == "None":
@@ -199,14 +193,23 @@ class AlphaZeroTrainer:
 
             self.replay_buffer.append((state, mcts_policy, outcome))
 
-    def train_network(self):
+    def train_network(self, new_positions=None):
         """Sample from replay buffer and update the network.
 
+        Args:
+            new_positions: number of positions added this epoch (for adaptive
+                           step count).  If None, uses TRAIN_STEPS_MAX.
+
         Returns:
-            avg_policy_loss, avg_value_loss, avg_total_loss, avg_grad_norm
+            avg_policy_loss, avg_value_loss, avg_total_loss, avg_grad_norm,
+            train_steps
         """
         if len(self.replay_buffer) < self.batch_size:
-            return 0.0, 0.0, 0.0, 0.0
+            return 0.0, 0.0, 0.0, 0.0, 0
+
+        train_steps = (cfg.get_train_steps(new_positions)
+                       if new_positions is not None
+                       else cfg.TRAIN_STEPS_MAX)
 
         self.network.train()
 
@@ -215,12 +218,9 @@ class AlphaZeroTrainer:
         total_loss = 0.0
         total_grad_norm = 0.0
 
-        # Snapshot deque → list once so random.sample uses O(1) index access
-        # instead of O(n) deque pointer walks for each of the batch items.
         buffer_snapshot = list(self.replay_buffer)
 
-        for _ in range(self.train_steps_per_epoch):
-            # Sample a mini-batch
+        for _ in range(train_steps):
             batch = random.sample(buffer_snapshot, self.batch_size)
             states, target_policies, target_values = zip(*batch)
 
@@ -228,42 +228,31 @@ class AlphaZeroTrainer:
             target_policies_t = torch.FloatTensor(np.array(target_policies)).to(self.device)
             target_values_t = torch.FloatTensor(np.array(target_values)).unsqueeze(1).to(self.device)
 
-            # Forward pass
             logits, values = self.network(states_t)
-
-            # Policy loss: cross-entropy with MCTS visit distribution
             log_probs = torch.log_softmax(logits, dim=1)
             policy_loss = -(target_policies_t * log_probs).sum(dim=1).mean()
-
-            # Value loss: MSE between predicted and actual outcome
             value_loss = nn.MSELoss()(values, target_values_t)
-
-            # Total loss
             loss = policy_loss + cfg.VALUE_LOSS_WEIGHT * value_loss
 
             self.optimizer.zero_grad()
             loss.backward()
-
-            # Measure pre-clip gradient norm to check whether the clip is binding.
-            # If avg_grad_norm << GRAD_CLIP_NORM the clip is a no-op; if it is
-            # close to or above it, clipping is actively changing the update.
             pre_clip_norm = nn.utils.clip_grad_norm_(
                 self.network.parameters(), max_norm=cfg.GRAD_CLIP_NORM
             )
             total_grad_norm += pre_clip_norm.item()
-
             self.optimizer.step()
 
             total_policy_loss += policy_loss.item()
             total_value_loss += value_loss.item()
             total_loss += loss.item()
 
-        n = self.train_steps_per_epoch
+        n = train_steps
         return (
             total_policy_loss / n,
             total_value_loss / n,
             total_loss / n,
             total_grad_norm / n,
+            train_steps,
         )
 
     def buffer_policy_entropy(self, sample_size=2048):
@@ -298,7 +287,6 @@ class AlphaZeroTrainer:
             "epoch": epoch,
             "model_state_dict": self.network.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
-            "scheduler_state_dict": self.scheduler.state_dict(),
         }
         if stats:
             data.update(stats)
@@ -309,35 +297,52 @@ class AlphaZeroTrainer:
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         self.network.load_state_dict(checkpoint["model_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        if "scheduler_state_dict" in checkpoint:
-            self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         self.mcts.network = self.network
-        return checkpoint.get("epoch", 0)
+        loaded_epoch = checkpoint.get("epoch", 0)
+        # Reconstruct the scheduler at the correct epoch.  last_epoch=(loaded_epoch-1)
+        # causes LambdaLR.__init__'s internal step() to advance it to loaded_epoch,
+        # so the LR is correct for the first training batch after resuming.
+        self.scheduler = optim.lr_scheduler.LambdaLR(
+            self.optimizer,
+            lr_lambda=lambda e: cfg.get_lr(e) / cfg.LEARNING_RATE,
+            last_epoch=loaded_epoch - 1,
+        )
+        return loaded_epoch
 
 
 def get_curriculum_options(epoch):
-    """Curriculum phases for AlphaZero training."""
+    """Generate guaranteed-asymmetric board options for the current curriculum phase.
+
+    The weak side draws its piece count first, then the strong side draws from
+    [weak+1, strong_max], guaranteeing a strict material advantage on every game.
+    Which color is the strong side is re-rolled 50/50 each game so both BLUE and
+    RED learn to play from both material situations equally.
+
+    Phase 1: weak ∈ [1, 5],  strong ∈ [weak+1, 6]  — endgame positions
+    Phase 2: weak ∈ [5, 8],  strong ∈ [weak+1, 9]  — mid-game positions (≥5 pieces/side)
+    """
     if epoch < cfg.CURRICULUM_PHASE1_END:
-        lo, hi = cfg.CURRICULUM_PHASE1_PIECES
-        return {"num_pieces": random.randint(lo, hi)}
+        weak   = random.randint(1, cfg.CURRICULUM_PHASE1_WEAK_MAX)
+        strong = random.randint(weak + 1, cfg.CURRICULUM_PHASE1_STRONG_MAX)
     elif epoch < cfg.CURRICULUM_PHASE2_END:
-        lo, hi = cfg.CURRICULUM_PHASE2_PIECES
-        return {"num_pieces": random.randint(lo, hi)}
+        weak   = random.randint(cfg.CURRICULUM_PHASE2_WEAK_MIN, cfg.CURRICULUM_PHASE2_WEAK_MAX)
+        strong = random.randint(weak + 1, cfg.CURRICULUM_PHASE2_STRONG_MAX)
     else:
         return None
+
+    if random.random() < 0.5:
+        return {"num_blue": strong, "num_red": weak}
+    return {"num_blue": weak, "num_red": strong}
 
 
 def main():
     """Main AlphaZero training loop."""
     num_epochs = cfg.NUM_EPOCHS
     games_per_epoch = cfg.GAMES_PER_EPOCH
-    num_simulations = cfg.NUM_SIMULATIONS
     batch_size = cfg.BATCH_SIZE
-    train_steps = cfg.TRAIN_STEPS_PER_EPOCH
     buffer_size = cfg.BUFFER_SIZE
     save_interval = cfg.SAVE_INTERVAL
 
-    # Directories
     base_dir     = os.path.dirname(os.path.abspath(__file__))
     model_dir    = os.path.join(base_dir, "alphazero_checkpoints")
     detailed_dir = os.path.join(base_dir, "az_detailed_games")
@@ -346,11 +351,8 @@ def main():
 
     csv_path = os.path.join(base_dir, "alphazero_training_progress.csv")
 
-    # Initialize trainer
     trainer = AlphaZeroTrainer(
-        num_simulations=num_simulations,
         batch_size=batch_size,
-        train_steps_per_epoch=train_steps,
         buffer_size=buffer_size,
     )
 
@@ -388,8 +390,9 @@ def main():
         total_root_val_loser  = 0.0
         total_entropy         = 0.0
 
+        epoch_sims = cfg.get_num_simulations(epoch)
         print(f"\nEpoch {epoch + 1}/{num_epochs} -- Self-play ({games_per_epoch} games, "
-              f"{num_simulations} sims/move)...")
+              f"{epoch_sims} sims/move)...")
 
         # Open per-epoch detailed game CSV (zipped after the epoch)
         detailed_csv_path = os.path.join(
@@ -399,12 +402,19 @@ def main():
             csv.writer(f).writerow(detailed_headers)
 
         # --- Self-play phase ---
+        new_positions = 0
         for game_idx in range(games_per_epoch):
             curriculum_opts = get_curriculum_options(epoch)
+            trainer.mcts.num_simulations = cfg.get_num_simulations(epoch)
+            temp_threshold, temp_late = cfg.get_temperature_config(epoch)
+            trainer.temperature_threshold = temp_threshold
+            trainer._temp_late = temp_late
+
             game_data, winner, num_moves, game_stats = trainer.self_play_game(
-                curriculum_opts
+                curriculum_opts, epoch=epoch
             )
             trainer.add_game_to_buffer(game_data, winner)
+            new_positions += len(game_data)
 
             total_moves += num_moves
             if winner == BLUE:
@@ -451,8 +461,9 @@ def main():
 
         # --- Training phase ---
         print(f"  Training on {len(trainer.replay_buffer)} positions...")
-        p_loss, v_loss, t_loss, avg_grad_norm = trainer.train_network()
-        trainer.scheduler.step()
+        p_loss, v_loss, t_loss, avg_grad_norm, train_steps = trainer.train_network(
+            new_positions=new_positions
+        )
 
         # Buffer-level policy entropy (sampled from the full replay buffer,
         # complementing the per-game entropy from self-play above)
@@ -473,7 +484,8 @@ def main():
         print(f"  Value calibration — winner avg: {avg_root_val_winner:+.3f}  "
               f"loser avg: {avg_root_val_loser:+.3f}  "
               f"(ideal: +1.0 / -1.0)")
-        print(f"  LR: {trainer.scheduler.get_last_lr()[0]:.2e}, "
+        current_lr = trainer.scheduler.get_last_lr()[0]
+        print(f"  LR: {current_lr:.2e}, "
               f"Buffer: {len(trainer.replay_buffer)}")
 
         # Log to CSV
@@ -497,6 +509,9 @@ def main():
                 "ties": ties,
             })
             print(f"  Checkpoint saved: {path}")
+
+        # Advance the LR schedule for the next epoch
+        trainer.scheduler.step()
 
     print("\nAlphaZero training complete.")
 

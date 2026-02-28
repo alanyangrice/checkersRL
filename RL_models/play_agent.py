@@ -13,24 +13,36 @@ import pygame
 from checkers_game.constants import WIDTH, HEIGHT, BLUE, RED, NUM_ACTIONS
 from RL_models.PPO_Model.Agent import PPOAgent
 from RL_models.PPO_Model.PolicyNetwork import PPOPolicyNetwork
+from RL_models.MCTS.AlphaZeroNetwork import AlphaZeroNetwork
 from RL_models.MCTS.mcts_search import MCTSSearch
 from RL_models.checkers_env import CheckersEnv
 
 
-def load_network(device, epoch=None, agent_type=None):
+def load_network(device, epoch=None, az_epoch=None, agent_type=None):
     """Load a model checkpoint.
 
     Args:
-        epoch:      Load a specific epoch number. If omitted, loads the latest.
-        agent_type: One of "tactical", "terminal", "aggressive" to load a league
-                    agent, or None to use the default priority order
-                    (AlphaZero > PPO-parallel > PPO-sequential).
+        epoch:      Load a specific PPO-parallel epoch. If omitted, uses priority order.
+        az_epoch:   Load a specific AlphaZero epoch (e.g. 100). Returns AlphaZeroNetwork.
+        agent_type: One of "tactical", "terminal", "aggressive" to load a league agent.
 
     Returns (network, mode_name).
     """
     base_dir = os.path.dirname(os.path.abspath(__file__))
     input_shape = (4, 8, 8)
-    network = PPOPolicyNetwork(input_shape, NUM_ACTIONS).to(device)
+
+    # AlphaZero epoch explicitly requested
+    if az_epoch is not None:
+        az_dir = os.path.join(base_dir, "MCTS", "alphazero_checkpoints")
+        model_path = os.path.join(az_dir, f"az_epoch_{az_epoch}.pt")
+        if not os.path.exists(model_path):
+            print(f"ERROR: No AlphaZero checkpoint found at {model_path}")
+            sys.exit(1)
+        print(f"Loading AlphaZero epoch {az_epoch}: {model_path}")
+        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+        network = AlphaZeroNetwork(input_shape, n_actions=NUM_ACTIONS).to(device)
+        network.load_state_dict(checkpoint["model_state_dict"])
+        return network, f"AlphaZero (epoch {az_epoch})"
 
     # League agent requested — load from the league-specific directory
     if agent_type is not None:
@@ -58,10 +70,11 @@ def load_network(device, epoch=None, agent_type=None):
         mode_name = f"League-{agent_type} (epoch {ep_num})"
         print(f"Loading {mode_name}: {model_path}")
         checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+        network = PPOPolicyNetwork(input_shape, NUM_ACTIONS).to(device)
         network.load_state_dict(checkpoint["model_state_dict"])
         return network, mode_name
 
-    # If a specific epoch was requested (parallel model)
+    # If a specific PPO epoch was requested
     if epoch is not None:
         model_path = os.path.join(
             base_dir, "PPO_Model", "PPO_saved_models_parallel", f"agent_epoch_{epoch}.pt"
@@ -71,17 +84,29 @@ def load_network(device, epoch=None, agent_type=None):
             sys.exit(1)
         print(f"Loading PPO-parallel model from epoch {epoch}: {model_path}")
         checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+        network = PPOPolicyNetwork(input_shape, NUM_ACTIONS).to(device)
         network.load_state_dict(checkpoint["model_state_dict"])
         return network, f"PPO-parallel (epoch {epoch})"
 
-    # Priority order for loading checkpoints
-    search_dirs = [
-        (os.path.join(base_dir, "MCTS", "alphazero_checkpoints"), "az_epoch_", "AlphaZero"),
+    # Priority order: AlphaZero first, then PPO variants
+    az_dir = os.path.join(base_dir, "MCTS", "alphazero_checkpoints")
+    if os.path.exists(az_dir):
+        az_checkpoints = [f for f in os.listdir(az_dir) if f.startswith("az_epoch_") and f.endswith(".pt")]
+        if az_checkpoints:
+            latest = max(az_checkpoints, key=lambda f: int(f.split("_")[-1].split(".")[0]))
+            model_path = os.path.join(az_dir, latest)
+            ep_num = latest.split("_")[-1].split(".")[0]
+            print(f"Loading AlphaZero model (epoch {ep_num}): {model_path}")
+            checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+            network = AlphaZeroNetwork(input_shape, n_actions=NUM_ACTIONS).to(device)
+            network.load_state_dict(checkpoint["model_state_dict"])
+            return network, f"AlphaZero (epoch {ep_num})"
+
+    ppo_dirs = [
         (os.path.join(base_dir, "PPO_Model", "PPO_saved_models_parallel"), "agent_epoch_", "PPO-parallel"),
         (os.path.join(base_dir, "PPO_Model", "PPO_saved_models"), "agent_epoch_", "PPO"),
     ]
-
-    for model_dir, prefix, mode_name in search_dirs:
+    for model_dir, prefix, mode_name in ppo_dirs:
         if os.path.exists(model_dir):
             checkpoints = [f for f in os.listdir(model_dir) if f.startswith(prefix) and f.endswith(".pt")]
             if checkpoints:
@@ -89,10 +114,12 @@ def load_network(device, epoch=None, agent_type=None):
                 model_path = os.path.join(model_dir, latest)
                 print(f"Loading {mode_name} model: {model_path}")
                 checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+                network = PPOPolicyNetwork(input_shape, NUM_ACTIONS).to(device)
                 network.load_state_dict(checkpoint["model_state_dict"])
                 return network, mode_name
 
     print("No model checkpoints found. The AI will play randomly.")
+    network = PPOPolicyNetwork(input_shape, NUM_ACTIONS).to(device)
     return network, "random"
 
 
@@ -186,13 +213,13 @@ def save_game_csv(env, winner, player_color, ai_color, mode_name,
     print(f"\nGame saved to {csv_path}")
 
 
-def play_agent(use_mcts=False, num_simulations=100, epoch=None, agent_type=None):
+def play_agent(use_mcts=False, num_simulations=100, epoch=None, az_epoch=None, agent_type=None):
     pygame.init()
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
     pygame.display.set_caption("Checkers Game - Play Against AI")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    network, mode_name = load_network(device, epoch=epoch, agent_type=agent_type)
+    network, mode_name = load_network(device, epoch=epoch, az_epoch=az_epoch, agent_type=agent_type)
     network.eval()
 
     # Set up the AI action selector
@@ -235,6 +262,15 @@ def play_agent(use_mcts=False, num_simulations=100, epoch=None, agent_type=None)
 
         if env.game.turn == player_color:
             # ── Player's turn ──────────────────────────────────────────
+            # Pre-move value estimate (from the player's perspective)
+            if use_mcts:
+                state_t = torch.FloatTensor(env.get_board_state()).unsqueeze(0).to(device)
+                with torch.no_grad():
+                    _, _v = mcts.network(state_t)
+                player_preturn_val = _v.item()
+            else:
+                player_preturn_val = None
+
             old_board = copy.deepcopy(env.game.board)
             turn_complete = env.game.player_action(screen)
 
@@ -265,7 +301,8 @@ def play_agent(use_mcts=False, num_simulations=100, epoch=None, agent_type=None)
 
                 label = "BLUE" if current_color == BLUE else "RED"
                 move_str = env.game.moves[-1] if env.game.moves else "?"
-                print(f"  Player ({label}) [{move_str}]  reward: {reward:+.2f}  "
+                val_str = f"  val: {player_preturn_val:+.3f}" if player_preturn_val is not None else ""
+                print(f"  Player ({label}) [{move_str}]  reward: {reward:+.2f}{val_str}  "
                       f"| Blue: {sum(blue_rewards):+.2f}  Red: {sum(red_rewards):+.2f}")
 
                 # Capture penalty: player captured → AI's last move gets penalised
@@ -328,9 +365,15 @@ def play_agent(use_mcts=False, num_simulations=100, epoch=None, agent_type=None)
                 break
 
             if use_mcts:
-                action, _, _ = mcts.select_action(env, temperature=0.1)
+                # Always start from a fresh tree — tree reuse is a self-play
+                # training optimisation and causes stale-child assertion errors
+                # in human-vs-AI mode (both across human moves and within
+                # multi-step capture chains).
+                mcts._root = None
+                action, _, root_value = mcts.select_action(env, temperature=0.1)
             else:
                 action, _, _ = agent.select_action(state, action_mask)
+                root_value = None
 
             next_state, reward, done, _, info = env.step(action)
             ai_turn_reward_acc += reward
@@ -348,7 +391,8 @@ def play_agent(use_mcts=False, num_simulations=100, epoch=None, agent_type=None)
 
                 label = "BLUE" if current_color == BLUE else "RED"
                 move_str = env.game.moves[-1] if env.game.moves else "?"
-                print(f"  AI    ({label}) [{move_str}]  reward: {ai_turn_reward_acc:+.2f}  "
+                val_str = f"  val: {root_value:+.3f}" if root_value is not None else ""
+                print(f"  AI    ({label}) [{move_str}]  reward: {ai_turn_reward_acc:+.2f}{val_str}  "
                       f"| Blue: {sum(blue_rewards):+.2f}  Red: {sum(red_rewards):+.2f}")
 
                 # Capture penalty: AI captured → player's last move gets penalised
@@ -383,7 +427,8 @@ def play_agent(use_mcts=False, num_simulations=100, epoch=None, agent_type=None)
 
             label = "BLUE" if current_color == BLUE else "RED"
             move_str = env.game.moves[-1] if env.game.moves else "?"
-            print(f"  AI    ({label}) [{move_str}]  reward: {ai_turn_reward_acc:+.2f}  "
+            val_str = f"  val: {root_value:+.3f}" if root_value is not None else ""
+            print(f"  AI    ({label}) [{move_str}]  reward: {ai_turn_reward_acc:+.2f}{val_str}  "
                   f"| Blue: {sum(blue_rewards):+.2f}  Red: {sum(red_rewards):+.2f}")
 
             # Capture penalty: AI captured → player's last move gets penalised
@@ -461,13 +506,21 @@ if __name__ == "__main__":
     parser.add_argument("--mcts", action="store_true", help="Use MCTS for AI moves (stronger but slower)")
     parser.add_argument("--simulations", type=int, default=100, help="MCTS simulations per move (default: 100)")
     parser.add_argument("--epoch", type=int, default=None,
-                        help="Load a specific training epoch (e.g. --epoch 72). "
+                        help="Load a specific PPO epoch. Works for both the default "
+                             "PPO-parallel model (e.g. --epoch 72) and league agents "
+                             "(e.g. --agent aggressive --epoch 50). "
                              "If omitted, loads the latest checkpoint.")
+    parser.add_argument("--az-epoch", type=int, default=None, dest="az_epoch",
+                        help="Load a specific AlphaZero epoch (e.g. --az-epoch 100). "
+                             "Automatically enables MCTS mode.")
     parser.add_argument("--agent", type=str, default=None,
                         choices=["tactical", "terminal", "aggressive"],
                         help="Play against a league agent (e.g. --agent aggressive). "
                              "If omitted, loads the default PPO-parallel model.")
     args = parser.parse_args()
 
-    play_agent(use_mcts=args.mcts, num_simulations=args.simulations,
-               epoch=args.epoch, agent_type=args.agent)
+    # AlphaZero always plays with MCTS
+    use_mcts = args.mcts or (args.az_epoch is not None)
+
+    play_agent(use_mcts=use_mcts, num_simulations=args.simulations,
+               epoch=args.epoch, az_epoch=args.az_epoch, agent_type=args.agent)

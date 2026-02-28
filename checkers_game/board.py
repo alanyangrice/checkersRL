@@ -146,53 +146,72 @@ class Board:
                             moves[(r + d, c + dc)] = (r, c)  # Capture move
         return moves
 
-    def create_random_board(self, num_pieces_per_side, king_prob=0.15):
-        """Create a board with random piece placement for curriculum learning.
+    # King probability by row for each colour.
+    # Indexed by row 0-7; values reflect how likely a piece at that depth is to
+    # be a king.  Pieces at the promotion row are FORCED kings (probability 1.0)
+    # to prevent stuck non-king pieces with no legal moves.
+    #
+    # BLUE promotes at row 7 (moves downward: 0 → 7).
+    # Deeper in RED territory → higher probability.
+    _BLUE_KING_PROB = [0.05, 0.08, 0.12, 0.20, 0.35, 0.60, 0.80, 1.00]
+    #                 row0  row1  row2  row3  row4  row5  row6  row7
+    #                 own  ←──── home ──────center──── deep enemy ──→ promo
+
+    # RED promotes at row 0 (moves upward: 7 → 0).
+    _RED_KING_PROB  = [1.00, 0.80, 0.60, 0.35, 0.20, 0.12, 0.08, 0.05]
+    #                 row0  row1  row2  row3  row4  row5  row6  row7
+    #                 promo ←── deep enemy ────center──── home ────→ own
+
+    def create_random_board(self, num_pieces_per_side, king_prob=None,
+                            num_blue=None, num_red=None):
+        """Create a random board for curriculum learning.
+
+        Pieces are placed on any dark square across the full 8×8 board for
+        both colours.  King status is assigned with a probability that scales
+        with depth into opponent territory so the distribution resembles real
+        mid-game / endgame positions:
+
+          • A BLUE piece at its promotion row (row 7) is **always** a king —
+            a non-king there would have no legal forward moves and freeze the
+            game.
+          • A BLUE piece at rows 5-6 (deep in RED's half) is likely a king
+            (~60-80 %) since reaching that depth without promoting is rare.
+          • Pieces in the centre or home rows are mostly non-kings.
 
         Args:
-            num_pieces_per_side: Number of pieces each side gets (1-12).
-            king_prob: Probability that a piece placed outside its home rows is a king.
-
-        Blue pieces are placed on rows 0-4 (top half + middle).
-        Red pieces are placed on rows 3-7 (bottom half + middle).
-        Overlap zone (rows 3-4) can contain either color.
+            num_pieces_per_side: Default piece count for both sides (1-12).
+                Used when num_blue/num_red are not specified.
+            king_prob: Ignored (kept for API compatibility).  King probability
+                is now position-dependent; see _BLUE_KING_PROB / _RED_KING_PROB.
+            num_blue: Override piece count for BLUE (None → use num_pieces_per_side).
+            num_red:  Override piece count for RED  (None → use num_pieces_per_side).
         """
-        num_pieces_per_side = max(1, min(12, num_pieces_per_side))
+        n_blue = max(1, min(12, num_blue if num_blue is not None else num_pieces_per_side))
+        n_red  = max(1, min(12, num_red  if num_red  is not None else num_pieces_per_side))
 
-        # Clear the board
-        self.board = []
-        for row in range(ROWS):
-            self.board.append([0] * COLS)
+        self.board = [[0] * COLS for _ in range(ROWS)]
 
-        # Collect all dark squares
-        all_dark = [(r, c) for r in range(ROWS) for c in range(COLS) if (r + c) % 2 == 1]
+        # All 32 dark squares are available to both sides.
+        all_dark = [(r, c) for r in range(ROWS) for c in range(COLS)
+                    if (r + c) % 2 == 1]
+        _random.shuffle(all_dark)
 
-        # Blue placement candidates: rows 0-4
-        blue_candidates = [(r, c) for r, c in all_dark if r <= 4]
-        # Red placement candidates: rows 3-7
-        red_candidates = [(r, c) for r, c in all_dark if r >= 3]
-
-        # Place Blue pieces
-        _random.shuffle(blue_candidates)
-        blue_positions = blue_candidates[:num_pieces_per_side]
-
-        # Place Red pieces (avoid squares already taken by Blue)
-        blue_set = set(blue_positions)
-        red_available = [pos for pos in red_candidates if pos not in blue_set]
-        _random.shuffle(red_available)
-        red_positions = red_available[:num_pieces_per_side]
+        # Assign squares: first n_blue to BLUE, then n_red from the remainder.
+        # This guarantees no square overlap between the two sides.
+        blue_positions = all_dark[:n_blue]
+        remainder      = all_dark[n_blue:]
+        _random.shuffle(remainder)
+        red_positions  = remainder[:n_red]
 
         for row, col in blue_positions:
             piece = Piece(row, col, BLUE)
-            # Promote to king if in opponent's territory or middle with some probability
-            if row >= 3 and _random.random() < king_prob:
+            if _random.random() < self._BLUE_KING_PROB[row]:
                 piece.make_king()
             self.board[row][col] = piece
 
         for row, col in red_positions:
             piece = Piece(row, col, RED)
-            # Promote to king if in opponent's territory or middle with some probability
-            if row <= 4 and _random.random() < king_prob:
+            if _random.random() < self._RED_KING_PROB[row]:
                 piece.make_king()
             self.board[row][col] = piece
 
