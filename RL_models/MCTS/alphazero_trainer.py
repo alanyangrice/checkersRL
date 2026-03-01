@@ -25,9 +25,18 @@ import numpy as np
 from RL_models.checkers_env import CheckersEnv
 from RL_models.MCTS.mcts_search import MCTSSearch
 from RL_models.MCTS.AlphaZeroNetwork import AlphaZeroNetwork
+from RL_models.MCTS.WDLAlphaZeroNetwork import WDLAlphaZeroNetwork
 from RL_models.MCTS import training_config as cfg
 from RL_models.PPO_Model.Agent import get_device
 from checkers_game.constants import BLUE, RED, NUM_ACTIONS
+
+
+def _outcome_to_wdl(v):
+    """Convert a scalar outcome in [-1, 1] to a [P(win), P(draw), P(loss)] array."""
+    w = float(max(0.0, v))
+    l = float(max(0.0, -v))
+    d = max(0.0, 1.0 - w - l)
+    return np.array([w, d, l], dtype=np.float32)
 
 
 class AlphaZeroTrainer:
@@ -43,17 +52,19 @@ class AlphaZeroTrainer:
     """
 
     def __init__(self, batch_size=cfg.BATCH_SIZE, buffer_size=cfg.BUFFER_SIZE,
-                 device=None):
+                 device=None, use_wdl=False):
         self.device = device or get_device()
         self.batch_size = batch_size
+        self.use_wdl = use_wdl
         # Temperature config is set per-game by self_play_game() via
         # cfg.get_temperature_config(epoch); these are just defaults.
         self.temperature_threshold = cfg.TEMPERATURE_THRESHOLD_FULL
         self._temp_late = cfg.TEMPERATURE_LATE_FULL
 
         # Network
-        input_shape = (4, 8, 8)
-        self.network = AlphaZeroNetwork(input_shape, NUM_ACTIONS).to(self.device)
+        input_shape  = (4, 8, 8)
+        NetworkClass = WDLAlphaZeroNetwork if use_wdl else AlphaZeroNetwork
+        self.network = NetworkClass(input_shape, NUM_ACTIONS).to(self.device)
         self.optimizer = optim.AdamW(
             self.network.parameters(),
             lr=cfg.LEARNING_RATE, weight_decay=cfg.WEIGHT_DECAY,
@@ -81,33 +92,38 @@ class AlphaZeroTrainer:
         # Replay buffer: stores (state, mcts_policy, outcome)
         self.replay_buffer = deque(maxlen=buffer_size)
 
-    def self_play_game(self, curriculum_options=None, epoch=0):
+    def self_play_game(self, curriculum_options=None, epoch=0,
+                       start_board=None, start_turn=None):
         """Play one game using MCTS, collecting training data.
 
+        Args:
+            curriculum_options: Passed to env.reset() for curriculum boards.
+            epoch:              Current training epoch.
+            start_board:        Optional (4,8,8) absolute board state from
+                                env.get_absolute_board_state() for diverse starts.
+            start_turn:         Color (BLUE/RED) to move first; required when
+                                start_board is provided.
+
         Returns:
-            game_data:  list of (state, mcts_policy, player_color) tuples.
-            winner:     the game winner (BLUE, RED, or "Tie").
-            num_moves:  number of full turns in the game.
-            game_stats: dict with per-game diagnostic signals:
-                avg_root_val_winner  — mean root value for moves played by the
-                                       winning side (should approach +1 as
-                                       training improves).
-                avg_root_val_loser   — mean root value for moves played by the
-                                       losing side (should approach -1).
-                avg_policy_entropy   — mean Shannon entropy of MCTS visit
-                                       distributions (nats).  Should decrease
-                                       as the network's priors sharpen.
-                move_sequence        — human-readable move history string.
+            game_data:        list of (state, mcts_policy, player_color, mcts_q) tuples.
+            abs_board_states: parallel list of absolute board states (for regret buffer).
+            winner:           the game winner (BLUE, RED, or "Tie").
+            num_moves:        number of full turns in the game.
+            game_stats:       dict with per-game diagnostic signals.
         """
         env = CheckersEnv()
-        env.reset(options=curriculum_options)
+        if start_board is not None and start_turn is not None:
+            env.load_absolute_board_state(start_board, start_turn)
+        else:
+            env.reset(options=curriculum_options)
 
-        game_data   = []   # (state, mcts_policy, player_at_this_step)
-        value_log   = []   # (player_color, root_value) per move
-        entropy_log = []   # float per move
-        move_count  = 0
-        done        = False
-        info        = {}
+        game_data        = []   # (state, mcts_policy, player_at_this_step, mcts_q)
+        abs_board_states = []   # absolute board state at each step
+        value_log        = []   # (player_color, root_value) per move
+        entropy_log      = []   # float per move
+        move_count       = 0
+        done             = False
+        info             = {}
 
         self.network.eval()
         self.mcts._root = None
@@ -131,7 +147,8 @@ class AlphaZeroTrainer:
             )
 
             # Record the state and current player BEFORE the action
-            state = env.get_board_state()
+            state      = env.get_board_state()
+            abs_state  = env.get_absolute_board_state()   # for regret buffer
             current_player = env.game.turn
 
             # Run MCTS with Dirichlet noise (self-play exploration)
@@ -139,6 +156,7 @@ class AlphaZeroTrainer:
                 env, temperature=temperature, add_noise=True,
                 no_progress_count=env.game._no_progress_count,
             )
+            mcts_q_value = self.mcts._root.q_value if self.mcts._root is not None else root_value
 
             # Per-step diagnostics
             eps = 1e-10
@@ -147,7 +165,8 @@ class AlphaZeroTrainer:
             entropy_log.append(entropy)
 
             # Store training data (outcome will be filled in after the game)
-            game_data.append((state, mcts_policy, current_player))
+            game_data.append((state, mcts_policy, current_player, mcts_q_value))
+            abs_board_states.append(abs_state)
 
             # Apply the action
             _, _, done, _, info = env.step(action)
@@ -173,25 +192,37 @@ class AlphaZeroTrainer:
             "move_sequence":       ", ".join(env.game.moves),
         }
 
-        return game_data, winner, move_count, game_stats
+        return game_data, abs_board_states, winner, move_count, game_stats
 
-    def add_game_to_buffer(self, game_data, winner):
+    def add_game_to_buffer(self, game_data, winner, regret_buffer=None):
         """Label game data with outcomes and add to the replay buffer.
 
-        Each position is labeled with:
-            +1  if the player at that position won
-            -1  if the player at that position lost
-             0  if the game was a tie
-        """
-        for state, mcts_policy, player_color in game_data:
-            if winner == "Tie" or winner == "None":
-                outcome = 0.0
-            elif winner == player_color:
-                outcome = 1.0
-            else:
-                outcome = -1.0
+        In scalar mode: stores scalar outcome (+1 win, -1 loss, 0 tie).
+        In WDL mode:    stores soft-Z blended WDL [P(win), P(draw), P(loss)].
 
-            self.replay_buffer.append((state, mcts_policy, outcome))
+        Args:
+            game_data:     list of (state, mcts_policy, player_color, mcts_q) tuples.
+            winner:        game winner (BLUE, RED, or "Tie").
+            regret_buffer: optional deque to populate with high-regret abs states.
+                           Must be paired with abs_board_states available externally.
+        """
+        for state, mcts_policy, player_color, mcts_qval in game_data:
+            if winner == "Tie" or winner == "None":
+                scalar_outcome = cfg.CONTEMPT_VALUE
+            elif winner == player_color:
+                scalar_outcome = 1.0
+            else:
+                scalar_outcome = -1.0
+
+            if self.use_wdl:
+                game_wdl   = _outcome_to_wdl(scalar_outcome)
+                mcts_wdl   = _outcome_to_wdl(float(mcts_qval))
+                target     = (cfg.SOFT_Z_ALPHA * game_wdl
+                              + (1.0 - cfg.SOFT_Z_ALPHA) * mcts_wdl)
+            else:
+                target = scalar_outcome
+
+            self.replay_buffer.append((state, mcts_policy, target))
 
     def train_network(self, new_positions=None):
         """Sample from replay buffer and update the network.
@@ -226,12 +257,27 @@ class AlphaZeroTrainer:
 
             states_t = torch.FloatTensor(np.array(states)).to(self.device)
             target_policies_t = torch.FloatTensor(np.array(target_policies)).to(self.device)
-            target_values_t = torch.FloatTensor(np.array(target_values)).unsqueeze(1).to(self.device)
 
-            logits, values = self.network(states_t)
-            log_probs = torch.log_softmax(logits, dim=1)
-            policy_loss = -(target_policies_t * log_probs).sum(dim=1).mean()
-            value_loss = nn.MSELoss()(values, target_values_t)
+            if self.use_wdl:
+                tv = torch.FloatTensor(np.array(target_values)).to(self.device)  # (B,3)
+                logits, wdl_pred, _ = self.network.forward_wdl(states_t)
+                log_probs = torch.log_softmax(logits, dim=1)
+                policy_loss = -(target_policies_t * log_probs).sum(dim=1).mean()
+                value_loss  = -(tv * torch.log(wdl_pred + 1e-8)).sum(dim=1).mean()
+                # Color-swap value augmentation (batch-time, value head only)
+                st_aug = torch.flip(states_t, dims=[2])
+                st_aug = torch.cat([st_aug[:, 2:4], st_aug[:, 0:2]], dim=1)
+                tv_aug = torch.stack([tv[:, 2], tv[:, 1], tv[:, 0]], dim=1)
+                _, wdl_aug, _ = self.network.forward_wdl(st_aug)
+                vl_aug = -(tv_aug * torch.log(wdl_aug + 1e-8)).sum(dim=1).mean()
+                value_loss = 0.5 * (value_loss + vl_aug)
+            else:
+                tv = torch.FloatTensor(np.array(target_values)).unsqueeze(1).to(self.device)
+                logits, values = self.network(states_t)
+                log_probs = torch.log_softmax(logits, dim=1)
+                policy_loss = -(target_policies_t * log_probs).sum(dim=1).mean()
+                value_loss  = nn.MSELoss()(values, tv)
+
             loss = policy_loss + cfg.VALUE_LOSS_WEIGHT * value_loss
 
             self.optimizer.zero_grad()
@@ -335,13 +381,19 @@ def get_curriculum_options(epoch):
     return {"num_blue": weak, "num_red": strong}
 
 
-def main():
-    """Main AlphaZero training loop."""
-    num_epochs = cfg.NUM_EPOCHS
+def main(use_wdl=False):
+    """Main AlphaZero training loop (sequential, single-process).
+
+    Args:
+        use_wdl: If True, use WDLAlphaZeroNetwork with soft-Z blending and
+                 diverse starting positions (--network-type wdl).
+    """
+    num_epochs      = cfg.NUM_EPOCHS
     games_per_epoch = cfg.GAMES_PER_EPOCH
-    batch_size = cfg.BATCH_SIZE
-    buffer_size = cfg.BUFFER_SIZE
-    save_interval = cfg.SAVE_INTERVAL
+    batch_size      = cfg.BATCH_SIZE
+    buffer_size     = cfg.BUFFER_SIZE
+    save_interval   = cfg.SAVE_INTERVAL
+    network_type_str = "wdl" if use_wdl else "scalar"
 
     base_dir     = os.path.dirname(os.path.abspath(__file__))
     model_dir    = os.path.join(base_dir, "alphazero_checkpoints")
@@ -354,7 +406,11 @@ def main():
     trainer = AlphaZeroTrainer(
         batch_size=batch_size,
         buffer_size=buffer_size,
+        use_wdl=use_wdl,
     )
+
+    # Regret buffer for diverse starting positions
+    regret_buffer = deque(maxlen=cfg.REGRET_BUFFER_SIZE)
 
     # Resume from checkpoint if available
     start_epoch = 0
@@ -362,6 +418,13 @@ def main():
     if checkpoints:
         latest = max(checkpoints, key=lambda f: int(f.split("_")[-1].split(".")[0]))
         checkpoint_path = os.path.join(model_dir, latest)
+        ckpt = torch.load(checkpoint_path, map_location=trainer.device, weights_only=False)
+        ckpt_network_type = ckpt.get("network_type", "scalar")
+        if ckpt_network_type != network_type_str:
+            raise RuntimeError(
+                f"Checkpoint network_type='{ckpt_network_type}' does not match "
+                f"--network-type '{network_type_str}'."
+            )
         start_epoch = trainer.load_checkpoint(checkpoint_path)
         print(f"Resumed from epoch {start_epoch}")
     else:
@@ -402,19 +465,46 @@ def main():
             csv.writer(f).writerow(detailed_headers)
 
         # --- Self-play phase ---
-        new_positions = 0
+        new_positions   = 0
+        regret_snapshot = list(regret_buffer)   # snapshot for consistent sampling
         for game_idx in range(games_per_epoch):
             curriculum_opts = get_curriculum_options(epoch)
             trainer.mcts.num_simulations = cfg.get_num_simulations(epoch)
+            trainer.mcts.c_puct = cfg.C_PUCT_WDL if use_wdl else cfg.C_PUCT
             temp_threshold, temp_late = cfg.get_temperature_config(epoch)
             trainer.temperature_threshold = temp_threshold
             trainer._temp_late = temp_late
 
-            game_data, winner, num_moves, game_stats = trainer.self_play_game(
-                curriculum_opts, epoch=epoch
+            # Inject regret-buffer start state for diverse starting positions
+            start_board = start_turn = None
+            if regret_snapshot and random.random() < cfg.REGRET_SAMPLE_PROB:
+                start_board, start_turn = random.choice(regret_snapshot)
+
+            game_data, abs_board_states, winner, num_moves, game_stats = (
+                trainer.self_play_game(
+                    curriculum_opts, epoch=epoch,
+                    start_board=start_board, start_turn=start_turn,
+                )
             )
             trainer.add_game_to_buffer(game_data, winner)
             new_positions += len(game_data)
+
+            # Populate regret buffer
+            if abs_board_states:
+                buf_items = list(trainer.replay_buffer)
+                recent = buf_items[-len(game_data):]   # the positions just added
+                for i, (state, mcts_policy, target) in enumerate(recent):
+                    if i >= len(game_data):
+                        break
+                    _, _, player_color, mcts_qval = game_data[i]
+                    if winner in ("Tie", "None"):
+                        scalar_outcome = cfg.CONTEMPT_VALUE
+                    elif winner == player_color:
+                        scalar_outcome = 1.0
+                    else:
+                        scalar_outcome = -1.0
+                    if abs(float(mcts_qval) - scalar_outcome) > cfg.HIGH_REGRET_THRESHOLD:
+                        regret_buffer.append((abs_board_states[i], player_color))
 
             total_moves += num_moves
             if winner == BLUE:
@@ -504,9 +594,10 @@ def main():
         if (epoch + 1) % save_interval == 0:
             path = os.path.join(model_dir, f"az_epoch_{epoch + 1}.pt")
             trainer.save_checkpoint(path, epoch + 1, {
-                "blue_wins": blue_wins,
-                "red_wins": red_wins,
-                "ties": ties,
+                "blue_wins":    blue_wins,
+                "red_wins":     red_wins,
+                "ties":         ties,
+                "network_type": network_type_str,   # for resume validation
             })
             print(f"  Checkpoint saved: {path}")
 
@@ -517,4 +608,18 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse as _argparse
+    _parser = _argparse.ArgumentParser(
+        description="Sequential AlphaZero training for checkers"
+    )
+    _parser.add_argument(
+        "--network-type", choices=["scalar", "wdl"], default="scalar",
+        dest="network_type",
+        help=(
+            "scalar (default): AlphaZeroNetwork with tanh value head and MSE loss. "
+            "wdl: WDLAlphaZeroNetwork with softmax WDL head, cross-entropy loss, "
+            "and soft-Z blending (new run required)."
+        ),
+    )
+    _args = _parser.parse_args()
+    main(use_wdl=(_args.network_type == "wdl"))

@@ -387,6 +387,86 @@ class CheckersEnv(gym.Env):
     # Observation
     # ------------------------------------------------------------------
 
+    def get_absolute_board_state(self):
+        """Return a 4-channel board state in absolute (non-perspective) coordinates.
+
+        Unlike get_board_state(), this method does NOT flip the board for Red
+        and always assigns channels by absolute color:
+
+          Channel 0: Blue regular pieces   (absolute rows 0–7)
+          Channel 1: Blue king pieces      (absolute rows 0–7)
+          Channel 2: Red regular pieces    (absolute rows 0–7)
+          Channel 3: Red king pieces       (absolute rows 0–7)
+
+        This representation is turn-independent and safe to store in the
+        regret buffer and reload as a starting position regardless of which
+        player is to move.
+        """
+        state = np.zeros((4, 8, 8), dtype=np.float32)
+        for row in range(ROWS):
+            for col in range(COLS):
+                piece = self.game.board.get_piece(row, col)
+                if piece != 0:
+                    if piece.color == BLUE:
+                        state[1 if piece.king else 0, row, col] = 1.0
+                    else:
+                        state[3 if piece.king else 2, row, col] = 1.0
+        return state
+
+    def load_absolute_board_state(self, state, turn, no_progress_count=0):
+        """Reconstruct the board from an absolute 4-channel state tensor.
+
+        Inverse of get_absolute_board_state().  Resets the full game state
+        and repopulates the board from the provided state array.
+
+        Args:
+            state:            (4, 8, 8) float32 array produced by
+                              get_absolute_board_state().
+            turn:             The color constant (BLUE or RED) indicating
+                              which player moves first from this position.
+            no_progress_count: Value to seed the no-progress draw counter
+                              (default 0 — conservative; games starting from
+                              mid-game states begin a fresh count).
+        """
+        from checkers_game.board import Board
+        from checkers_game.piece import Piece
+
+        # Full game reset (clears board_states, moves, repetition counter)
+        self.game = type(self.game)()
+
+        # Replace the board with an empty grid
+        self.game.board.board = [[0] * COLS for _ in range(ROWS)]
+
+        # Populate from channels
+        for row in range(ROWS):
+            for col in range(COLS):
+                if state[0, row, col]:                    # blue regular
+                    self.game.board.board[row][col] = Piece(row, col, BLUE)
+                elif state[1, row, col]:                  # blue king
+                    p = Piece(row, col, BLUE)
+                    p.make_king()
+                    self.game.board.board[row][col] = p
+                elif state[2, row, col]:                  # red regular
+                    self.game.board.board[row][col] = Piece(row, col, RED)
+                elif state[3, row, col]:                  # red king
+                    p = Piece(row, col, RED)
+                    p.make_king()
+                    self.game.board.board[row][col] = p
+
+        # Set turn and no-progress state
+        self.game.turn = turn
+        self.game._no_progress_count = no_progress_count
+
+        # Reset capture chain tracking
+        self._capture_in_progress = False
+        self._capturing_piece_sq = None
+        self._visited_squares = set()
+        self._current_move_chain = []
+        self._is_capture_turn = False
+        self._turn_start_board = None
+
+        self._update_action_mask()
+
     def get_board_state(self):
         """Return a normalized 4-channel board state from the current player's perspective.
 

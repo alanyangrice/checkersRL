@@ -21,6 +21,7 @@ import torch
 
 from checkers_game.constants import BLUE, RED, NUM_ACTIONS
 from RL_models.MCTS.AlphaZeroNetwork import AlphaZeroNetwork
+from RL_models.MCTS.WDLAlphaZeroNetwork import WDLAlphaZeroNetwork
 from RL_models.PPO_Model.PolicyNetwork import PPOPolicyNetwork
 from RL_models.PPO_Model.Agent import PPOAgent
 from RL_models.MCTS.evaluate import _play_eval_game, _make_mcts_agent
@@ -31,9 +32,10 @@ from RL_models.MCTS import training_config as cfg
 # Loaders
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _load_az(device, epoch=None):
+def _load_az(device, epoch=None, version="v2"):
     base = os.path.dirname(os.path.abspath(__file__))
-    az_dir = os.path.join(base, "MCTS", "alphazero_checkpoints")
+    dir_name = "alphazero_checkpoints_v1" if version == "v1" else "alphazero_checkpoints"
+    az_dir = os.path.join(base, "MCTS", dir_name)
 
     if epoch is not None:
         path = os.path.join(az_dir, f"az_epoch_{epoch}.pt")
@@ -50,12 +52,17 @@ def _load_az(device, epoch=None):
         sys.exit(1)
 
     ep = int(os.path.basename(path).split("_")[-1].split(".")[0])
-    print(f"Loading AlphaZero epoch {ep}: {path}")
     ckpt = torch.load(path, map_location=device, weights_only=False)
-    net = AlphaZeroNetwork((4, 8, 8), n_actions=NUM_ACTIONS).to(device)
+
+    # Auto-detect WDL vs scalar from value_fc2.weight shape
+    is_wdl = ckpt["model_state_dict"]["value_fc2.weight"].shape[0] == 3
+    NetworkClass = WDLAlphaZeroNetwork if is_wdl else AlphaZeroNetwork
+    arch = "WDL" if is_wdl else "scalar"
+    print(f"Loading AlphaZero {version} epoch {ep} ({arch}): {path}")
+    net = NetworkClass((4, 8, 8), n_actions=NUM_ACTIONS).to(device)
     net.load_state_dict(ckpt["model_state_dict"])
     net.eval()
-    return net, f"AlphaZero-ep{ep}"
+    return net, f"AlphaZero-{version}-ep{ep}({arch})"
 
 
 def _load_ppo(device, epoch=None, agent_type=None):
@@ -188,6 +195,11 @@ if __name__ == "__main__":
 
     parser.add_argument("--az-epoch", type=int, default=None, dest="az_epoch",
                         help="AlphaZero epoch to load (default: latest)")
+    parser.add_argument("--az-version", type=str, default="v2", dest="az_version",
+                        choices=["v1", "v2"],
+                        help="v2 (default) = alphazero_checkpoints/; "
+                             "v1 = alphazero_checkpoints_v1/. "
+                             "Architecture (scalar vs WDL) is auto-detected.")
     parser.add_argument("--ppo-epoch", type=int, default=None, dest="ppo_epoch",
                         help="PPO epoch to load (default: latest). Works for both "
                              "PPO-parallel and league agents "
@@ -208,7 +220,7 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    az_net,  az_label  = _load_az(device, epoch=args.az_epoch)
+    az_net,  az_label  = _load_az(device, epoch=args.az_epoch, version=args.az_version)
     ppo_net, ppo_label = _load_ppo(device, epoch=args.ppo_epoch, agent_type=args.agent)
 
     run_match(
