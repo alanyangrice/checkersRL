@@ -174,10 +174,22 @@ class WDLAlphaZeroNetwork(nn.Module):
         Identical signature to AlphaZeroNetwork.forward() so mcts_search.py,
         evaluate.py, and the AlphaZeroInferenceServer need zero changes.
 
-        value = P(win) - P(loss) ∈ [-1, 1], equivalent in range and meaning
-        to AlphaZeroNetwork's tanh output.
+        value = P(win) - P(loss) + CONTEMPT_VALUE * P(draw)
+              = P(win) - P(loss) - |CONTEMPT| * P(draw)
+
+        Adding the contempt term here penalises draw-heavy positions in MCTS
+        without touching the sign-flip backup logic.  Applying contempt at
+        the terminal-node level is wrong because the backup flip would reward
+        the player who triggered the draw; applying it here (non-terminal leaf
+        evaluation) propagates through the standard zero-sum backup correctly.
+        Training uses forward_wdl() exclusively and is unaffected.
+
+        Example: WDL = [0.33, 0.34, 0.33]  → value = 0 - 0.3×0.34 = -0.10
+                 WDL = [0.00, 0.70, 0.30]  → value = -0.30 - 0.3×0.70 = -0.51
+                 WDL = [0.80, 0.10, 0.10]  → value = 0.70 - 0.3×0.10 = +0.67
         """
-        logits, _, value = self._backbone(x)
+        logits, wdl, _ = self._backbone(x)
+        value = wdl[:, 0:1] - wdl[:, 2:3] + cfg.CONTEMPT_VALUE * wdl[:, 1:2]
         return logits, value
 
     def forward_wdl(self, x):

@@ -74,9 +74,9 @@ VALUE_HEAD_CHANNELS  = 32  # 1×1 conv → 32 channels (2048 features) before va
 #   smaller branching means 300 already reaches ~4–5 ply with selective
 #   deepening. 400 can be used if wall-clock is not a bottleneck.
 # Doubled at every phase so MCTS can see deeper into game trees:
-#   Phase 1 (3–6 pieces, ~35 move games): 150 sims ≈ 6-ply effective depth
-#   Phase 2 (4–9 pieces, ~55 move games): 400 sims ≈ 7-8-ply
-#   Phase 3 (12v12, 80+ move games):      800 sims ≈ 9-10-ply
+#   Phase 1 (3–6 pieces, ~35 move games): 75 sims ≈ 6-ply effective depth
+#   Phase 2 (4–9 pieces, ~55 move games): 200 sims ≈ 7-8-ply
+#   Phase 3 (12v12, 80+ move games):      400 sims ≈ 9-10-ply
 # Epoch time roughly doubles vs previous values at each phase.
 NUM_SIMULATIONS               = 400
 NUM_SIMULATIONS_CURRICULUM_P1 = 75
@@ -90,9 +90,12 @@ NUM_SIMULATIONS_CURRICULUM_P2 = 200
 # (< 1.0) and search collapses onto the top prior early; too high (> 3.0)
 # and random-looking play dominates early training.
 C_PUCT             = 1.5   # scalar (v1) mode
-C_PUCT_WDL         = 1.2   # WDL (v2) mode — P(win)-P(loss) spread is slightly
-                            # wider than tanh scalar, so a lower c_puct keeps the
-                            # exploration/exploitation balance comparable
+C_PUCT_WDL         = 1.5   # WDL (v2) mode — originally 1.2 under the assumption
+                            # that WDL values have wider spread than tanh scalar.
+                            # Empirically the opposite is true: the WDL model
+                            # outputs ±0.65 vs scalar's ±1.0.  Weaker Q signals
+                            # need MORE exploration pressure to avoid premature
+                            # exploitation, so raise to match the scalar setting.
 
 # ---------------------------------------------------------------------------
 # Network & optimiser
@@ -432,11 +435,15 @@ GATE_ENABLED       = True
 # greedy deployment policy (Willemsen, Baier & Kaisers 2022 —
 # "Value targets in off-policy AlphaZero: a new greedy backup",
 # Neural Computing and Applications 34(3):1801-1814).
-SOFT_Z_ALPHA       = 0.6   # 60% final game outcome, 40% MCTS Q-value signal
-                           # Reduced from 0.8: higher weight on near-zero Q-values
-                           # at opening positions dampens the Red-bias feedback loop
-                           # where Red-win outcomes were amplifying into strong
-                           # P(loss) targets for Blue's early-game positions.
+SOFT_Z_ALPHA       = 0.7   # 70% final game outcome, 30% MCTS Q-value signal
+                           # Was 0.6: the 40% Q-value weight was intended to dampen
+                           # the Red-bias feedback loop, but at 58% draws the
+                           # Q-values for equal/opening positions are near-zero
+                           # [0.33, 0.34, 0.33], which dilutes the -0.3 contempt
+                           # WDL target down to roughly -0.18.  At 0.7 the contempt
+                           # signal is 75% as strong as intended, and the forward()
+                           # contempt fix (draw penalty in MCTS) now directly
+                           # suppresses the Red-bias loop.
 
 # ---------------------------------------------------------------------------
 # RGSC-style regret buffer for diverse starting positions
