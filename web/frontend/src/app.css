@@ -1,0 +1,25 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+	* { box-sizing: border-box; }
+	/* Always show scrollbar so page width stays constant when content is short/tall */
+	html { overflow-y: scroll; }
+	body { font-family: 'Inter', system-ui, sans-serif; }
+}
+
+@layer components {
+	.btn {
+		@apply px-3 py-1.5 text-sm rounded border transition-colors focus:outline-none;
+	}
+	.btn-primary {
+		@apply btn bg-gray-900 border-gray-900 text-white hover:bg-gray-700;
+	}
+	.btn-secondary {
+		@apply btn bg-white border-gray-300 text-gray-700 hover:bg-gray-50;
+	}
+	.section-label {
+		@apply text-xs font-medium text-gray-500 uppercase tracking-wider;
+	}
+}
