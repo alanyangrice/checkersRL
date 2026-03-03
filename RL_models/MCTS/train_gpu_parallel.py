@@ -1190,12 +1190,20 @@ def train_alphazero_parallel(num_workers=None, use_wdl=False):
                         scalar_outcome = -1.0
 
                     if use_wdl:
-                        # Soft-Z blend: mix final game outcome WDL with MCTS Q-value WDL
-                        # (Willemsen et al. 2022 — reduces on-policy value target bias)
-                        game_wdl  = _outcome_to_wdl(scalar_outcome)
-                        mcts_wdl  = _outcome_to_wdl(float(mcts_qval))
-                        target    = (cfg.SOFT_Z_ALPHA * game_wdl
-                                     + (1.0 - cfg.SOFT_Z_ALPHA) * mcts_wdl)
+                        # WDL label uses the raw game outcome, NOT the contempt scalar.
+                        # Contempt is applied at inference time in WDLAlphaZeroNetwork
+                        # .forward() as:  value = P(win) - P(loss) + CONTEMPT * P(draw)
+                        # Using the contempt scalar here AND in forward() double-counts
+                        # it, producing val_equal ≈ -0.5 instead of the intended ≈ -0.25.
+                        #
+                        # Draws:  wdl_scalar = 0.0  → _outcome_to_wdl → [0, 1, 0]  (pure draw)
+                        # Wins:   wdl_scalar = +1.0 → _outcome_to_wdl → [1, 0, 0]
+                        # Losses: wdl_scalar = −1.0 → _outcome_to_wdl → [0, 0, 1]
+                        wdl_scalar = 0.0 if winner in ("Tie", "None") else scalar_outcome
+                        game_wdl   = _outcome_to_wdl(wdl_scalar)
+                        mcts_wdl   = _outcome_to_wdl(float(mcts_qval))
+                        target     = (cfg.SOFT_Z_ALPHA * game_wdl
+                                      + (1.0 - cfg.SOFT_Z_ALPHA) * mcts_wdl)
                     else:
                         target = scalar_outcome
 

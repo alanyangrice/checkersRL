@@ -27,6 +27,7 @@
 	let notification = '';
 	let notifTimeout: ReturnType<typeof setTimeout>;
 	let rulesOpen = false;
+	let showEndOverlay = false; // only true after all animations finish
 
 	// ── History ────────────────────────────────────────────────────────────
 	interface Snapshot {
@@ -42,10 +43,31 @@
 	// null = unset (will be treated as last); treat last snapshot as "present"
 	$: atLive = viewIndex === null || viewIndex === snapshots.length - 1;
 	$: effectiveIndex = viewIndex ?? snapshots.length - 1;
-	$: displayBoard    = snapshots.length > 0 ? snapshots[effectiveIndex].board      : boardState;
-	$: displayAiPath   = snapshots.length > 0 ? snapshots[effectiveIndex].aiMovePath : aiMovePath;
+
+	// Animation state (overrides snapshot display during AI multi-capture)
+	let animating = false;
+	let animBoard: number[][][] | null = null;
+	let animPath: number[] = [];
+
+	$: displayBoard    = animating ? (animBoard ?? boardState) : (snapshots.length > 0 ? snapshots[effectiveIndex].board      : boardState);
+	$: displayAiPath   = animating ? animPath                  : (snapshots.length > 0 ? snapshots[effectiveIndex].aiMovePath : aiMovePath);
 	$: displayValue    = snapshots.length > 0 ? snapshots[effectiveIndex].value      : aiValue;
 	$: displayNotation = snapshots.length > 0 ? snapshots[effectiveIndex].notation   : lastAiMove;
+
+	function sleep(ms: number) { return new Promise<void>(r => setTimeout(r, ms)); }
+
+	async function animateHops(hopBoards: Board[], fullPath: number[]) {
+		if (hopBoards.length <= 1) return; // single move, no animation needed
+		animating = true;
+		for (let i = 0; i < hopBoards.length; i++) {
+			animBoard = hopBoards[i];
+			animPath  = fullPath.slice(0, i + 2); // orange→from, green→current hop
+			if (i < hopBoards.length - 1) await sleep(500);
+		}
+		animating = false;
+		animBoard = null;
+		animPath  = [];
+	}
 
 	function stepBack()    {
 		const cur = viewIndex ?? snapshots.length - 1;
@@ -131,6 +153,7 @@
 		capturingSq = null;
 		preMoveBoard = null;
 		humanPath = [];
+		showEndOverlay = false;
 
 		try {
 			const resp = await api.newGame(selectedModelId, simulations, humanColor);
@@ -146,12 +169,17 @@
 			};
 
 			if (resp.ai_move) {
-				// Human plays Red → AI moved first
+				// Human plays Red → AI moved first; brief pause then animate
+				await sleep(500);
+				const fullPath = parsePath(resp.ai_move);
+				if (resp.ai_boards && resp.ai_boards.length > 1) {
+					await animateHops(resp.ai_boards as number[][][], fullPath);
+				}
 				snapshots = [
 					startSnap,
 					{
 						board:       resp.board,
-						aiMovePath:  parsePath(resp.ai_move),
+						aiMovePath:  fullPath,
 						notation:    `AI: ${resp.ai_move}`,
 						value:       resp.post_ai_value,
 						by:          'ai',
@@ -159,7 +187,6 @@
 				];
 				notify(`AI played ${resp.ai_move}`);
 			} else {
-				// Human plays Blue → just the start snapshot
 				snapshots = [startSnap];
 			}
 		} catch (e: unknown) {
@@ -191,12 +218,10 @@
 			applyLiveState(resp);
 
 			if (resp.turn_complete) {
-				// Build human move notation from the accumulated path
 				const sep = humanTurnIsCapture ? 'x' : '-';
 				const humanNotation = humanPath.join(sep);
 
-				// 1. Human snapshot — board AFTER human moved, BEFORE AI responded
-				//    Highlight the squares the human moved through, just like AI moves.
+				// 1. Human snapshot
 				if (resp.board_after_human) {
 					snapshots = [...snapshots, {
 						board:       resp.board_after_human,
@@ -207,25 +232,34 @@
 					}];
 				}
 
-				// 2. AI snapshot — board AFTER AI responded, eval of resulting position
+				// 2. Brief pause so the human's move is visible before the AI responds
+				await sleep(500);
+
+				// 3. Animate AI multi-capture hops, then push AI snapshot
 				if (resp.ai_move) {
+					const fullPath = parsePath(resp.ai_move);
+					if (resp.ai_boards && resp.ai_boards.length > 1) {
+						await animateHops(resp.ai_boards as number[][][], fullPath);
+					}
 					snapshots = [...snapshots, {
 						board:       resp.board,
-						aiMovePath:  parsePath(resp.ai_move),
+						aiMovePath:  fullPath,
 						notation:    `AI: ${resp.ai_move}`,
 						value:       resp.post_ai_value,
 						by:          'ai',
 					}];
 					lastAiMove = resp.ai_move;
-					aiMovePath = parsePath(resp.ai_move);
+					aiMovePath = fullPath;
 					notify(resp.done ? `AI played ${resp.ai_move} — ${winnerText(resp.winner)}` : `AI played ${resp.ai_move}`);
 				} else if (resp.done) {
 					notify(winnerText(resp.winner));
+					showEndOverlay = true;
 				}
 
 				preMoveBoard = null;
 				humanPath = [];
-				viewIndex = null; // always jump to live after a move
+				viewIndex = null;
+				if (resp.done) showEndOverlay = true;
 			}
 		} catch (e: unknown) {
 			error = e instanceof Error ? e.message : 'Move failed.';
@@ -275,12 +309,7 @@
 				disabled={thinking || done || !gameId || !atLive}
 				on:move={handleMove}
 			/>
-			{#if thinking}
-				<div class="absolute inset-0 bg-white/70 flex items-center justify-center rounded text-sm text-gray-500">
-					thinking…
-				</div>
-			{/if}
-			{#if done && winner && atLive}
+			{#if showEndOverlay && winner && atLive}
 				<div class="absolute inset-0 bg-white/85 flex flex-col items-center justify-center gap-3 rounded">
 					<p class="text-xl font-medium">{winnerText(winner)}</p>
 					<button class="btn-primary" on:click={startGame}>Play again</button>

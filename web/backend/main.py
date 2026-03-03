@@ -139,10 +139,12 @@ def _quick_eval(env: CheckersEnv, session: dict) -> float:
     return raw
 
 
-def _run_ai_turn(session: dict) -> tuple[Optional[str], float, bool, Optional[str]]:
+def _run_ai_turn(session: dict) -> tuple[Optional[str], float, bool, Optional[str], list]:
     """Execute the AI's complete turn (handles capture chains).
 
-    Returns (move_notation, root_value_from_ai_perspective, done, winner_str).
+    Returns (move_notation, root_value, done, winner_str, hop_boards).
+    hop_boards: list of board states after each hop (length == number of hops).
+                Single move → 1 entry. Double capture → 2 entries.
     """
     env: CheckersEnv = session["env"]
     mcts: MCTSSearch = session["mcts"]
@@ -150,19 +152,21 @@ def _run_ai_turn(session: dict) -> tuple[Optional[str], float, bool, Optional[st
     winner = None
     root_value = 0.0
     last_move = None
+    hop_boards: list = []
 
     while True:
         mask = env.get_action_mask()
         if mask.sum() == 0:
-            # AI has no legal moves — game over
             _, _, done, _, info = env.step(0)
             winner = _winner_str(info.get("winner"))
             break
 
-        mcts._root = None  # fresh tree each sub-step
+        mcts._root = None
         action, _, root_value = mcts.select_action(env, temperature=0.0)
         _, _, done, _, info = env.step(action)
         turn_complete = info.get("turn_complete", True)
+
+        hop_boards.append(_board_state(env))  # board after this individual hop
 
         if turn_complete or done:
             last_move = env.game.moves[-1] if env.game.moves else None
@@ -170,7 +174,7 @@ def _run_ai_turn(session: dict) -> tuple[Optional[str], float, bool, Optional[st
                 winner = _winner_str(info.get("winner"))
             break
 
-    return last_move, float(root_value), done, winner
+    return last_move, float(root_value), done, winner, hop_boards
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +200,7 @@ class BoardResponse(BaseModel):
     initial_board: Optional[list]      # [4][8][8] — starting position (new_game only)
     initial_value: Optional[float]     # eval of starting position (new_game only)
     post_ai_value: Optional[float]     # eval after AI moves (from AI's perspective)
+    ai_boards: Optional[list]          # board after each AI hop for animation
     turn: str                    # "blue" | "red"
     legal_moves: list            # [{from_sq, to_sq}]
     done: bool
@@ -264,8 +269,9 @@ def new_game(req: NewGameRequest):
     initial_value  = _quick_eval(env, games[game_id])
 
     # If human plays Red, AI (Blue) moves first
+    ai_hop_boards: list = []
     if human_color == RED:
-        ai_move, value, done, winner = _run_ai_turn(games[game_id])
+        ai_move, value, done, winner, ai_hop_boards = _run_ai_turn(games[game_id])
 
     post_ai_value = _quick_eval(env, games[game_id]) if ai_move else None
 
@@ -276,6 +282,7 @@ def new_game(req: NewGameRequest):
         initial_board=starting_board,
         initial_value=initial_value,
         post_ai_value=post_ai_value,
+        ai_boards=ai_hop_boards if ai_hop_boards else None,
         turn=_color_str(env.game.turn),
         legal_moves=_legal_moves(env),
         done=done,
@@ -321,6 +328,7 @@ def make_move(req: MoveRequest):
             initial_board=None,
             initial_value=None,
             post_ai_value=None,
+            ai_boards=None,
             turn=_color_str(env.game.turn),
             legal_moves=_legal_moves(env),
             done=False,
@@ -339,8 +347,9 @@ def make_move(req: MoveRequest):
     board_after_human = _board_state(env)
 
     # Human turn complete — run AI turn if game still going
+    ai_hop_boards: list = []
     if not done:
-        ai_move, value, done, winner = _run_ai_turn(session)
+        ai_move, value, done, winner, ai_hop_boards = _run_ai_turn(session)
 
     post_ai_value = _quick_eval(env, session) if ai_move and not done else None
 
@@ -351,6 +360,7 @@ def make_move(req: MoveRequest):
         initial_board=None,
         initial_value=None,
         post_ai_value=post_ai_value,
+        ai_boards=ai_hop_boards if ai_hop_boards else None,
         turn=_color_str(env.game.turn),
         legal_moves=[] if done else _legal_moves(env),
         done=done,

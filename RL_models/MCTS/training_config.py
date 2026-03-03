@@ -435,15 +435,15 @@ GATE_ENABLED       = True
 # greedy deployment policy (Willemsen, Baier & Kaisers 2022 —
 # "Value targets in off-policy AlphaZero: a new greedy backup",
 # Neural Computing and Applications 34(3):1801-1814).
-SOFT_Z_ALPHA       = 0.7   # 70% final game outcome, 30% MCTS Q-value signal
-                           # Was 0.6: the 40% Q-value weight was intended to dampen
-                           # the Red-bias feedback loop, but at 58% draws the
-                           # Q-values for equal/opening positions are near-zero
-                           # [0.33, 0.34, 0.33], which dilutes the -0.3 contempt
-                           # WDL target down to roughly -0.18.  At 0.7 the contempt
-                           # signal is 75% as strong as intended, and the forward()
-                           # contempt fix (draw penalty in MCTS) now directly
-                           # suppresses the Red-bias loop.
+SOFT_Z_ALPHA       = 1.0   # 100% final game outcome — soft-Z Q-value blending disabled.
+                           #
+                           # With SOFT_Z_ALPHA=1.0 the training target is purely the
+                           # game outcome: wins→[1,0,0], losses→[0,0,1], draws→[0,0.7,0.3]
+                           # (via _outcome_to_wdl applied to the contempt scalar).  The
+                           # Willemsen et al. on-policy bias correction is minor for
+                           # checkers at 400 sims + low late-game temperature, and is
+                           # outweighed by the contamination cost.  The contempt in
+                           # forward() handles draw-avoidance in MCTS independently.
 
 # ---------------------------------------------------------------------------
 # RGSC-style regret buffer for diverse starting positions

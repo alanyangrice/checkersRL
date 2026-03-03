@@ -27,6 +27,7 @@ export interface BoardResponse {
 	initial_board: Board | null;         // starting position (new_game only)
 	initial_value: number | null;        // eval of starting position
 	post_ai_value: number | null;        // eval after AI moves (AI perspective)
+	ai_boards: Board[] | null;           // board after each AI hop (for animation)
 	turn: Color;
 	legal_moves: Move[];
 	done: boolean;
