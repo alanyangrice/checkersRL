@@ -1,425 +1,356 @@
 <script lang="ts">
-	import { onMount, onDestroy } from 'svelte';
-	import { Chart, registerables } from 'chart.js';
-	import { api } from '$lib/api';
-	import type { AZStats, PPOStats, BenchmarkStats } from '$lib/types';
+	type Fig = { src: string; alt: string; caption: string; wide?: boolean };
 
-	Chart.register(...registerables);
-
-	// Chart canvas refs
-	let azLossCanvas: HTMLCanvasElement;
-	let azWinCanvas: HTMLCanvasElement;
-	let azEntropyCanvas: HTMLCanvasElement;
-	let azGateCanvas: HTMLCanvasElement;
-	let ppoRewardCanvas: HTMLCanvasElement;
-	let ppoWinCanvas: HTMLCanvasElement;
-	let leagueSeriesCanvas: HTMLCanvasElement;
-
-	let charts: Chart[] = [];
-	let loading = true;
-	let error = '';
-
-	const CHART_DEFAULTS = {
-		responsive: true,
-		maintainAspectRatio: false,
-		animation: { duration: 400 },
-		plugins: {
-			legend: {
-				labels: { color: '#374151', font: { size: 11 } },
-			},
-			tooltip: {
-				backgroundColor: '#fff',
-				borderColor: '#E5E7EB',
-				borderWidth: 1,
-				titleColor: '#111827',
-				bodyColor: '#6B7280',
-			},
+	// ── AlphaZero Scalar (135 epochs) ──────────────────────────────────────
+	// 1. Value polarization — immediate visual proof AZ is working
+	// 2. Eval benchmarks  — performance evidence (gating + value calibration)
+	// 3. Loss curves       — training stability
+	// 4+5. Game complexity + Entropy — paired self-play diagnostics
+	const azScalar: Fig[] = [
+		{
+			src: '/figures/az_scalar/AZ-S-2_value_polarization.png',
+			alt: 'AlphaZero Scalar value head polarization',
+			caption:
+				'Root value averaged over winning vs. losing positions. The widening gap shows the value head learning to distinguish outcomes. Both curves converge back after epoch 66 when training dynamics shift.',
+			wide: true,
 		},
-		scales: {
-			x: {
-				ticks: { color: '#9CA3AF', font: { size: 10 } },
-				grid: { color: '#F3F4F6' },
-			},
-			y: {
-				ticks: { color: '#9CA3AF', font: { size: 10 } },
-				grid: { color: '#F3F4F6' },
-			},
+		{
+			src: '/figures/az_scalar/AZ-S-5_eval_benchmarks.png',
+			alt: 'AlphaZero Scalar evaluation benchmarks',
+			caption:
+				'Left: Model gating — each checkpoint is evaluated against the previous accepted model (▲ accepted, ▼ rejected). Gate win rate falls naturally as the reference strengthens. Right: Value head calibration on categorised positions — ideal targets are clear-win ≈ +1, clear-loss ≈ −1, equal ≈ 0.',
+			wide: true,
 		},
-	} as const;
+		{
+			src: '/figures/az_scalar/AZ-S-1_loss_curves.png',
+			alt: 'AlphaZero Scalar training loss curves',
+			caption:
+				'Policy, value, and total loss over 135 self-play epochs. Dashed vertical lines mark Phase 2 (epoch 16) and Phase 3 (epoch 66) — MCTS search-depth increases that cause the visible jumps in game length and epoch time.',
+			wide: true,
+		},
+		{
+			src: '/figures/az_scalar/AZ-S-3_game_complexity.png',
+			alt: 'AlphaZero Scalar game complexity',
+			caption:
+				'Avg moves per game (left axis) and epoch wall-clock time (right axis). Both jump sharply at the Phase 2 and Phase 3 boundaries as MCTS runs deeper, producing longer strategic games.',
+		},
+		{
+			src: '/figures/az_scalar/AZ-S-4_policy_entropy.png',
+			alt: 'AlphaZero Scalar policy entropy decay',
+			caption:
+				'Policy entropy declines from ~1.31 → ~0.93 nats — the policy becomes more decisive without collapsing to near-determinism.',
+		},
+	];
 
-	function destroyCharts() {
-		charts.forEach((c) => c.destroy());
-		charts = [];
-	}
+	// ── AlphaZero WDL (ongoing) ────────────────────────────────────────────
+	// 1. Value polarization — immediate visual hook
+	// 2. Eval benchmarks  — performance evidence
+	// 3. Loss curves       — training stability
+	// 4+5. Game complexity + Entropy — paired diagnostics
+	const azWdl: Fig[] = [
+		{
+			src: '/figures/az_wdl/AZ-W-2_value_polarization.png',
+			alt: 'AlphaZero WDL value head polarization',
+			caption:
+				'Winner/loser polarization for the WDL model. The gap opens earlier and more cleanly than the scalar counterpart — consistent with the categorical WDL head providing a cleaner gradient signal.',
+			wide: true,
+		},
+		{
+			src: '/figures/az_wdl/AZ-W-5_eval_benchmarks.png',
+			alt: 'AlphaZero WDL evaluation benchmarks',
+			caption:
+				'Left: Model gating over 9 checkpoints (epochs 5–45). Right: Value calibration — the WDL model\'s clear-win and clear-loss estimates reach higher magnitude earlier, consistent with the categorical head providing a cleaner gradient signal than MSE regression.',
+			wide: true,
+		},
+		{
+			src: '/figures/az_wdl/AZ-W-1_loss_curves.png',
+			alt: 'AlphaZero WDL training loss curves',
+			caption:
+				'Policy, value, and total loss for the WDL model. Value loss decreases monotonically — unlike the scalar model which shows instability after epoch 66. Only Phase 2 (epoch 16) is marked; the run has not yet reached Phase 3.',
+			wide: true,
+		},
+		{
+			src: '/figures/az_wdl/AZ-W-3_game_complexity.png',
+			alt: 'AlphaZero WDL game complexity',
+			caption:
+				'Game length and epoch time mirror the scalar model\'s Phase 2 transition at epoch 16, confirming the same MCTS configuration was applied.',
+		},
+		{
+			src: '/figures/az_wdl/AZ-W-4_policy_entropy.png',
+			alt: 'AlphaZero WDL policy entropy',
+			caption:
+				'Policy entropy follows a similar decay trajectory to the scalar model through the first 49 epochs.',
+		},
+	];
 
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
-	function makeChart(canvas: HTMLCanvasElement, config: any): Chart {
-		const chart = new Chart(canvas, config);
-		charts.push(chart);
-		return chart;
-	}
+	// ── AlphaZero Comparison (epochs 1–49) ────────────────────────────────
+	// C-2 first: value polarization directly answers whether WDL learns values better
+	// C-1 second: loss curves as secondary stability evidence
+	const azComparison: Fig[] = [
+		{
+			src: '/figures/az_comparison/AZ-C-2_value_polarization_comparison.png',
+			alt: 'AlphaZero Scalar vs WDL value polarization comparison',
+			caption:
+				'Value polarization for both models. The shaded band between winner and loser curves shows the confidence gap — wider and earlier in training indicates faster value learning.',
+			wide: true,
+		},
+		{
+			src: '/figures/az_comparison/AZ-C-1_loss_comparison.png',
+			alt: 'AlphaZero Scalar vs WDL loss comparison',
+			caption:
+				'Policy and value loss for both architectures over their shared first 49 epochs. WDL value loss (solid) descends steadily; scalar (dashed) is noisier and higher throughout, reflecting the harder MSE regression target.',
+			wide: true,
+		},
+	];
 
-	onMount(async () => {
-		try {
-			const [az, ppo, bench] = await Promise.all([
-				api.statsAlphaZero(),
-				api.statsPPO(),
-				api.statsBenchmarks(),
-			]);
-			buildCharts(az, ppo, bench);
-		} catch (e: unknown) {
-			error = e instanceof Error ? e.message : 'Failed to load stats.';
-		} finally {
-			loading = false;
-		}
-	});
+	// ── PPO Curriculum + Self-Play (110 epochs) ───────────────────────────
+	// 1. vs-Random   — headline: "did the agent learn?" (wide)
+	// 2. vs-Reference — key narrative: passive co-evolution (wide)
+	// 3+4. Tie rate + Episode length — paired passive-play diagnostics
+	const ppoCurriculum: Fig[] = [
+		{
+			src: '/figures/ppo_curriculum/PPO-CS-1_vs_random_win_rate.png',
+			alt: 'PPO Curriculum win rate vs random',
+			caption:
+				'Win rate against a fixed random opponent. The curriculum switch at epoch 81 (mid-game → full 12v12 board) produces a +16.4 pp gain in 10 epochs — vs. 50 epochs needed from a cold start in prior runs.',
+			wide: true,
+		},
+		{
+			src: '/figures/ppo_curriculum/PPO-CS-2_vs_reference.png',
+			alt: 'PPO Curriculum vs reference agent',
+			caption:
+				'Win, loss, and tie rates against the self-play reference agent. Tie rate climbs to 37% by epoch 110 — agents learn to guarantee a draw via 3-fold repetition rather than risk losing.',
+			wide: true,
+		},
+		{
+			src: '/figures/ppo_curriculum/PPO-CS-4_tie_rate.png',
+			alt: 'PPO Curriculum tie rate',
+			caption:
+				'Tie rate in self-play. Crosses the 5% reference near epoch 85 and reaches 24% by epoch 100, motivating the γ 0.95 → 0.995 fix in the next run.',
+		},
+		{
+			src: '/figures/ppo_curriculum/PPO-CS-3_episode_length.png',
+			alt: 'PPO Curriculum episode length',
+			caption:
+				'Average episode length. The jump at epoch 81 reflects the switch to full-board positions. Continued growth past epoch 90 is a diagnostic: passive agents extend games to delay terminal outcomes.',
+		},
+	];
 
-	onDestroy(destroyCharts);
+	// ── PPO League Training (102 epochs) ──────────────────────────────────
+	const ppoLeague: Fig[] = [
+		{
+			src: '/figures/ppo_league/PPO-L-1_vs_random_win_rate.png',
+			alt: 'PPO League win rate vs random',
+			caption:
+				'Win rate against a random opponent for all three league agents. Aggressive leads early due to its 2× capture/king rewards. All three converge to near-100% by epoch 100.',
+			wide: true,
+		},
+		{
+			src: '/figures/ppo_league/PPO-L-2_heatmap_matrix.png',
+			alt: 'PPO League head-to-head win rate matrix',
+			caption:
+				'Head-to-head win rates at four training snapshots. Row = agent, column = opponent. Outlined diagonal cells show each agent\'s win rate vs. its own checkpoint from 10 epochs prior. At epoch 70, Aggressive dominates (64% vs. Tactical, 63% vs. Terminal) before entropy collapse reduces it to near-parity by epoch 100.',
+			wide: true,
+		},
+		{
+			src: '/figures/ppo_league/PPO-L-4_tie_rate.png',
+			alt: 'PPO League tie rate by agent type',
+			caption:
+				'Tie rate during self-play by agent type. Terminal\'s tie rate grows steadily — without shaping, tie avoidance is not incentivised. Aggressive\'s tie aversion reward keeps its rate near zero.',
+		},
+		{
+			src: '/figures/ppo_league/PPO-L-3_episode_length.png',
+			alt: 'PPO League episode length by agent type',
+			caption:
+				'Average episode length by agent. Terminal grows longest (123 moves at epoch 100) — without reward shaping, long-horizon reasoning is required to win. Aggressive stays shortest.',
+		},
+		{
+			src: '/figures/ppo_league/PPO-L-5_reward_trajectories.png',
+			alt: 'PPO League reward trajectories by agent type',
+			caption:
+				'Average epoch reward per agent (y-axes are not shared — reward functions are incomparable across agents). Vertical line at epoch 21 marks the curriculum switch from mid-game positions to full 12v12.',
+			wide: true,
+		},
+	];
 
-	function buildCharts(az: AZStats, ppo: PPOStats, bench: BenchmarkStats) {
-		// 1. AZ Loss curves
-		makeChart(azLossCanvas, {
-			type: 'line',
-			data: {
-				labels: az.epochs,
-				datasets: [
-					{
-						label: 'Policy Loss',
-						data: az.policy_loss,
-						borderColor: '#60A5FA',
-						backgroundColor: 'rgba(96,165,250,0.1)',
-						tension: 0.3,
-						pointRadius: 0,
-						borderWidth: 2,
-					},
-					{
-						label: 'Value Loss',
-						data: az.value_loss,
-						borderColor: '#F87171',
-						backgroundColor: 'rgba(248,113,113,0.1)',
-						tension: 0.3,
-						pointRadius: 0,
-						borderWidth: 2,
-					},
-				],
-			},
-			options: {
-				...CHART_DEFAULTS,
-				plugins: { ...CHART_DEFAULTS.plugins, legend: { ...CHART_DEFAULTS.plugins.legend } },
-				scales: {
-					...CHART_DEFAULTS.scales,
-					y: { ...CHART_DEFAULTS.scales.y, title: { display: true, text: 'Loss', color: '#6B7280' } },
-					x: { ...CHART_DEFAULTS.scales.x, title: { display: true, text: 'Epoch', color: '#6B7280' } },
-				},
-			},
-		});
-
-		// 2. AZ Win / tie / loss rates
-		makeChart(azWinCanvas, {
-			type: 'line',
-			data: {
-				labels: az.epochs,
-				datasets: [
-					{
-						label: 'Blue Win Rate',
-						data: az.win_rate,
-						borderColor: '#34D399',
-						tension: 0.3,
-						pointRadius: 0,
-						borderWidth: 2,
-						fill: false,
-					},
-					{
-						label: 'Tie Rate',
-						data: az.tie_rate,
-						borderColor: '#FBBF24',
-						tension: 0.3,
-						pointRadius: 0,
-						borderWidth: 2,
-						fill: false,
-					},
-					{
-						label: 'Red Win Rate',
-						data: az.loss_rate,
-						borderColor: '#F87171',
-						tension: 0.3,
-						pointRadius: 0,
-						borderWidth: 2,
-						fill: false,
-					},
-				],
-			},
-			options: {
-				...CHART_DEFAULTS,
-				scales: {
-					...CHART_DEFAULTS.scales,
-					y: {
-						...CHART_DEFAULTS.scales.y,
-						min: 0,
-						max: 1,
-						title: { display: true, text: 'Rate', color: '#6B7280' },
-					},
-					x: { ...CHART_DEFAULTS.scales.x, title: { display: true, text: 'Epoch', color: '#6B7280' } },
-				},
-			},
-		});
-
-		// 3. Policy entropy
-		makeChart(azEntropyCanvas, {
-			type: 'line',
-			data: {
-				labels: az.epochs,
-				datasets: [
-					{
-						label: 'Policy Entropy (nats)',
-						data: az.entropy,
-						borderColor: '#A78BFA',
-						backgroundColor: 'rgba(167,139,250,0.1)',
-						tension: 0.3,
-						pointRadius: 0,
-						borderWidth: 2,
-					},
-				],
-			},
-			options: {
-				...CHART_DEFAULTS,
-				scales: {
-					...CHART_DEFAULTS.scales,
-					y: { ...CHART_DEFAULTS.scales.y, title: { display: true, text: 'Entropy (nats)', color: '#6B7280' } },
-					x: { ...CHART_DEFAULTS.scales.x, title: { display: true, text: 'Epoch', color: '#6B7280' } },
-				},
-			},
-		});
-
-		// 4. AZ Gate win rate + accepted epochs
-		const gateAcceptedEpochs = bench.alphazero.epochs.filter(
-			(_, i) => bench.alphazero.gate_accepted[i]
-		);
-		makeChart(azGateCanvas, {
-			type: 'line',
-			data: {
-				labels: bench.alphazero.epochs,
-				datasets: [
-					{
-						label: 'Gate Win Rate vs Prev',
-						data: bench.alphazero.gate_win_rate,
-						borderColor: '#34D399',
-						tension: 0.2,
-						pointRadius: 3,
-						borderWidth: 2,
-						fill: false,
-					},
-					{
-						label: 'vs Random Score',
-						data: bench.alphazero.vs_random_score,
-						borderColor: '#60A5FA',
-						tension: 0.2,
-						pointRadius: 3,
-						borderWidth: 2,
-						fill: false,
-					},
-				],
-			},
-			options: {
-				...CHART_DEFAULTS,
-				scales: {
-					...CHART_DEFAULTS.scales,
-					y: {
-						...CHART_DEFAULTS.scales.y,
-						min: 0,
-						max: 1,
-						title: { display: true, text: 'Score / Rate', color: '#6B7280' },
-					},
-					x: { ...CHART_DEFAULTS.scales.x, title: { display: true, text: 'Eval Epoch', color: '#6B7280' } },
-				},
-				plugins: {
-					...CHART_DEFAULTS.plugins,
-					annotation: undefined,
-					tooltip: {
-						...CHART_DEFAULTS.plugins.tooltip,
-						callbacks: {
-							afterLabel: (ctx: { dataIndex: number }) => {
-								const ep = bench.alphazero.epochs[ctx.dataIndex];
-								return gateAcceptedEpochs.includes(ep) ? '✓ Model accepted' : '✗ Rejected';
-							},
-						},
-					},
-				},
-			},
-		});
-
-		// 5. PPO reward curve
-		makeChart(ppoRewardCanvas, {
-			type: 'line',
-			data: {
-				labels: ppo.epochs,
-				datasets: [
-					{
-						label: 'Avg Epoch Reward',
-						data: ppo.avg_reward,
-						borderColor: '#60A5FA',
-						backgroundColor: 'rgba(96,165,250,0.08)',
-						tension: 0.3,
-						pointRadius: 0,
-						borderWidth: 2,
-					},
-				],
-			},
-			options: {
-				...CHART_DEFAULTS,
-				scales: {
-					...CHART_DEFAULTS.scales,
-					y: { ...CHART_DEFAULTS.scales.y, title: { display: true, text: 'Reward', color: '#6B7280' } },
-					x: { ...CHART_DEFAULTS.scales.x, title: { display: true, text: 'Epoch', color: '#6B7280' } },
-				},
-			},
-		});
-
-		// 6. PPO win rates
-		makeChart(ppoWinCanvas, {
-			type: 'line',
-			data: {
-				labels: ppo.epochs,
-				datasets: [
-					{
-						label: 'Blue Win Rate',
-						data: ppo.win_rate_blue,
-						borderColor: '#60A5FA',
-						tension: 0.3,
-						pointRadius: 0,
-						borderWidth: 2,
-						fill: false,
-					},
-					{
-						label: 'Tie Rate',
-						data: ppo.tie_rate,
-						borderColor: '#FBBF24',
-						tension: 0.3,
-						pointRadius: 0,
-						borderWidth: 2,
-						fill: false,
-					},
-				],
-			},
-			options: {
-				...CHART_DEFAULTS,
-				scales: {
-					...CHART_DEFAULTS.scales,
-					y: { ...CHART_DEFAULTS.scales.y, min: 0, max: 1, title: { display: true, text: 'Rate', color: '#6B7280' } },
-					x: { ...CHART_DEFAULTS.scales.x, title: { display: true, text: 'Epoch', color: '#6B7280' } },
-				},
-			},
-		});
-
-		// 7. PPO League win rate series vs random
-		if (bench.ppo_league?.series) {
-			const s = bench.ppo_league.series;
-			makeChart(leagueSeriesCanvas, {
-				type: 'line',
-				data: {
-					labels: s.epochs,
-					datasets: [
-						{
-							label: 'Tactical vs Random',
-							data: s.tactical_vs_random,
-							borderColor: '#34D399',
-							tension: 0.2,
-							pointRadius: 2,
-							borderWidth: 2,
-							fill: false,
-						},
-						{
-							label: 'Terminal vs Random',
-							data: s.terminal_vs_random,
-							borderColor: '#60A5FA',
-							tension: 0.2,
-							pointRadius: 2,
-							borderWidth: 2,
-							fill: false,
-						},
-						{
-							label: 'Aggressive vs Random',
-							data: s.aggressive_vs_random,
-							borderColor: '#F87171',
-							tension: 0.2,
-							pointRadius: 2,
-							borderWidth: 2,
-							fill: false,
-						},
-					],
-				},
-				options: {
-					...CHART_DEFAULTS,
-					scales: {
-						...CHART_DEFAULTS.scales,
-						y: { ...CHART_DEFAULTS.scales.y, min: 0, max: 1, title: { display: true, text: 'Win Rate', color: '#6B7280' } },
-						x: { ...CHART_DEFAULTS.scales.x, title: { display: true, text: 'Epoch', color: '#6B7280' } },
-					},
-				},
-			});
-		}
-	}
+	// ── Summary ────────────────────────────────────────────────────────────
+	const summary: Fig = {
+		src: '/figures/summary/SUMMARY-1_ppo_comparison.png',
+		alt: 'PPO training comparison summary',
+		caption:
+			'Win rate vs. random across both PPO training regimes. Curriculum training (dashed) plateaus at ~86% and degrades by epoch 110 due to passive co-evolution. All three league agents (solid) reach near-100% and maintain it — reward diversity prevents the passive equilibrium from forming.',
+	};
 </script>
 
 <svelte:head>
 	<title>CheckersRL — Training Results</title>
 </svelte:head>
 
-{#if loading}
-	<p class="text-sm text-gray-400">Loading training data…</p>
-{:else if error}
-	<p class="text-sm text-red-600">{error}</p>
-{:else}
-	<div class="flex flex-col gap-10">
+<!-- Shared figure rendering helpers (inlined as reusable markup patterns) -->
 
-		<section class="flex flex-col gap-4">
-			<div>
-				<h2 class="text-lg font-medium text-gray-900">AlphaZero</h2>
-				<p class="text-sm text-gray-500 mt-1">Trained via self-play MCTS. 5 residual blocks × 256 channels, Win/Draw/Loss value head.</p>
-			</div>
-			<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-				<div class="border border-gray-200 rounded p-4">
-					<p class="text-sm text-gray-700 mb-3">Training loss</p>
-					<div class="h-48"><canvas bind:this={azLossCanvas} /></div>
-				</div>
-				<div class="border border-gray-200 rounded p-4">
-					<p class="text-sm text-gray-700 mb-3">Self-play win / tie / loss rates</p>
-					<div class="h-48"><canvas bind:this={azWinCanvas} /></div>
-				</div>
-				<div class="border border-gray-200 rounded p-4">
-					<p class="text-sm text-gray-700 mb-1">Policy entropy</p>
-					<p class="text-xs text-gray-400 mb-3">Higher = more exploratory self-play</p>
-					<div class="h-44"><canvas bind:this={azEntropyCanvas} /></div>
-				</div>
-				<div class="border border-gray-200 rounded p-4">
-					<p class="text-sm text-gray-700 mb-1">Evaluation benchmarks</p>
-					<p class="text-xs text-gray-400 mb-3">Gate win rate vs previous best; vs-random score</p>
-					<div class="h-44"><canvas bind:this={azGateCanvas} /></div>
-				</div>
-			</div>
-		</section>
+<div class="flex flex-col gap-14">
 
-		<section class="flex flex-col gap-4">
-			<div>
-				<h2 class="text-lg font-medium text-gray-900">PPO League</h2>
-				<p class="text-sm text-gray-500 mt-1">Three specialised agents (Tactical, Terminal, Aggressive) trained with PPO against a self-play opponent pool.</p>
-			</div>
-			<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-				<div class="border border-gray-200 rounded p-4">
-					<p class="text-sm text-gray-700 mb-3">Average epoch reward</p>
-					<div class="h-48"><canvas bind:this={ppoRewardCanvas} /></div>
-				</div>
-				<div class="border border-gray-200 rounded p-4">
-					<p class="text-sm text-gray-700 mb-3">Win rates over training</p>
-					<div class="h-48"><canvas bind:this={ppoWinCanvas} /></div>
-				</div>
-				<div class="border border-gray-200 rounded p-4 md:col-span-2">
-					<p class="text-sm text-gray-700 mb-1">League vs random opponent</p>
-					<p class="text-xs text-gray-400 mb-3">Strength progression across all three agents</p>
-					<div class="h-48"><canvas bind:this={leagueSeriesCanvas} /></div>
-				</div>
-			</div>
-		</section>
-
+	<!-- Header -->
+	<div>
+		<h1 class="text-2xl font-semibold text-gray-900">Training Results</h1>
+		<p class="text-sm text-gray-500 mt-1">
+			Publication-quality figures from four training runs. Click any figure to open it full-size.
+		</p>
 	</div>
-{/if}
+
+	<!-- ================================================================= -->
+	<!-- AlphaZero -->
+	<!-- ================================================================= -->
+	<section class="flex flex-col gap-8">
+
+		<div>
+			<h2 class="text-lg font-semibold text-gray-900">AlphaZero</h2>
+			<p class="text-sm text-gray-500 mt-1">
+				Self-play MCTS with a ResNet (5 residual blocks × 256 channels). Two value head
+				variants compared — scalar MSE regression and Win/Draw/Loss categorical output.
+			</p>
+		</div>
+
+		<!-- Scalar -->
+		<div class="flex flex-col gap-4">
+			<h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider border-b border-gray-100 pb-2">
+				Scalar Value Head · 135 epochs
+			</h3>
+			<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+				{#each azScalar as fig}
+					<figure class={fig.wide ? 'md:col-span-2' : ''}>
+						<a href={fig.src} target="_blank" rel="noopener noreferrer"
+							class="block rounded border border-gray-200 overflow-hidden hover:border-gray-400 transition-colors duration-150{fig.wide ? '' : ' aspect-[3/2]'}">
+							<img
+								src={fig.src} alt={fig.alt} loading="lazy"
+								class={fig.wide ? 'w-full h-auto' : 'w-full h-full object-contain bg-white'}
+							/>
+						</a>
+						<figcaption class="mt-2 text-xs text-gray-500 leading-relaxed">{fig.caption}</figcaption>
+					</figure>
+				{/each}
+			</div>
+		</div>
+
+		<!-- WDL -->
+		<div class="flex flex-col gap-4">
+			<h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider border-b border-gray-100 pb-2">
+				WDL Value Head · ongoing
+			</h3>
+			<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+				{#each azWdl as fig}
+					<figure class={fig.wide ? 'md:col-span-2' : ''}>
+						<a href={fig.src} target="_blank" rel="noopener noreferrer"
+							class="block rounded border border-gray-200 overflow-hidden hover:border-gray-400 transition-colors duration-150{fig.wide ? '' : ' aspect-[3/2]'}">
+							<img
+								src={fig.src} alt={fig.alt} loading="lazy"
+								class={fig.wide ? 'w-full h-auto' : 'w-full h-full object-contain bg-white'}
+							/>
+						</a>
+						<figcaption class="mt-2 text-xs text-gray-500 leading-relaxed">{fig.caption}</figcaption>
+					</figure>
+				{/each}
+			</div>
+		</div>
+
+		<!-- Comparison -->
+		<div class="flex flex-col gap-4">
+			<h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider border-b border-gray-100 pb-2">
+				Scalar vs. WDL Comparison · epochs 1–49
+			</h3>
+			<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+				{#each azComparison as fig}
+					<figure class={fig.wide ? 'md:col-span-2' : ''}>
+						<a href={fig.src} target="_blank" rel="noopener noreferrer"
+							class="block rounded border border-gray-200 overflow-hidden hover:border-gray-400 transition-colors duration-150{fig.wide ? '' : ' aspect-[3/2]'}">
+							<img
+								src={fig.src} alt={fig.alt} loading="lazy"
+								class={fig.wide ? 'w-full h-auto' : 'w-full h-full object-contain bg-white'}
+							/>
+						</a>
+						<figcaption class="mt-2 text-xs text-gray-500 leading-relaxed">{fig.caption}</figcaption>
+					</figure>
+				{/each}
+			</div>
+		</div>
+
+	</section>
+
+	<!-- ================================================================= -->
+	<!-- PPO -->
+	<!-- ================================================================= -->
+	<section class="flex flex-col gap-8">
+
+		<div>
+			<h2 class="text-lg font-semibold text-gray-900">PPO</h2>
+			<p class="text-sm text-gray-500 mt-1">
+				Proximal Policy Optimisation with parallel self-play and opponent pools.
+				Two training regimes: a curriculum with progressive board positions, and a
+				reward-diverse league of three specialised agents.
+			</p>
+		</div>
+
+		<!-- Curriculum -->
+		<div class="flex flex-col gap-4">
+			<h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider border-b border-gray-100 pb-2">
+				Curriculum + Self-Play · 110 epochs
+			</h3>
+			<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+				{#each ppoCurriculum as fig}
+					<figure class={fig.wide ? 'md:col-span-2' : ''}>
+						<a href={fig.src} target="_blank" rel="noopener noreferrer"
+							class="block rounded border border-gray-200 overflow-hidden hover:border-gray-400 transition-colors duration-150{fig.wide ? '' : ' aspect-[3/2]'}">
+							<img
+								src={fig.src} alt={fig.alt} loading="lazy"
+								class={fig.wide ? 'w-full h-auto' : 'w-full h-full object-contain bg-white'}
+							/>
+						</a>
+						<figcaption class="mt-2 text-xs text-gray-500 leading-relaxed">{fig.caption}</figcaption>
+					</figure>
+				{/each}
+			</div>
+		</div>
+
+		<!-- League -->
+		<div class="flex flex-col gap-4">
+			<h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider border-b border-gray-100 pb-2">
+				League Training · Tactical · Terminal · Aggressive · 102 epochs
+			</h3>
+			<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+				{#each ppoLeague as fig}
+					<figure class={fig.wide ? 'md:col-span-2' : ''}>
+						<a href={fig.src} target="_blank" rel="noopener noreferrer"
+							class="block rounded border border-gray-200 overflow-hidden hover:border-gray-400 transition-colors duration-150{fig.wide ? '' : ' aspect-[3/2]'}">
+							<img
+								src={fig.src} alt={fig.alt} loading="lazy"
+								class={fig.wide ? 'w-full h-auto' : 'w-full h-full object-contain bg-white'}
+							/>
+						</a>
+						<figcaption class="mt-2 text-xs text-gray-500 leading-relaxed">{fig.caption}</figcaption>
+					</figure>
+				{/each}
+			</div>
+		</div>
+
+	</section>
+
+	<!-- ================================================================= -->
+	<!-- Summary -->
+	<!-- ================================================================= -->
+	<section class="flex flex-col gap-4">
+		<div>
+			<h2 class="text-lg font-semibold text-gray-900">Summary</h2>
+			<p class="text-sm text-gray-500 mt-1">Cross-run comparison on the shared vs-random baseline.</p>
+		</div>
+		<div class="max-w-2xl">
+			<figure>
+				<a href={summary.src} target="_blank" rel="noopener noreferrer"
+					class="block rounded border border-gray-200 overflow-hidden hover:border-gray-400 transition-colors duration-150">
+					<img src={summary.src} alt={summary.alt} class="w-full h-auto" loading="lazy" />
+				</a>
+				<figcaption class="mt-2 text-xs text-gray-500 leading-relaxed">{summary.caption}</figcaption>
+			</figure>
+		</div>
+	</section>
+
+</div>
