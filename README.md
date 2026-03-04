@@ -1,16 +1,17 @@
 # Checkers RL
 
-A fully playable checkers game with a reinforcement learning agent trained via **Proximal Policy Optimization (PPO)** self-play. Play against a friend locally, challenge a trained AI opponent, or replay recorded training games.
+A fully playable checkers game with reinforcement learning agents trained via **Proximal Policy Optimization (PPO)** self-play and **AlphaZero-style Monte Carlo Tree Search (MCTS)**. Play against a friend locally, challenge a trained AI, or interact through the web interface.
 
 ## Features
 
-- **Interactive Checkers Game** — full implementation of standard American checkers rules with a Pygame GUI
+- **Interactive Checkers Game** — full American checkers rules with a Pygame GUI
 - **PPO RL Agent** — trained through self-play with GPU-accelerated parallel game simulation
-- **AlphaZero-style MCTS** — alternative training approach using Monte Carlo Tree Search
-- **GPU Training Server** — batched GPU inference server architecture for fast parallel training
-- **Benchmark System** — automated evaluation vs random and reference models every N epochs
+- **AlphaZero-style MCTS** — policy/value network guided tree search with scalar and WDL value heads
+- **Multi-Agent League** — reward-diverse league training to prevent co-evolution collapse
+- **GPU Training Server** — batched GPU inference server with zero-copy shared memory
+- **Web Interface** — FastAPI + SvelteKit app to play against 6 trained models in the browser
+- **Benchmark System** — automated evaluation vs. random and reference models each epoch
 - **Game Replay** — replay recorded training games move-by-move with a visual interface
-- **Play vs AI** — load any checkpoint and play against the agent interactively
 
 ## Technologies
 
@@ -21,77 +22,79 @@ A fully playable checkers game with a reinforcement learning agent trained via *
 | **PyTorch** | Neural network + GPU training |
 | **NumPy** | Board state encoding & array operations |
 | **Gymnasium** | RL environment interface |
+| **FastAPI / SvelteKit** | Web backend and frontend |
 | **multiprocessing** | Parallel game simulation across CPU workers |
 
 ## Project Structure
 
 ```
 checkersRL/
-├── requirements.txt
-├── checkers_game/                  # Core game implementation
-│   ├── main.py                     # Human vs human play entry point
-│   ├── game.py                     # Game logic, turn management, win/tie detection
-│   ├── board.py                    # Board state, move validation, captures
-│   ├── piece.py                    # Piece class (regular & king)
-│   ├── constants.py                # Colors, dimensions, board position mapping, action table
-│   └── MoveNode.py                 # Tree structure for multi-capture sequences
-│
-└── RL_models/                      # Reinforcement learning components
-    ├── checkers_env.py             # Gymnasium environment wrapper
-    ├── play_agent.py               # Play against a trained agent interactively
-    ├── replay_game.py              # Replay recorded training games visually
-    ├── PPO_Model/
-    │   ├── Agent.py                # PPO agent: GAE, action masking, augmentation
-    │   ├── PolicyNetwork.py        # AlphaZero-inspired ResNet policy/value network
-    │   ├── Memory.py               # Experience buffer (states, actions, rewards, masks)
-    │   ├── OpponentPool.py         # Past-checkpoint opponent pool
-    │   ├── training_config.py      # Centralized hyperparameter configuration
-    │   ├── train.py                # Sequential CPU self-play training
-    │   ├── train_parallel.py       # CPU-parallel self-play training
-    │   ├── train_gpu_parallel.py   # GPU-accelerated training with inference server
-    │   ├── train_league.py         # Multi-agent league play (reward-diverse agents, shared pool)
-    │   └── benchmark/
-    │       ├── benchmark_inference.py  # CPU vs GPU latency benchmarks
-    │       └── benchmark_train.py      # One-off epoch benchmark runner
-    └── MCTS/
-        ├── mcts_node.py            # MCTS tree node with PUCT scoring
-        ├── mcts_search.py          # MCTS search algorithm (select/expand/evaluate/backup)
-        └── alphazero_trainer.py    # AlphaZero training loop: MCTS self-play + supervised
+├── checkers_game/                  # Core game engine (board, rules, move validation)
+├── figures/                        # Training curve generation scripts
+├── RL_models/
+│   ├── checkers_env.py             # Gymnasium environment wrapper
+│   ├── numpy_checkers_env.py       # Fast NumPy env for MCTS simulations
+│   ├── play_agent.py               # Interactive play vs. trained agent
+│   ├── replay_game.py              # Visual replay of recorded games
+│   ├── az_vs_ppo.py                # Head-to-head evaluation: AlphaZero vs PPO
+│   ├── PPO_Model/
+│   │   ├── Agent.py                # PPO agent: GAE, DrAC augmentation, value clipping
+│   │   ├── PolicyNetwork.py        # ResNet policy/value network
+│   │   ├── Memory.py               # Experience buffer
+│   │   ├── OpponentPool.py         # Past-checkpoint pool with PFSP sampling
+│   │   ├── training_config.py      # Centralized hyperparameter configuration
+│   │   ├── train.py                # Sequential single-process training
+│   │   ├── train_parallel.py       # CPU-parallel training
+│   │   ├── train_gpu_parallel.py   # GPU inference server + CPU workers (recommended)
+│   │   ├── train_league.py         # Multi-agent league training
+│   │   └── benchmark/              # CPU vs. GPU latency and epoch benchmarks
+│   └── MCTS/
+│       ├── mcts_node.py            # MCTSNode: PUCT scoring, visit counts
+│       ├── mcts_search.py          # MCTS: select/expand/evaluate/backup loop
+│       ├── AlphaZeroNetwork.py     # Scalar value network (tanh, MSE loss)
+│       ├── WDLAlphaZeroNetwork.py  # WDL value network (softmax, cross-entropy)
+│       ├── alphazero_trainer.py    # AlphaZero training loop
+│       ├── train_gpu_parallel.py   # Parallel AlphaZero with GPU inference server
+│       ├── evaluate.py             # Gating eval, value calibration, correctness tests
+│       └── training_config.py      # AlphaZero hyperparameters and curriculum
+└── web/
+    ├── backend/                    # FastAPI server, model registry, game sessions
+    └── frontend/                   # SvelteKit board UI
 ```
 
 ## Game Rules
 
 Standard American checkers:
 
-- 8x8 board with 12 pieces per side (Blue and Red)
+- 8×8 board with 12 pieces per side (Blue and Red)
 - Pieces move diagonally forward; kings move in any diagonal direction
 - Captures are mandatory when available, including multi-jump chains
 - Pieces promote to kings upon reaching the opposite end of the board
 - Win by capturing all opponent pieces or leaving them with no legal moves
-- Tie after 250 moves or 5 repeated board states (5-fold repetition threshold)
+- Tie after 250 total moves, 5-fold board repetition, or 40 consecutive turns without a capture or promotion
 
 ## How It Works
 
 ### Neural Network Architecture
 
-An **AlphaZero-inspired residual CNN** (~3.6M parameters):
+An **AlphaZero-inspired ResNet** (~3.6M parameters) shared by both PPO and AlphaZero:
 
-- **Input**: 4-channel 8x8 board — (my regular, my kings, opponent regular, opponent kings). Board is flipped vertically for Red so the agent always sees pieces moving in the same direction.
-- **Backbone**: Initial 3x3 conv (4→256 channels) + 5 residual blocks (256 channels, BatchNorm, skip connections)
-- **Policy Head**: 1x1 conv (256→2) + flatten + linear → 170 action logits
-- **Value Head**: 1x1 conv (256→1) + flatten + 2-layer MLP → scalar value
-- **Action Space**: 170 fixed (from_square, to_square) single-step pairs — moves and capture landings — with invalid-action masking
+- **Input**: 4-channel 8×8 board — (my regular, my kings, opponent regular, opponent kings). Board is flipped vertically for Red so the agent always sees pieces moving forward.
+- **Backbone**: 3×3 conv (4→256 channels) + 5 residual blocks (BatchNorm, skip connections)
+- **Policy Head**: 1×1 conv → flatten → linear → 170 action logits, masked at −1e10 for illegal moves
+- **Value Head**: PPO uses an unbounded scalar (MSE vs. GAE returns). AlphaZero offers a **scalar** variant (tanh ∈ [−1,1], MSE vs. {−1,0,+1} outcomes) or a **WDL** variant — softmax over [P(win), P(draw), P(loss)] with cross-entropy loss, enabling material-scaled draw contempt at inference.
 
-### GPU Training Architecture (train_gpu_parallel.py)
+### AlphaZero MCTS
 
-- **Inference Server**: a thread in the main process batches forward-pass requests from CPU workers and runs them on GPU
-- **CPU Workers**: simulate games in parallel; send `(state, action_mask)` to the GPU server for agent moves; opponent inference runs CPU-local
-- **Dynamic Scheduling**: shared task queue — faster workers get more tasks automatically, eliminating straggler delays
-- **PPO Update**: runs on GPU in the main process after all games complete
+Each move runs N simulations: **Select** (PUCT, c=1.5) → **Expand** → **Evaluate** (network value, no random rollouts) → **Backup**. Dirichlet noise (α=1.2, ε=0.35) is added at the root during self-play for exploration. Simulation count scales with a training curriculum — 75 sims/move in endgame positions, 200 in mid-game, 400 at full 12v12. Temperature is T=1.0 for the first 20 moves then T=0.4. The tree is reused between moves, preserving visit counts. A **regret buffer** collects positions where `|MCTS Q − outcome| > 0.5`; 20% of games per epoch start from these to focus training on misevaluated positions. Every 5 epochs, a gating test (50 games, ≥55% score) accepts or rejects the new checkpoint.
 
-### Training Configuration (training_config.py)
+### GPU Training Architecture
 
-All hyperparameters are centralized:
+- **Inference Server**: a thread in the main process batches forward-pass requests from CPU workers onto GPU via zero-copy shared memory
+- **CPU Workers**: simulate games in parallel; opponent inference runs CPU-local; a dynamic task queue eliminates straggler delays
+- **PPO Update**: runs on GPU in the main process after all games complete each epoch
+
+### Training Configuration
 
 | Parameter | Value |
 |---|---|
@@ -101,9 +104,6 @@ All hyperparameters are centralized:
 | GAE lambda | 0.95 |
 | Mini-batch size | 2048 |
 | Games per epoch | 5000 |
-| Pool opponent prob | 20% (curriculum phase) / 50% (full 12v12) |
-| Pool epsilon | 15% |
-| Epsilon decay | 1.0 → 0.08 over 100 epochs |
 
 ### Reward Shaping (PPO mode)
 
@@ -112,30 +112,32 @@ All shaped rewards scaled by 0.5 so terminal outcomes dominate.
 | Signal | Reward |
 |---|---|
 | Win | +100 |
-| Loss | -100 |
-| King promotion | +7.5 (15 × 0.5) |
-| Capture | +5.0 (10 × 0.5) |
-| Capture penalty (opponent) | −2.5 retroactive (−5 × 0.5) |
-| Blockout win | +100 (winner adjustment) |
-| Blockout loss | −100 (loser adjustment) |
-| Tie | −200 base − up to −48 stall (scales with material advantage and total pieces remaining) |
+| Loss | −100 |
+| King promotion | +7.5 |
+| Capture | +5.0 |
+| Capture penalty (opponent) | −2.5 retroactive per captured piece |
+| Tie | −80 base − up to −48 stall (scales with material advantage and total pieces) |
 | Time penalty | −sqrt(moves)/10 per non-terminal move |
 
-### Multi-Agent League Play (train_league.py)
+### Multi-Agent League Play
 
 Standard self-play causes **co-evolution collapse** — both agents converge to a mutual draw equilibrium because they share the same objective and play styles. This is documented in large-scale RL systems; AlphaStar (Vinyals et al., 2019) and OpenAI Five (Berner et al., 2019) both solved it via population diversity.
 
-Our approach: **reward-diverse league training** with three agent types, each optimizing a different shaped reward function. Agents train sequentially in one script and share a unified opponent pool (`opponent_pool_league/`):
+Our approach: **reward-diverse league training** with three agent types sharing a unified opponent pool. When any agent samples a pool opponent, it draws from all three agents' checkpoints — guaranteeing cross-style exposure every epoch.
 
 | Agent type | Reward profile | Emergent play style |
 |---|---|---|
-| `tactical` | Balanced captures + king promotion + tie penalty −200 | Current well-rounded baseline |
-| `terminal` | Terminal only (win/loss/tie), no shaping | Long-horizon positional; doesn't care about material |
-| `aggressive` | 2× capture bonus, king promotion +25, tie penalty −500 | Piece-hungry, forces exchanges, hates draws |
+| `tactical` | Balanced captures + king promotion + tie penalty −200 | Well-rounded baseline |
+| `terminal` | Terminal only (win/loss/tie), no shaping | Long-horizon positional |
+| `aggressive` | 2× capture bonus, king promotion +25, tie penalty −500 | Piece-hungry, forces exchanges |
 
-When any agent samples a pool opponent, it randomly draws from **all three agents' checkpoints** — guaranteeing cross-style exposure every epoch. A passive draw-seeking policy that works against its own mirror image fails against the aggressive agent's forced exchanges.
+New agent types can be added by extending `LEAGUE_AGENTS` in `training_config.py`.
 
-New agent types can be added at any time by extending `LEAGUE_AGENTS` in `training_config.py`.
+### Web Interface
+
+- FastAPI backend (port 8000) serving 6 trained models: 2 AlphaZero variants (scalar, WDL) and 4 PPO variants (curriculum+self-play, and 3 league agents)
+- SvelteKit frontend with HTML canvas board, model selector, MCTS simulation count slider, and eval bar
+- Move responses include hop-by-hop board states for multi-capture chain animation
 
 ## Getting Started
 
@@ -171,12 +173,20 @@ python -m RL_models.PPO_Model.train_parallel
 # Sequential training (single process)
 python -m RL_models.PPO_Model.train
 
-# AlphaZero: MCTS self-play training
+# AlphaZero: scalar value head
 python -m RL_models.MCTS.alphazero_trainer
 
-# Multi-agent league play (reward-diverse, shared opponent pool)
+# AlphaZero: WDL value head
+python -m RL_models.MCTS.alphazero_trainer --network-type wdl
+
+# AlphaZero: GPU-accelerated parallel
+python -m RL_models.MCTS.train_gpu_parallel
+
+# Multi-agent league play
 python -m RL_models.PPO_Model.train_league
 ```
+
+All training scripts auto-resume from the latest checkpoint.
 
 ### Play Against the Agent
 
@@ -191,13 +201,17 @@ python -m RL_models.play_agent --epoch 50
 python -m RL_models.play_agent --mcts --simulations 100
 ```
 
+### AlphaZero vs PPO Head-to-Head
+
+```bash
+python -m RL_models.az_vs_ppo
+```
+
 ### Replay a Training Game
 
 ```bash
-# Replay game 5 from a training epoch CSV
 python -m RL_models.replay_game --file RL_models/PPO_Model/training_progress_detailed_parallel/detailed_games_epoch_50.zip --game 5
 
-# Replay a move string directly
 python -m RL_models.replay_game --moves "11-15, 24-20, 8-11, 28-24"
 ```
 
@@ -206,13 +220,20 @@ python -m RL_models.replay_game --moves "11-15, 24-20, 8-11, 28-24"
 ### Run Benchmarks
 
 ```bash
-# Profile CPU vs GPU inference latency
 python -m RL_models.PPO_Model.benchmark.benchmark_inference
-
-# Run benchmark for a specific epoch
 python -m RL_models.PPO_Model.benchmark.benchmark_train
 ```
- 
+
+### Start the Web Interface
+
+```bash
+# Backend
+uvicorn web.backend.main:app --host 0.0.0.0 --port 8000
+
+# Frontend (build once; served statically by the backend)
+cd web/frontend && npm run build
+```
+
 ## References
 
 1. **Schulman, J., Wolski, F., Dhariwal, P., Radford, A., & Klimov, O.** (2017). *Proximal Policy Optimization Algorithms.* arXiv:1707.06347. [[paper]](https://arxiv.org/abs/1707.06347) — Core training algorithm.
