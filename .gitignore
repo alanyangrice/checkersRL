@@ -4,8 +4,8 @@ RL_models/PPO_Model/PPO_saved_models*/
 RL_models/PPO_Model/opponent_pool*
 RL_models/PPO_Model/opponent_pool_league*
 
-RL_models/MCTS/alphazero_checkpoints/
-RL_models/MCTS/az_detailed_games*/
+RL_models/MCTS/alphazero_checkpoints*/
+RL_models/MCTS/az_detailed_games_parallel*/
 
 # Ignore Python cache
 __pycache__/
@@ -19,3 +19,10 @@ __pycache__/
 dist/
 build/
 .cursor/
+
+# Node / SvelteKit
+web/frontend/node_modules/
+web/frontend/.svelte-kit/
+web/frontend/build/
+web/frontend/.env
+web/frontend/.env.*

@@ -74,9 +74,9 @@ VALUE_HEAD_CHANNELS  = 32  # 1×1 conv → 32 channels (2048 features) before va
 #   smaller branching means 300 already reaches ~4–5 ply with selective
 #   deepening. 400 can be used if wall-clock is not a bottleneck.
 # Doubled at every phase so MCTS can see deeper into game trees:
-#   Phase 1 (3–6 pieces, ~35 move games): 150 sims ≈ 6-ply effective depth
-#   Phase 2 (4–9 pieces, ~55 move games): 400 sims ≈ 7-8-ply
-#   Phase 3 (12v12, 80+ move games):      800 sims ≈ 9-10-ply
+#   Phase 1 (3–6 pieces, ~35 move games): 75 sims ≈ 6-ply effective depth
+#   Phase 2 (4–9 pieces, ~55 move games): 200 sims ≈ 7-8-ply
+#   Phase 3 (12v12, 80+ move games):      400 sims ≈ 9-10-ply
 # Epoch time roughly doubles vs previous values at each phase.
 NUM_SIMULATIONS               = 400
 NUM_SIMULATIONS_CURRICULUM_P1 = 75
@@ -89,7 +89,13 @@ NUM_SIMULATIONS_CURRICULUM_P2 = 200
 # competes with Q values in [-1, 1] throughout training.  Too low
 # (< 1.0) and search collapses onto the top prior early; too high (> 3.0)
 # and random-looking play dominates early training.
-C_PUCT             = 1.5
+C_PUCT             = 1.5   # scalar (v1) mode
+C_PUCT_WDL         = 1.5   # WDL (v2) mode — originally 1.2 under the assumption
+                            # that WDL values have wider spread than tanh scalar.
+                            # Empirically the opposite is true: the WDL model
+                            # outputs ±0.65 vs scalar's ±1.0.  Weaker Q signals
+                            # need MORE exploration pressure to avoid premature
+                            # exploitation, so raise to match the scalar setting.
 
 # ---------------------------------------------------------------------------
 # Network & optimiser
@@ -163,9 +169,12 @@ BATCH_SIZE         = 256
 #           → steps = clip(20×1500/256, 50, 300) = clip(117, 50, 300) = 117
 #           Phase full, 100 games × ~70 moves = 7 000 new positions
 #           → steps = clip(20×7000/256, 50, 300) = clip(547, 50, 300) = 300
-REPLAY_RATIO       = 20
+REPLAY_RATIO       = 35    # was 20; more gradient passes per Phase 1/2 position
+                           # Phase 3 clips at TRAIN_STEPS_MAX regardless
 TRAIN_STEPS_MIN    = 50
-TRAIN_STEPS_MAX    = 300
+TRAIN_STEPS_MAX    = 500   # was 300; Phase 3 (~13,500 new pos/epoch) clipped the
+                           # old max even at REPLAY_RATIO=20; raising to 500 gives
+                           # ~9.5 effective passes per new position in Phase 3
 
 
 def get_train_steps(new_positions):
@@ -409,6 +418,43 @@ def get_num_workers_parallel():
 # ---------------------------------------------------------------------------
 EVAL_INTERVAL      = 5     # Run evaluation every N epochs
 EVAL_GAMES_GATE    = 50    # Gating games (25 as BLUE, 25 as RED)
-EVAL_SIMULATIONS   = 100   # MCTS sims per move during eval
+EVAL_SIMULATIONS   = 400   # MCTS sims per move during eval (matches Phase 3 training
+                           # sims so the gate measures the same agent being trained;
+                           # v1 used 100 which measured a qualitatively weaker proxy)
 GATE_THRESHOLD     = 0.55  # score = (wins + 0.5*ties) / games
 GATE_ENABLED       = True
+
+# ---------------------------------------------------------------------------
+# Soft-Z value blending (active when --network-type wdl)
+# ---------------------------------------------------------------------------
+# Blends the final game outcome WDL label (weight = SOFT_Z_ALPHA) with the
+# per-position MCTS root Q-value converted to a WDL distribution
+# (weight = 1 - SOFT_Z_ALPHA).  Reduces the on-policy bias of the standard
+# AlphaZero value target: the standard target trains the value head on outcomes
+# reached under an exploratory (Dirichlet-noised) policy rather than the
+# greedy deployment policy (Willemsen, Baier & Kaisers 2022 —
+# "Value targets in off-policy AlphaZero: a new greedy backup",
+# Neural Computing and Applications 34(3):1801-1814).
+SOFT_Z_ALPHA       = 1.0   # 100% final game outcome — soft-Z Q-value blending disabled.
+                           #
+                           # With SOFT_Z_ALPHA=1.0 the training target is purely the
+                           # game outcome: wins→[1,0,0], losses→[0,0,1], draws→[0,0.7,0.3]
+                           # (via _outcome_to_wdl applied to the contempt scalar).  The
+                           # Willemsen et al. on-policy bias correction is minor for
+                           # checkers at 400 sims + low late-game temperature, and is
+                           # outweighed by the contamination cost.  The contempt in
+                           # forward() handles draw-avoidance in MCTS independently.
+
+# ---------------------------------------------------------------------------
+# RGSC-style regret buffer for diverse starting positions
+# ---------------------------------------------------------------------------
+# A fraction of self-play games per epoch start from high-regret board states
+# (positions where |mcts_qval - outcome| was large) rather than the standard
+# initial board.  This targets training signal at positions the network
+# currently misevaluates, improving value generalisation and sample efficiency.
+# References:
+#   Trudeau & Bowling (2023) "Go-Exploit" arXiv:2302.12359 (+77 Elo over AZ)
+#   Tsai et al. (2026) "RGSC" arXiv:2602.20809 (+89 Elo over Go-Exploit)
+REGRET_SAMPLE_PROB    = 0.20   # fraction of games using a regret-buffer start
+REGRET_BUFFER_SIZE    = 5000   # max absolute board states retained across epochs
+HIGH_REGRET_THRESHOLD = 0.5    # min |mcts_qval - outcome| to qualify a position

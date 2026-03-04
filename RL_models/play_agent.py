@@ -14,37 +14,80 @@ from checkers_game.constants import WIDTH, HEIGHT, BLUE, RED, NUM_ACTIONS
 from RL_models.PPO_Model.Agent import PPOAgent
 from RL_models.PPO_Model.PolicyNetwork import PPOPolicyNetwork
 from RL_models.MCTS.AlphaZeroNetwork import AlphaZeroNetwork
+from RL_models.MCTS.WDLAlphaZeroNetwork import WDLAlphaZeroNetwork
 from RL_models.MCTS.mcts_search import MCTSSearch
 from RL_models.checkers_env import CheckersEnv
 
 
-def load_network(device, epoch=None, az_epoch=None, agent_type=None):
+def _load_az_checkpoint(path, device):
+    """Load an AlphaZero checkpoint, auto-detecting WDL vs scalar architecture.
+
+    Detects by inspecting value_fc2.weight shape:
+        shape[0] == 3  → WDLAlphaZeroNetwork
+        shape[0] == 1  → AlphaZeroNetwork (scalar)
+
+    Returns (network, is_wdl).
+    """
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
+    sd = checkpoint["model_state_dict"]
+    is_wdl = sd["value_fc2.weight"].shape[0] == 3
+    NetworkClass = WDLAlphaZeroNetwork if is_wdl else AlphaZeroNetwork
+    network = NetworkClass((4, 8, 8), n_actions=NUM_ACTIONS).to(device)
+    network.load_state_dict(sd)
+    return network, is_wdl
+
+
+def load_network(device, epoch=None, az_epoch=None, az_version="v2", agent_type=None):
     """Load a model checkpoint.
 
     Args:
-        epoch:      Load a specific PPO-parallel epoch. If omitted, uses priority order.
-        az_epoch:   Load a specific AlphaZero epoch (e.g. 100). Returns AlphaZeroNetwork.
-        agent_type: One of "tactical", "terminal", "aggressive" to load a league agent.
+        epoch:      Load a specific PPO epoch (works with or without agent_type).
+        az_epoch:   Load a specific AlphaZero epoch. If None, loads the latest.
+        az_version: "v2" (default) uses alphazero_checkpoints/;
+                    "v1" uses alphazero_checkpoints_v1/.
+        agent_type: One of "tactical", "terminal", "aggressive" for a league agent.
 
-    Returns (network, mode_name).
+    Returns (network, mode_name, is_wdl).
+        is_wdl: True if the network is WDLAlphaZeroNetwork (v2 WDL training run).
     """
     base_dir = os.path.dirname(os.path.abspath(__file__))
     input_shape = (4, 8, 8)
 
-    # AlphaZero epoch explicitly requested
-    if az_epoch is not None:
-        az_dir = os.path.join(base_dir, "MCTS", "alphazero_checkpoints")
-        model_path = os.path.join(az_dir, f"az_epoch_{az_epoch}.pt")
-        if not os.path.exists(model_path):
-            print(f"ERROR: No AlphaZero checkpoint found at {model_path}")
-            sys.exit(1)
-        print(f"Loading AlphaZero epoch {az_epoch}: {model_path}")
-        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
-        network = AlphaZeroNetwork(input_shape, n_actions=NUM_ACTIONS).to(device)
-        network.load_state_dict(checkpoint["model_state_dict"])
-        return network, f"AlphaZero (epoch {az_epoch})"
+    az_dir_name = "alphazero_checkpoints_v1" if az_version == "v1" else "alphazero_checkpoints"
 
-    # League agent requested — load from the league-specific directory
+    # AlphaZero requested (explicit epoch or auto-latest for AZ)
+    if az_epoch is not None or (agent_type is None and epoch is None):
+        az_dir = os.path.join(base_dir, "MCTS", az_dir_name)
+
+        if az_epoch is not None:
+            model_path = os.path.join(az_dir, f"az_epoch_{az_epoch}.pt")
+            if not os.path.exists(model_path):
+                print(f"ERROR: No AlphaZero checkpoint found at {model_path}")
+                sys.exit(1)
+            ep_num = az_epoch
+        else:
+            if not os.path.exists(az_dir):
+                az_dir = None
+            else:
+                ckpts = [f for f in os.listdir(az_dir) if f.startswith("az_epoch_") and f.endswith(".pt")]
+                if ckpts:
+                    latest = max(ckpts, key=lambda f: int(f.split("_")[-1].split(".")[0]))
+                    model_path = os.path.join(az_dir, latest)
+                    ep_num = int(latest.split("_")[-1].split(".")[0])
+                else:
+                    az_dir = None
+
+        if az_dir is not None:
+            print(f"Loading AlphaZero {az_version} epoch {ep_num}: {model_path}")
+            network, is_wdl = _load_az_checkpoint(model_path, device)
+            arch = "WDL" if is_wdl else "scalar"
+            return network, f"AlphaZero-{az_version} ({arch}, epoch {ep_num})", is_wdl
+
+        # Fall through to PPO if no AZ checkpoints found
+        if az_epoch is not None:
+            sys.exit(1)  # explicit epoch requested but not found — already errored above
+
+    # League agent
     if agent_type is not None:
         league_dir = os.path.join(base_dir, "PPO_Model", f"PPO_saved_models_{agent_type}")
         if not os.path.exists(league_dir):
@@ -72,9 +115,9 @@ def load_network(device, epoch=None, az_epoch=None, agent_type=None):
         checkpoint = torch.load(model_path, map_location=device, weights_only=False)
         network = PPOPolicyNetwork(input_shape, NUM_ACTIONS).to(device)
         network.load_state_dict(checkpoint["model_state_dict"])
-        return network, mode_name
+        return network, mode_name, False
 
-    # If a specific PPO epoch was requested
+    # Specific PPO-parallel epoch
     if epoch is not None:
         model_path = os.path.join(
             base_dir, "PPO_Model", "PPO_saved_models_parallel", f"agent_epoch_{epoch}.pt"
@@ -86,22 +129,9 @@ def load_network(device, epoch=None, az_epoch=None, agent_type=None):
         checkpoint = torch.load(model_path, map_location=device, weights_only=False)
         network = PPOPolicyNetwork(input_shape, NUM_ACTIONS).to(device)
         network.load_state_dict(checkpoint["model_state_dict"])
-        return network, f"PPO-parallel (epoch {epoch})"
+        return network, f"PPO-parallel (epoch {epoch})", False
 
-    # Priority order: AlphaZero first, then PPO variants
-    az_dir = os.path.join(base_dir, "MCTS", "alphazero_checkpoints")
-    if os.path.exists(az_dir):
-        az_checkpoints = [f for f in os.listdir(az_dir) if f.startswith("az_epoch_") and f.endswith(".pt")]
-        if az_checkpoints:
-            latest = max(az_checkpoints, key=lambda f: int(f.split("_")[-1].split(".")[0]))
-            model_path = os.path.join(az_dir, latest)
-            ep_num = latest.split("_")[-1].split(".")[0]
-            print(f"Loading AlphaZero model (epoch {ep_num}): {model_path}")
-            checkpoint = torch.load(model_path, map_location=device, weights_only=False)
-            network = AlphaZeroNetwork(input_shape, n_actions=NUM_ACTIONS).to(device)
-            network.load_state_dict(checkpoint["model_state_dict"])
-            return network, f"AlphaZero (epoch {ep_num})"
-
+    # Fallback PPO
     ppo_dirs = [
         (os.path.join(base_dir, "PPO_Model", "PPO_saved_models_parallel"), "agent_epoch_", "PPO-parallel"),
         (os.path.join(base_dir, "PPO_Model", "PPO_saved_models"), "agent_epoch_", "PPO"),
@@ -116,11 +146,11 @@ def load_network(device, epoch=None, az_epoch=None, agent_type=None):
                 checkpoint = torch.load(model_path, map_location=device, weights_only=False)
                 network = PPOPolicyNetwork(input_shape, NUM_ACTIONS).to(device)
                 network.load_state_dict(checkpoint["model_state_dict"])
-                return network, mode_name
+                return network, mode_name, False
 
     print("No model checkpoints found. The AI will play randomly.")
     network = PPOPolicyNetwork(input_shape, NUM_ACTIONS).to(device)
-    return network, "random"
+    return network, "random", False
 
 
 def compute_turn_reward(env, old_board):
@@ -213,13 +243,50 @@ def save_game_csv(env, winner, player_color, ai_color, mode_name,
     print(f"\nGame saved to {csv_path}")
 
 
-def play_agent(use_mcts=False, num_simulations=100, epoch=None, az_epoch=None, agent_type=None):
+def _eval_position(network, env, device, is_wdl, current_color):
+    """Run a single network forward pass and return display strings.
+
+    For WDL networks returns (val_str, wdl_blue_str, wdl_red_str).
+    For scalar networks returns (val_str, None, None).
+
+    The WDL output is always from the *current player's* perspective:
+        wdl[0] = P(win for current player)
+        wdl[1] = P(draw)
+        wdl[2] = P(loss for current player)
+    The opponent's probabilities are obtained by swapping W and L.
+    """
+    state_t = torch.FloatTensor(env.get_board_state()).unsqueeze(0).to(device)
+    with torch.no_grad():
+        if is_wdl:
+            _, wdl_t, v_t = network.forward_wdl(state_t)
+            val = v_t.item()
+            w, d, l = wdl_t[0].tolist()          # current player perspective
+            ow, od, ol = l, d, w                  # opponent perspective
+            if current_color == BLUE:
+                blue_w, blue_d, blue_l = w, d, l
+                red_w,  red_d,  red_l  = ow, od, ol
+            else:
+                red_w,  red_d,  red_l  = w, d, l
+                blue_w, blue_d, blue_l = ow, od, ol
+            val_str      = f"  val: {val:+.3f}"
+            wdl_blue_str = f"B[W{blue_w*100:.0f}% D{blue_d*100:.0f}% L{blue_l*100:.0f}%]"
+            wdl_red_str  = f"R[W{red_w*100:.0f}% D{red_d*100:.0f}% L{red_l*100:.0f}%]"
+            return val_str, wdl_blue_str, wdl_red_str
+        else:
+            _, v_t = network(state_t)
+            return f"  val: {v_t.item():+.3f}", None, None
+
+
+def play_agent(use_mcts=False, num_simulations=100, epoch=None, az_epoch=None,
+               az_version="v2", agent_type=None):
     pygame.init()
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
     pygame.display.set_caption("Checkers Game - Play Against AI")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    network, mode_name = load_network(device, epoch=epoch, az_epoch=az_epoch, agent_type=agent_type)
+    network, mode_name, is_wdl = load_network(
+        device, epoch=epoch, az_epoch=az_epoch, az_version=az_version, agent_type=agent_type
+    )
     network.eval()
 
     # Set up the AI action selector
@@ -264,12 +331,11 @@ def play_agent(use_mcts=False, num_simulations=100, epoch=None, az_epoch=None, a
             # ── Player's turn ──────────────────────────────────────────
             # Pre-move value estimate (from the player's perspective)
             if use_mcts:
-                state_t = torch.FloatTensor(env.get_board_state()).unsqueeze(0).to(device)
-                with torch.no_grad():
-                    _, _v = mcts.network(state_t)
-                player_preturn_val = _v.item()
+                p_val_str, p_wdl_blue, p_wdl_red = _eval_position(
+                    mcts.network, env, device, is_wdl, current_color
+                )
             else:
-                player_preturn_val = None
+                p_val_str, p_wdl_blue, p_wdl_red = None, None, None
 
             old_board = copy.deepcopy(env.game.board)
             turn_complete = env.game.player_action(screen)
@@ -301,8 +367,9 @@ def play_agent(use_mcts=False, num_simulations=100, epoch=None, az_epoch=None, a
 
                 label = "BLUE" if current_color == BLUE else "RED"
                 move_str = env.game.moves[-1] if env.game.moves else "?"
-                val_str = f"  val: {player_preturn_val:+.3f}" if player_preturn_val is not None else ""
-                print(f"  Player ({label}) [{move_str}]  reward: {reward:+.2f}{val_str}  "
+                val_str  = p_val_str if p_val_str is not None else ""
+                wdl_str  = f"  {p_wdl_blue} {p_wdl_red}" if p_wdl_blue is not None else ""
+                print(f"  Player ({label}) [{move_str}]  reward: {reward:+.2f}{val_str}{wdl_str}  "
                       f"| Blue: {sum(blue_rewards):+.2f}  Red: {sum(red_rewards):+.2f}")
 
                 # Capture penalty: player captured → AI's last move gets penalised
@@ -370,10 +437,13 @@ def play_agent(use_mcts=False, num_simulations=100, epoch=None, az_epoch=None, a
                 # in human-vs-AI mode (both across human moves and within
                 # multi-step capture chains).
                 mcts._root = None
-                action, _, root_value = mcts.select_action(env, temperature=0.1)
+                ai_val_str, ai_wdl_blue, ai_wdl_red = _eval_position(
+                    mcts.network, env, device, is_wdl, current_color
+                )
+                action, _, _ = mcts.select_action(env, temperature=0.1)
             else:
+                ai_val_str, ai_wdl_blue, ai_wdl_red = None, None, None
                 action, _, _ = agent.select_action(state, action_mask)
-                root_value = None
 
             next_state, reward, done, _, info = env.step(action)
             ai_turn_reward_acc += reward
@@ -391,8 +461,9 @@ def play_agent(use_mcts=False, num_simulations=100, epoch=None, az_epoch=None, a
 
                 label = "BLUE" if current_color == BLUE else "RED"
                 move_str = env.game.moves[-1] if env.game.moves else "?"
-                val_str = f"  val: {root_value:+.3f}" if root_value is not None else ""
-                print(f"  AI    ({label}) [{move_str}]  reward: {ai_turn_reward_acc:+.2f}{val_str}  "
+                wdl_str  = f"  {ai_wdl_blue} {ai_wdl_red}" if ai_wdl_blue is not None else ""
+                print(f"  AI    ({label}) [{move_str}]  reward: {ai_turn_reward_acc:+.2f}"
+                      f"{ai_val_str or ''}{wdl_str}  "
                       f"| Blue: {sum(blue_rewards):+.2f}  Red: {sum(red_rewards):+.2f}")
 
                 # Capture penalty: AI captured → player's last move gets penalised
@@ -427,8 +498,9 @@ def play_agent(use_mcts=False, num_simulations=100, epoch=None, az_epoch=None, a
 
             label = "BLUE" if current_color == BLUE else "RED"
             move_str = env.game.moves[-1] if env.game.moves else "?"
-            val_str = f"  val: {root_value:+.3f}" if root_value is not None else ""
-            print(f"  AI    ({label}) [{move_str}]  reward: {ai_turn_reward_acc:+.2f}{val_str}  "
+            wdl_str  = f"  {ai_wdl_blue} {ai_wdl_red}" if ai_wdl_blue is not None else ""
+            print(f"  AI    ({label}) [{move_str}]  reward: {ai_turn_reward_acc:+.2f}"
+                  f"{ai_val_str or ''}{wdl_str}  "
                   f"| Blue: {sum(blue_rewards):+.2f}  Red: {sum(red_rewards):+.2f}")
 
             # Capture penalty: AI captured → player's last move gets penalised
@@ -511,8 +583,14 @@ if __name__ == "__main__":
                              "(e.g. --agent aggressive --epoch 50). "
                              "If omitted, loads the latest checkpoint.")
     parser.add_argument("--az-epoch", type=int, default=None, dest="az_epoch",
-                        help="Load a specific AlphaZero epoch (e.g. --az-epoch 100). "
+                        help="Load a specific AlphaZero epoch (e.g. --az-epoch 82). "
                              "Automatically enables MCTS mode.")
+    parser.add_argument("--az-version", type=str, default="v2", dest="az_version",
+                        choices=["v1", "v2"],
+                        help="Which AlphaZero checkpoint directory to use: "
+                             "v2 (default) = alphazero_checkpoints/ (current training run); "
+                             "v1 = alphazero_checkpoints_v1/ (previous run). "
+                             "Architecture (scalar vs WDL) is auto-detected from the checkpoint.")
     parser.add_argument("--agent", type=str, default=None,
                         choices=["tactical", "terminal", "aggressive"],
                         help="Play against a league agent (e.g. --agent aggressive). "
@@ -523,4 +601,5 @@ if __name__ == "__main__":
     use_mcts = args.mcts or (args.az_epoch is not None)
 
     play_agent(use_mcts=use_mcts, num_simulations=args.simulations,
-               epoch=args.epoch, az_epoch=args.az_epoch, agent_type=args.agent)
+               epoch=args.epoch, az_epoch=args.az_epoch,
+               az_version=args.az_version, agent_type=args.agent)

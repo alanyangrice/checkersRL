@@ -54,6 +54,7 @@ import torch.optim as optim
 from RL_models.checkers_env import CheckersEnv
 from RL_models.MCTS.mcts_search import MCTSSearch
 from RL_models.MCTS.AlphaZeroNetwork import AlphaZeroNetwork
+from RL_models.MCTS.WDLAlphaZeroNetwork import WDLAlphaZeroNetwork
 from RL_models.MCTS import training_config as cfg
 from RL_models.PPO_Model.Agent import get_device
 from checkers_game.constants import BLUE, RED, NUM_ACTIONS
@@ -270,8 +271,18 @@ def _adjudicate_move_cap(env):
 
 
 def _play_self_play_game(worker_id, request_queue, response_queue,
-                          epoch, state_buf=None, mask_buf=None):
-    """Play one complete AlphaZero self-play game using the GPU inference server."""
+                          epoch, state_buf=None, mask_buf=None,
+                          start_board=None, start_turn=None, c_puct=None):
+    """Play one complete AlphaZero self-play game using the GPU inference server.
+
+    Args:
+        start_board: Optional (4,8,8) absolute board state from
+                     env.get_absolute_board_state() to start from instead of
+                     the standard initial position (regret-buffer diverse starts).
+        start_turn:  Color constant (BLUE/RED) for start_board; required when
+                     start_board is provided.
+        c_puct:      PUCT exploration constant override; defaults to cfg.C_PUCT.
+    """
     evaluator = RemoteEvaluator(
         worker_id, request_queue, response_queue, state_buf, mask_buf
     )
@@ -279,19 +290,24 @@ def _play_self_play_game(worker_id, request_queue, response_queue,
     curriculum_opts = _get_curriculum_options(epoch)
     num_sims = cfg.get_num_simulations(epoch)
     temp_threshold, temp_late = cfg.get_temperature_config(epoch)
+    effective_c_puct = c_puct if c_puct is not None else cfg.C_PUCT
 
     mcts = MCTSSearch(
         evaluator=evaluator,
         num_simulations=num_sims,
-        c_puct=cfg.C_PUCT,
+        c_puct=effective_c_puct,
         dirichlet_alpha=cfg.DIRICHLET_ALPHA,
         dirichlet_epsilon=cfg.DIRICHLET_EPSILON,
         move_cap=cfg.get_max_game_moves(epoch),
     )
     env = CheckersEnv()
-    env.reset(options=curriculum_opts)
+    if start_board is not None and start_turn is not None:
+        env.load_absolute_board_state(start_board, start_turn)
+    else:
+        env.reset(options=curriculum_opts)
 
     game_data         = []   # (state, policy, player, mcts_q_value)
+    abs_board_states  = []   # absolute board state at each step (for regret buffer)
     value_log         = []
     entropy_log       = []
     move_count        = 0
@@ -319,6 +335,7 @@ def _play_self_play_game(worker_id, request_queue, response_queue,
         )
 
         state          = env.get_board_state()
+        abs_state      = env.get_absolute_board_state()   # for regret buffer
         current_player = env.game.turn
 
         action, mcts_policy, root_value = mcts.select_action(
@@ -353,6 +370,7 @@ def _play_self_play_game(worker_id, request_queue, response_queue,
         entropy_log.append(entropy)
 
         game_data.append((state, policy_target, current_player, mcts_q_value))
+        abs_board_states.append(abs_state)
 
         _, _, done, _, info = env.step(action)
         mcts.update_root(action)
@@ -405,12 +423,13 @@ def _play_self_play_game(worker_id, request_queue, response_queue,
     }
 
     return {
-        "game_data":      game_data,
-        "cap_terminated": cap_terminated,
-        "winner":         winner,
-        "num_moves":      move_count,
-        "game_stats":     game_stats,
-        "tie_contempts":  tie_contempts,
+        "game_data":        game_data,
+        "abs_board_states": abs_board_states,   # parallel list for regret buffer
+        "cap_terminated":   cap_terminated,
+        "winner":           winner,
+        "num_moves":        move_count,
+        "game_stats":       game_stats,
+        "tie_contempts":    tie_contempts,
     }
 
 
@@ -470,6 +489,9 @@ def worker_fn(worker_id, request_queue, response_queue, results_queue,
             task["epoch"],
             state_buf=_state_buf,
             mask_buf=_mask_buf,
+            start_board=task.get("start_board"),
+            start_turn=task.get("start_turn"),
+            c_puct=task.get("c_puct"),
         )
         results_queue.put((task_index, result))
 
@@ -495,14 +517,15 @@ class WorkerContext:
                 results = ctx.run_epoch(game_tasks, label=f"Epoch {epoch}")
     """
 
-    def __init__(self, initial_state_dict, device, num_workers):
+    def __init__(self, initial_state_dict, device, num_workers, use_wdl=False):
         self.device      = device
         self.num_workers = num_workers
 
         # Inference server has its own model copy — never shared with the
         # training model to avoid backward() racing with load_state_dict().
-        input_shape = (4, 8, 8)
-        self._server_model = AlphaZeroNetwork(input_shape, NUM_ACTIONS).to(device)
+        input_shape  = (4, 8, 8)
+        NetworkClass = WDLAlphaZeroNetwork if use_wdl else AlphaZeroNetwork
+        self._server_model = NetworkClass(input_shape, NUM_ACTIONS).to(device)
         self._server_model.load_state_dict(initial_state_dict)
         self._server_model.eval()
 
@@ -754,17 +777,19 @@ class EvalContext:
             stats = ectx.run_eval(num_games, num_simulations)
     """
 
-    def __init__(self, new_state_dict, old_state_dict, device, num_workers):
+    def __init__(self, new_state_dict, old_state_dict, device, num_workers,
+                 use_wdl=False):
         self.device      = device
         self.num_workers = num_workers
 
-        input_shape = (4, 8, 8)
+        input_shape  = (4, 8, 8)
+        NetworkClass = WDLAlphaZeroNetwork if use_wdl else AlphaZeroNetwork
 
-        self._new_model = AlphaZeroNetwork(input_shape, NUM_ACTIONS).to(device)
+        self._new_model = NetworkClass(input_shape, NUM_ACTIONS).to(device)
         self._new_model.load_state_dict(new_state_dict)
         self._new_model.eval()
 
-        self._old_model = AlphaZeroNetwork(input_shape, NUM_ACTIONS).to(device)
+        self._old_model = NetworkClass(input_shape, NUM_ACTIONS).to(device)
         self._old_model.load_state_dict(old_state_dict)
         self._old_model.eval()
 
@@ -914,7 +939,27 @@ class EvalContext:
 # Main training loop
 # ─────────────────────────────────────────────────────────────────────────────
 
-def train_alphazero_parallel(num_workers=None):
+def _outcome_to_wdl(v):
+    """Convert a scalar outcome in [-1, 1] to a WDL probability distribution.
+
+    Maps v = P(win) - P(loss) to [P(win), P(draw), P(loss)]:
+      v = +1.0  → [1, 0, 0]  (certain win)
+      v =  0.0  → [0, 1, 0]  (certain draw)
+      v = -1.0  → [0, 0, 1]  (certain loss)
+      v = +0.3  → [0.3, 0.7, 0]  (partial win signal)
+      v = -0.3  → [0, 0.7, 0.3]  (contempt draw — draw leaning toward loss)
+
+    Used for:
+      1. Converting the final game outcome scalar to a WDL training target.
+      2. Converting the MCTS Q-value to a WDL distribution for soft-Z blending.
+    """
+    w = float(max(0.0, v))
+    l = float(max(0.0, -v))
+    d = max(0.0, 1.0 - w - l)
+    return np.array([w, d, l], dtype=np.float32)
+
+
+def train_alphazero_parallel(num_workers=None, use_wdl=False):
     """GPU-accelerated parallel AlphaZero training loop.
 
     Self-play runs across `num_workers` CPU processes.  Each MCTS leaf
@@ -925,6 +970,10 @@ def train_alphazero_parallel(num_workers=None):
     Args:
         num_workers: number of CPU worker processes.
                      None → auto-detect from cfg.get_num_workers_parallel().
+        use_wdl:     If True, use WDLAlphaZeroNetwork with cross-entropy WDL
+                     value loss and soft-Z value blending (--network-type wdl).
+                     If False (default), use AlphaZeroNetwork with MSE scalar
+                     value loss — fully backward-compatible with v1 checkpoints.
     """
     device = get_device()
     print(f"Device: {device}")
@@ -936,8 +985,12 @@ def train_alphazero_parallel(num_workers=None):
     print(f"Workers: {num_workers}")
 
     # ── Training network (on GPU — used only for gradient updates) ────────
-    input_shape = (4, 8, 8)
-    network = AlphaZeroNetwork(input_shape, NUM_ACTIONS).to(device)
+    input_shape  = (4, 8, 8)
+    NetworkClass = WDLAlphaZeroNetwork if use_wdl else AlphaZeroNetwork
+    network      = NetworkClass(input_shape, NUM_ACTIONS).to(device)
+    c_puct_train = cfg.C_PUCT_WDL if use_wdl else cfg.C_PUCT
+    network_type_str = "wdl" if use_wdl else "scalar"
+    print(f"Network type: {network_type_str}  C_PUCT: {c_puct_train}")
     optimizer = optim.AdamW(
         network.parameters(),
         lr=cfg.get_lr(0), weight_decay=cfg.WEIGHT_DECAY,
@@ -967,6 +1020,14 @@ def train_alphazero_parallel(num_workers=None):
             os.path.join(model_dir, latest),
             map_location=device, weights_only=False,
         )
+        # Validate that the checkpoint's network type matches the current mode
+        ckpt_network_type = ckpt.get("network_type", "scalar")
+        if ckpt_network_type != network_type_str:
+            raise RuntimeError(
+                f"Checkpoint network_type='{ckpt_network_type}' does not match "
+                f"--network-type '{network_type_str}'. Use the correct flag or "
+                f"start a new run from scratch."
+            )
         network.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         # LR is now computed from epoch number — no scheduler state to restore.
@@ -983,7 +1044,9 @@ def train_alphazero_parallel(num_workers=None):
                 buf_data["states"], buf_data["policies"], buf_data["outcomes"]
             )
             for s, p, o in zip(states, policies, outcomes):
-                replay_buffer.append((s, p, float(o)))
+                # WDL buffers store (N,3) outcomes; scalar buffers store (N,)
+                target = o if use_wdl else float(o)
+                replay_buffer.append((s, p, target))
             print(f"  Replay buffer restored: {len(replay_buffer):,} positions")
     else:
         with open(csv_path, mode="w", newline="") as f:
@@ -1035,8 +1098,13 @@ def train_alphazero_parallel(num_workers=None):
             )
         print(f"Saved initial reference model (epoch {prev_eval_epoch})")
 
+    # ── Regret buffer for diverse starting positions ──────────────────────
+    # Stores absolute board states from high-regret positions in recent games.
+    # Populated after each epoch; sampled for ~REGRET_SAMPLE_PROB of tasks.
+    regret_buffer = deque(maxlen=cfg.REGRET_BUFFER_SIZE)
+
     # ── Spawn workers + inference server, run training ────────────────────
-    with WorkerContext(network.state_dict(), device, num_workers) as ctx:
+    with WorkerContext(network.state_dict(), device, num_workers, use_wdl=use_wdl) as ctx:
 
         for epoch in range(start_epoch, cfg.NUM_EPOCHS):
             epoch_start = time.perf_counter()
@@ -1058,8 +1126,18 @@ def train_alphazero_parallel(num_workers=None):
             ctx.update_model(network.state_dict())
 
             # ── Self-play phase ──────────────────────────────────────────
-            game_tasks = [{"epoch": epoch}
-                          for _ in range(cfg.GAMES_PER_EPOCH)]
+            # Build task list; inject regret-buffer start states for a fraction
+            # of games (RGSC-style diverse starting positions).
+            game_tasks = []
+            regret_list = list(regret_buffer)   # snapshot for consistent sampling
+            for _ in range(cfg.GAMES_PER_EPOCH):
+                task = {"epoch": epoch, "c_puct": c_puct_train}
+                if regret_list and random.random() < cfg.REGRET_SAMPLE_PROB:
+                    abs_state, turn = random.choice(regret_list)
+                    task["start_board"] = abs_state
+                    task["start_turn"]  = turn
+                game_tasks.append(task)
+
             all_results = ctx.run_epoch(
                 game_tasks, label=f"Epoch {epoch + 1}"
             )
@@ -1100,17 +1178,43 @@ def train_alphazero_parallel(num_workers=None):
                     "tie_contempts",
                     {BLUE: cfg.CONTEMPT_VALUE, RED: cfg.CONTEMPT_VALUE},
                 )
-                for state, mcts_policy, player_color, mcts_qval in game_data:
+                abs_board_states = res.get("abs_board_states", [])
+                for i, (state, mcts_policy, player_color, mcts_qval) in enumerate(game_data):
                     if winner in ("Tie", "None"):
                         # Variable contempt: side ahead in material at draw
                         # receives a stronger penalty for failing to convert.
-                        outcome = tie_contempts.get(player_color, cfg.CONTEMPT_VALUE)
+                        scalar_outcome = tie_contempts.get(player_color, cfg.CONTEMPT_VALUE)
                     elif winner == player_color:
-                        outcome = 1.0
+                        scalar_outcome = 1.0
                     else:
-                        outcome = -1.0
-                    replay_buffer.append((state, mcts_policy, outcome))
+                        scalar_outcome = -1.0
+
+                    if use_wdl:
+                        # WDL label uses the raw game outcome, NOT the contempt scalar.
+                        # Contempt is applied at inference time in WDLAlphaZeroNetwork
+                        # .forward() as:  value = P(win) - P(loss) + CONTEMPT * P(draw)
+                        # Using the contempt scalar here AND in forward() double-counts
+                        # it, producing val_equal ≈ -0.5 instead of the intended ≈ -0.25.
+                        #
+                        # Draws:  wdl_scalar = 0.0  → _outcome_to_wdl → [0, 1, 0]  (pure draw)
+                        # Wins:   wdl_scalar = +1.0 → _outcome_to_wdl → [1, 0, 0]
+                        # Losses: wdl_scalar = −1.0 → _outcome_to_wdl → [0, 0, 1]
+                        wdl_scalar = 0.0 if winner in ("Tie", "None") else scalar_outcome
+                        game_wdl   = _outcome_to_wdl(wdl_scalar)
+                        mcts_wdl   = _outcome_to_wdl(float(mcts_qval))
+                        target     = (cfg.SOFT_Z_ALPHA * game_wdl
+                                      + (1.0 - cfg.SOFT_Z_ALPHA) * mcts_wdl)
+                    else:
+                        target = scalar_outcome
+
+                    replay_buffer.append((state, mcts_policy, target))
                     new_positions += 1
+
+                    # Populate regret buffer for diverse starting positions
+                    # (Trudeau & Bowling 2023 Go-Exploit; Tsai et al. 2026 RGSC)
+                    if (i < len(abs_board_states)
+                            and abs(float(mcts_qval) - scalar_outcome) > cfg.HIGH_REGRET_THRESHOLD):
+                        regret_buffer.append((abs_board_states[i], player_color))
 
                 with open(detailed_csv_path, mode="a", newline="") as f:
                     csv.writer(f).writerow([
@@ -1145,17 +1249,49 @@ def train_alphazero_parallel(num_workers=None):
 
                 for _ in range(train_steps):
                     batch = random.sample(buffer_snapshot, cfg.BATCH_SIZE)
-                    states, policies, values = zip(*batch)
+                    states, policies, targets = zip(*batch)
 
                     st = torch.FloatTensor(np.array(states)).to(device)
                     tp = torch.FloatTensor(np.array(policies)).to(device)
-                    tv = (torch.FloatTensor(np.array(values))
-                          .unsqueeze(1).to(device))
 
-                    logits, vals = network(st)
-                    log_probs = torch.log_softmax(logits, dim=1)
-                    pl   = -(tp * log_probs).sum(dim=1).mean()
-                    vl   = nn.MSELoss()(vals, tv)
+                    if use_wdl:
+                        # WDL path: cross-entropy loss against 3-element target
+                        tv = torch.FloatTensor(np.array(targets)).to(device)  # (B,3)
+                        logits, wdl_pred, _ = network.forward_wdl(st)
+                        log_probs = torch.log_softmax(logits, dim=1)
+                        pl  = -(tp * log_probs).sum(dim=1).mean()
+                        vl  = -(tv * torch.log(wdl_pred + 1e-8)).sum(dim=1).mean()
+
+                        # Color-swap value augmentation (batch-time, value head only).
+                        # The policy head is NOT exposed to swapped states because the
+                        # mcts_policy action indices are orientation-specific and
+                        # storing them in the buffer with swapped states caused a 30%
+                        # policy loss spike (wrong cross-entropy targets dominated
+                        # gradients even at 14% buffer contamination).
+                        #
+                        # Batch-time augmentation is correct for the value head:
+                        # every batch simultaneously trains Blue-perspective and
+                        # Red-perspective value predictions, balancing the feedback
+                        # loop that drove the Red-dominance color bias.
+                        st_aug = torch.flip(st, dims=[2])               # vertical flip
+                        st_aug = torch.cat(
+                            [st_aug[:, 2:4], st_aug[:, 0:2]], dim=1
+                        )                                                # swap ch 0,1 ↔ 2,3
+                        tv_aug = torch.stack(
+                            [tv[:, 2], tv[:, 1], tv[:, 0]], dim=1
+                        )                                                # swap P(win)↔P(loss)
+                        _, wdl_aug, _ = network.forward_wdl(st_aug)
+                        vl_aug = -(tv_aug * torch.log(wdl_aug + 1e-8)).sum(dim=1).mean()
+                        vl = 0.5 * (vl + vl_aug)
+                    else:
+                        # Scalar path: MSE loss against scalar outcome (original behavior)
+                        tv = (torch.FloatTensor(np.array(targets))
+                              .unsqueeze(1).to(device))        # (B,1)
+                        logits, vals = network(st)
+                        log_probs = torch.log_softmax(logits, dim=1)
+                        pl  = -(tp * log_probs).sum(dim=1).mean()
+                        vl  = nn.MSELoss()(vals, tv)
+
                     loss = pl + cfg.VALUE_LOSS_WEIGHT * vl
 
                     optimizer.zero_grad()
@@ -1245,7 +1381,7 @@ def train_alphazero_parallel(num_workers=None):
                 gate_accepted = None
                 if cfg.GATE_ENABLED:
                     with EvalContext(network.state_dict(), prev_eval_state_dict,
-                                     device, num_workers) as ectx:
+                                     device, num_workers, use_wdl=use_wdl) as ectx:
                         gate_result = ectx.run_eval(
                             cfg.EVAL_GAMES_GATE, cfg.EVAL_SIMULATIONS,
                             label="vs-prev",
@@ -1275,6 +1411,7 @@ def train_alphazero_parallel(num_workers=None):
                         states   = np.array([x[0] for x in _ref_buf], dtype=np.float32),
                         policies = np.array([x[1] for x in _ref_buf], dtype=np.float32),
                         outcomes = np.array([x[2] for x in _ref_buf], dtype=np.float32),
+                        # scalar: shape (N,); WDL: shape (N,3) — np infers from data
                     )
                     print(f"  Reference model advanced to epoch {prev_eval_epoch}")
                 else:
@@ -1292,7 +1429,8 @@ def train_alphazero_parallel(num_workers=None):
                         _bd = np.load(reference_buffer_path)
                         for s, p, o in zip(_bd["states"], _bd["policies"],
                                            _bd["outcomes"]):
-                            replay_buffer.append((s, p, float(o)))
+                            target = o if use_wdl else float(o)
+                            replay_buffer.append((s, p, target))
                         print(f"  Replay buffer reverted: "
                               f"{len(replay_buffer):,} positions")
                     else:
@@ -1339,6 +1477,8 @@ def train_alphazero_parallel(num_workers=None):
                                         dtype=np.float32),
                     outcomes = np.array([x[2] for x in buf_list],
                                         dtype=np.float32),
+                    # scalar mode: outcomes shape (N,)
+                    # WDL mode:    outcomes shape (N,3) — np infers from data
                 )
                 print(f"  Replay buffer saved: {len(replay_buffer):,} positions")
 
@@ -1347,6 +1487,7 @@ def train_alphazero_parallel(num_workers=None):
                 path = os.path.join(model_dir, f"az_epoch_{epoch + 1}.pt")
                 torch.save({
                     "epoch":                epoch + 1,
+                    "network_type":         network_type_str,   # for resume validation
                     "model_state_dict":     network.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "blue_wins":            blue_wins,
@@ -1370,5 +1511,18 @@ if __name__ == "__main__":
         "--workers", type=int, default=None,
         help="Number of CPU worker processes (default: auto-detect)",
     )
+    parser.add_argument(
+        "--network-type", choices=["scalar", "wdl"], default="scalar",
+        dest="network_type",
+        help=(
+            "scalar (default): AlphaZeroNetwork with tanh value head and MSE loss "
+            "— fully backward-compatible with v1 checkpoints. "
+            "wdl: WDLAlphaZeroNetwork with [P(win),P(draw),P(loss)] softmax head, "
+            "cross-entropy value loss, and soft-Z blending (new run required)."
+        ),
+    )
     args = parser.parse_args()
-    train_alphazero_parallel(num_workers=args.workers)
+    train_alphazero_parallel(
+        num_workers=args.workers,
+        use_wdl=(args.network_type == "wdl"),
+    )
