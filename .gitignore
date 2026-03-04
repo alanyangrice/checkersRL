@@ -19,3 +19,10 @@ __pycache__/
 dist/
 build/
 .cursor/
+
+# Node / SvelteKit
+web/frontend/node_modules/
+web/frontend/.svelte-kit/
+web/frontend/build/
+web/frontend/.env
+web/frontend/.env.*

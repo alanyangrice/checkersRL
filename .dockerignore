@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Node
+web/frontend/node_modules/
+web/frontend/.svelte-kit/
+
+# Large training artifacts not needed for serving
+RL_models/MCTS/az_detailed_games_parallel/
+RL_models/MCTS/alphazero_checkpoints/replay_buffer.npz
+RL_models/MCTS/alphazero_checkpoints/az_reference_buffer.npz
+RL_models/PPO_Model/opponent_pool_league/
+
+# Git / IDE / docs
+.git/
+.cursor/
+*.plan.md
+*.log
+.DS_Store

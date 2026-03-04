@@ -4,7 +4,8 @@ Architecture v2 — extends AlphaZeroNetwork with a three-headed value output:
   - Shared residual backbone (convolutional feature extractor) — identical to v1
   - Policy head  → action logits (used as MCTS priors after softmax) — identical to v1
   - WDL value head → [P(win), P(draw), P(loss)] via softmax, in [0, 1] each
-                     Scalar value = P(win) - P(loss) ∈ [-1, 1] for MCTS/PUCT
+                     Scalar value = P(win) - P(loss) + contempt(board) × P(draw)
+                     where contempt(board) is material-scaled (see forward() below)
 
 Key design principles
 ----------------------
@@ -174,10 +175,45 @@ class WDLAlphaZeroNetwork(nn.Module):
         Identical signature to AlphaZeroNetwork.forward() so mcts_search.py,
         evaluate.py, and the AlphaZeroInferenceServer need zero changes.
 
-        value = P(win) - P(loss) ∈ [-1, 1], equivalent in range and meaning
-        to AlphaZeroNetwork's tanh output.
+        value = P(win) - P(loss) + contempt(x) × P(draw)
+
+        contempt(x) is computed dynamically from the board tensor, mirroring
+        cfg.get_contempt_value().  Value is always from blue's perspective
+        (channels 0–1 = blue pieces/kings, channels 2–3 = red pieces/kings):
+
+          blue_share = blue_material / total_material
+          extra      = CONTEMPT_MATERIAL_SCALE × max(0, blue_share − 0.5)
+          contempt   = −(|CONTEMPT_VALUE| + extra)  clamped to [−0.95, −0.30]
+
+        This keeps P(draw) semantically pure — training labels are always
+        [0, 1, 0] for drawn games, so P(draw) genuinely represents draw
+        probability.  Contempt is applied only here (inference), never in
+        training labels, so there is no double-counting.
+
+        The stronger the material advantage blue holds, the more negative
+        contempt becomes, increasing draw-avoidance pressure in MCTS:
+
+          6v6  equal  (blue_share=0.50) → contempt = −0.30  → value ≈ −0.24 (P(draw)=0.8)
+          10v6 ahead  (blue_share=0.63) → contempt = −0.46  → value ≈ −0.37 (P(draw)=0.8)
+          12v2 dominant (blue_share=0.86) → contempt ≈ −0.73 → value ≈ −0.58 (P(draw)=0.8)
+
+        Applying contempt at non-terminal leaf evaluations is correct: the
+        standard zero-sum backup propagates it correctly, whereas terminal-node
+        contempt would be flipped and reward the draw-triggering player.
+        Training uses forward_wdl() exclusively and is unaffected.
         """
-        logits, _, value = self._backbone(x)
+        logits, wdl, _ = self._backbone(x)
+
+        # Dynamic material-scaled contempt — mirrors cfg.get_contempt_value().
+        # Channels: 0 = blue regular, 1 = blue kings, 2 = red regular, 3 = red kings.
+        K          = cfg.KING_MATERIAL_VALUE
+        blue_mat   = x[:, 0].sum(dim=(1, 2)) + K * x[:, 1].sum(dim=(1, 2))  # (B,)
+        red_mat    = x[:, 2].sum(dim=(1, 2)) + K * x[:, 3].sum(dim=(1, 2))  # (B,)
+        blue_share = blue_mat / (blue_mat + red_mat + 1e-8)                  # (B,)
+        extra      = cfg.CONTEMPT_MATERIAL_SCALE * (blue_share - 0.5).clamp(min=0.0)
+        contempt   = (-(abs(cfg.CONTEMPT_VALUE) + extra)).clamp(min=-0.95)   # (B,)
+
+        value = wdl[:, 0:1] - wdl[:, 2:3] + contempt.unsqueeze(1) * wdl[:, 1:2]
         return logits, value
 
     def forward_wdl(self, x):
