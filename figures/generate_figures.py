@@ -41,7 +41,7 @@ OUT = {
     "az_comparison": os.path.join(ROOT, "figures/output/az_comparison"),
     "ppo_curriculum":os.path.join(ROOT, "figures/output/ppo_curriculum"),
     "ppo_league":    os.path.join(ROOT, "figures/output/ppo_league"),
-    "summary":       os.path.join(ROOT, "figures/output/summary"),
+    "ppo_comparison": os.path.join(ROOT, "figures/output/ppo_comparison"),
 }
 
 # AlphaZero training phase boundaries (observed from avg_moves / epoch_time jumps)
@@ -370,8 +370,7 @@ def az_wdl_figures(dfs):
     ev = dfs["az_wdl_eval"]
     outdir = OUT["az_wdl"]
     color = C["wdl"]
-    # Only Phase 1 applies — WDL run hasn't reached epoch 66 yet
-    phases = {AZ_PHASE1: PHASE_LABELS[AZ_PHASE1]}
+    phases = PHASE_LABELS  # both phase 1 (16) and phase 2 (66)
 
     # ---- AZ-W-1: Training Loss Curves ----------------------------------------
     fig, axes = plt.subplots(3, 1, figsize=(7, 6.5), sharex=True)
@@ -383,17 +382,20 @@ def az_wdl_figures(dfs):
         ("total_loss",  "Total Loss",  False),
     ]):
         smooth_line(ax, tr["epoch"], tr[col], color=color, window=5)
-        ax.axvline(AZ_PHASE1, color="0.45", lw=1.1, ls="--", zorder=1)
+        for ep, lbl in phases.items():
+            ax.axvline(ep, color="0.45", lw=1.1, ls="--", zorder=1)
         ax.set_ylabel(ylabel)
         if use_log:
             ax.set_yscale("log")
         ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.3g"))
         set_epoch_ticks(ax)
 
-    ylim = axes[0].get_ylim()
-    axes[0].text(AZ_PHASE1 + 0.8, ylim[0] + (ylim[1] - ylim[0]) * 0.96,
-                 PHASE_LABELS[AZ_PHASE1], fontsize=7.5, color="0.4",
-                 va="top", rotation=90, clip_on=True)
+    # Phase labels only on top panel to avoid clutter
+    for ep, lbl in phases.items():
+        ylim = axes[0].get_ylim()
+        axes[0].text(ep + 0.8, ylim[0] + (ylim[1] - ylim[0]) * 0.96,
+                     lbl, fontsize=7.5, color="0.4",
+                     va="top", rotation=90, clip_on=True)
 
     axes[-1].set_xlabel("Epoch")
     axes[0].set_title("AlphaZero WDL — Training Loss Curves")
@@ -416,7 +418,8 @@ def az_wdl_figures(dfs):
     ax.plot(ep, los_sm, color=C["loser"],  label="Loser position value",  lw=1.9)
     ax.fill_between(ep, win_sm, los_sm, alpha=C["fill_alpha"], color="#888888")
 
-    ax.axvline(AZ_PHASE1, color="0.45", lw=1.1, ls="--", zorder=1)
+    for ep_p, lbl in phases.items():
+        ax.axvline(ep_p, color="0.45", lw=1.1, ls="--", zorder=1)
     add_phase_vlines(ax, phases)
 
     ax.set_xlabel("Epoch")
@@ -432,7 +435,8 @@ def az_wdl_figures(dfs):
     smooth_line(ax, tr["epoch"], tr["avg_moves"], color=color, window=5,
                 label="Avg moves per game")
 
-    ax.axvline(AZ_PHASE1, color="0.45", lw=1.1, ls="--", zorder=1)
+    for ep_p, lbl in phases.items():
+        ax.axvline(ep_p, color="0.45", lw=1.1, ls="--", zorder=1)
     add_phase_vlines(ax, phases)
 
     ax2 = ax.twinx()
@@ -458,7 +462,8 @@ def az_wdl_figures(dfs):
     smooth_line(ax, tr["epoch"], tr["policy_entropy_nats"], color=color, window=5,
                 label="Policy entropy")
 
-    ax.axvline(AZ_PHASE1, color="0.45", lw=1.1, ls="--", zorder=1)
+    for ep_p in phases:
+        ax.axvline(ep_p, color="0.45", lw=1.1, ls="--", zorder=1)
     add_phase_vlines(ax, phases)
 
     ax.set_xlabel("Epoch")
@@ -482,7 +487,8 @@ def az_wdl_figures(dfs):
                 color="#1A9641", zorder=5, s=55, marker="^", label="Accepted")
     ax1.scatter(rejected["epoch"], rejected["gate_win_rate"],
                 color="#D7191C", zorder=5, s=55, marker="v", label="Rejected")
-    ax1.axvline(AZ_PHASE1, color="0.45", lw=1.0, ls="--", zorder=1)
+    for ep_p in phases:
+        ax1.axvline(ep_p, color="0.45", lw=1.0, ls="--", zorder=1)
     add_phase_vlines(ax1, phases)
     ax1.set_xlabel("Epoch")
     ax1.set_ylabel("Gate Win Rate")
@@ -508,7 +514,8 @@ def az_wdl_figures(dfs):
                  marker="o", ms=4, label=val_labels[col])
     ax2.axhline(+1, color="0.72", lw=0.8, ls=":")
     ax2.axhline(-1, color="0.72", lw=0.8, ls=":")
-    ax2.axvline(AZ_PHASE1, color="0.45", lw=1.0, ls="--", zorder=1)
+    for ep_p in phases:
+        ax2.axvline(ep_p, color="0.45", lw=1.0, ls="--", zorder=1)
     add_phase_vlines(ax2, phases)
     ax2.set_xlabel("Epoch")
     ax2.set_ylabel("Predicted Value")
@@ -550,8 +557,9 @@ def az_comparison_figures(dfs):
         ax.plot(w_trim["epoch"], w_trim[col], color=C["wdl"], alpha=C["raw_alpha"], lw=0.9)
         ax.plot(w_trim["epoch"], sm_w, color=C["wdl"], lw=1.9, ls="-")
 
-        ax.axvline(AZ_PHASE1, color="0.45", lw=1.1, ls="--", zorder=1)
-        add_phase_vlines(ax, {AZ_PHASE1: PHASE_LABELS[AZ_PHASE1]})
+        for ep_p, lbl in PHASE_LABELS.items():
+            ax.axvline(ep_p, color="0.45", lw=1.1, ls="--", zorder=1)
+        add_phase_vlines(ax, PHASE_LABELS)
         ax.set_xlabel("Epoch")
         ax.set_ylabel(ylabel)
         ax.set_title(title)
@@ -595,8 +603,9 @@ def az_comparison_figures(dfs):
     ax.plot(ep_w, sl_w, color=C["wdl"], lw=1.4, ls="-.", label="WDL loser")
     ax.fill_between(ep_w, sw_w, sl_w, alpha=0.08, color=C["wdl"])
 
-    ax.axvline(AZ_PHASE1, color="0.45", lw=1.1, ls="--", zorder=1)
-    add_phase_vlines(ax, {AZ_PHASE1: PHASE_LABELS[AZ_PHASE1]})
+    for ep_p, lbl in PHASE_LABELS.items():
+        ax.axvline(ep_p, color="0.45", lw=1.1, ls="--", zorder=1)
+    add_phase_vlines(ax, PHASE_LABELS)
 
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Average Root Value")
@@ -874,13 +883,13 @@ def ppo_league_figures(dfs):
 
 
 # ---------------------------------------------------------------------------
-# SUMMARY FIGURES  (SUMMARY-1)
+# PPO COMPARISON FIGURES  (PPO-C-1)
 # ---------------------------------------------------------------------------
 
-def summary_figures(dfs):
+def ppo_comparison_figures(dfs):
     bm_cs = dfs["ppo_cs_bench"]
     bm_lg = dfs["ppo_league_bench"]
-    outdir = OUT["summary"]
+    outdir = OUT["ppo_comparison"]
 
     fig, ax = plt.subplots(figsize=(6, 4))
 
@@ -909,7 +918,7 @@ def summary_figures(dfs):
     ax.set_ylim(35, 112)
     ax.legend(fontsize=8.5, loc="lower right")
     set_epoch_ticks(ax)
-    save_fig(fig, outdir, "SUMMARY-1_ppo_comparison")
+    save_fig(fig, outdir, "PPO-C-1_ppo_comparison")
 
 
 # ---------------------------------------------------------------------------
@@ -935,8 +944,8 @@ def main():
     print("\n[5/6] PPO League figures...")
     ppo_league_figures(dfs)
 
-    print("\n[6/6] Summary figures...")
-    summary_figures(dfs)
+    print("\n[6/6] PPO Comparison figures...")
+    ppo_comparison_figures(dfs)
 
     print("\nDone. All figures saved to figures/output/")
 

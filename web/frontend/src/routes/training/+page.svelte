@@ -173,10 +173,10 @@
 		},
 	];
 
-	// ── Summary ────────────────────────────────────────────────────────────
-	const summary: Fig = {
-		src: '/figures/summary/SUMMARY-1_ppo_comparison.png',
-		alt: 'PPO training comparison summary',
+	// ── PPO Comparison ─────────────────────────────────────────────────────
+	const ppoComparison: Fig = {
+		src: '/figures/ppo_comparison/PPO-C-1_ppo_comparison.png',
+		alt: 'PPO training comparison',
 		caption:
 			'Win rate vs. random across both PPO training regimes. Curriculum training (dashed) plateaus at ~86% and degrades by epoch 110 due to passive co-evolution. All three league agents (solid) reach near-100% and maintain it — reward diversity prevents the passive equilibrium from forming.',
 	};
@@ -335,20 +335,20 @@
 	</section>
 
 	<!-- ================================================================= -->
-	<!-- Summary -->
+	<!-- PPO Comparison -->
 	<!-- ================================================================= -->
 	<section class="flex flex-col gap-4">
 		<div>
-			<h2 class="text-lg font-semibold text-gray-900">Summary</h2>
+			<h2 class="text-lg font-semibold text-gray-900">PPO Comparison</h2>
 			<p class="text-sm text-gray-500 mt-1">Cross-run comparison on the shared vs-random baseline.</p>
 		</div>
-		<div class="max-w-2xl">
-			<figure>
-				<a href={summary.src} target="_blank" rel="noopener noreferrer"
+		<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+			<figure class="md:col-span-2">
+				<a href={ppoComparison.src} target="_blank" rel="noopener noreferrer"
 					class="block rounded border border-gray-200 overflow-hidden hover:border-gray-400 transition-colors duration-150">
-					<img src={summary.src} alt={summary.alt} class="w-full h-auto" loading="lazy" />
+					<img src={ppoComparison.src} alt={ppoComparison.alt} class="w-full h-auto" loading="lazy" />
 				</a>
-				<figcaption class="mt-2 text-xs text-gray-500 leading-relaxed">{summary.caption}</figcaption>
+				<figcaption class="mt-2 text-xs text-gray-500 leading-relaxed">{ppoComparison.caption}</figcaption>
 			</figure>
 		</div>
 	</section>

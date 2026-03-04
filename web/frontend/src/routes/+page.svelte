@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import Board from '$lib/Board.svelte';
 	import { api } from '$lib/api';
-	import type { ModelInfo, BoardResponse, Color, Winner } from '$lib/types';
+	import type { ModelInfo, BoardResponse, Color, Winner, Board as BoardState } from '$lib/types';
 
 	// ── Setup ──────────────────────────────────────────────────────────────
 	let models: ModelInfo[] = [];
@@ -49,14 +49,14 @@
 	let animBoard: number[][][] | null = null;
 	let animPath: number[] = [];
 
-	$: displayBoard    = animating ? (animBoard ?? boardState) : (snapshots.length > 0 ? snapshots[effectiveIndex].board      : boardState);
-	$: displayAiPath   = animating ? animPath                  : (snapshots.length > 0 ? snapshots[effectiveIndex].aiMovePath : aiMovePath);
+	$: displayBoard    = animating ? (animBoard ?? boardState) : capturingSq !== null ? boardState : (snapshots.length > 0 ? snapshots[effectiveIndex].board : boardState);
+	$: displayAiPath   = animating ? animPath                  : capturingSq !== null ? [] : (snapshots.length > 0 ? snapshots[effectiveIndex].aiMovePath : aiMovePath);
 	$: displayValue    = snapshots.length > 0 ? snapshots[effectiveIndex].value      : aiValue;
 	$: displayNotation = snapshots.length > 0 ? snapshots[effectiveIndex].notation   : lastAiMove;
 
 	function sleep(ms: number) { return new Promise<void>(r => setTimeout(r, ms)); }
 
-	async function animateHops(hopBoards: Board[], fullPath: number[]) {
+	async function animateHops(hopBoards: BoardState[], fullPath: number[]) {
 		if (hopBoards.length <= 1) return; // single move, no animation needed
 		animating = true;
 		for (let i = 0; i < hopBoards.length; i++) {
@@ -101,7 +101,9 @@
 
 	// ── Derived display ────────────────────────────────────────────────────
 	$: isHumanTurn = gameId !== null && !done && turnComplete && currentTurn === humanColor && atLive;
-	$: supportsDifficulty = models.find((m) => m.id === selectedModelId)?.supports_difficulty ?? true;
+	$: selectedModel      = models.find((m) => m.id === selectedModelId);
+	$: supportsDifficulty = selectedModel?.supports_difficulty ?? true;
+	$: if (!supportsDifficulty) simulations = 100;
 
 	function parsePath(mv: string): number[] {
 		const sep = mv.includes('x') ? 'x' : '-';
@@ -173,7 +175,7 @@
 				await sleep(500);
 				const fullPath = parsePath(resp.ai_move);
 				if (resp.ai_boards && resp.ai_boards.length > 1) {
-					await animateHops(resp.ai_boards as number[][][], fullPath);
+					await animateHops(resp.ai_boards as number[][][][], fullPath);
 				}
 				snapshots = [
 					startSnap,
@@ -239,7 +241,7 @@
 				if (resp.ai_move) {
 					const fullPath = parsePath(resp.ai_move);
 					if (resp.ai_boards && resp.ai_boards.length > 1) {
-						await animateHops(resp.ai_boards as number[][][], fullPath);
+						await animateHops(resp.ai_boards as BoardState[], fullPath);
 					}
 					snapshots = [...snapshots, {
 						board:       resp.board,
@@ -366,6 +368,9 @@
 							<option value={m.id}>{m.label}</option>
 						{/each}
 					</select>
+					{#if selectedModel?.description}
+						<p class="text-xs text-gray-400 leading-snug">{selectedModel.description}</p>
+					{/if}
 				{/if}
 			</div>
 

@@ -1,6 +1,7 @@
 export interface ModelInfo {
 	id: string;
 	label: string;
+	description: string;
 	supports_difficulty: boolean;
 }
 

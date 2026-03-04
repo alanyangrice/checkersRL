@@ -37,6 +37,8 @@ from RL_models.checkers_env import CheckersEnv
 from RL_models.MCTS.AlphaZeroNetwork import AlphaZeroNetwork
 from RL_models.MCTS.WDLAlphaZeroNetwork import WDLAlphaZeroNetwork
 from RL_models.MCTS.mcts_search import MCTSSearch
+from RL_models.PPO_Model.PolicyNetwork import PPOPolicyNetwork
+from RL_models.PPO_Model.Agent import load_policy_state_dict
 
 from web.backend.models_config import MODELS
 from web.backend.sessions import games
@@ -75,6 +77,17 @@ def _load_az_checkpoint(path: str) -> tuple:
     return network, is_wdl
 
 
+def _load_ppo_checkpoint(path: str):
+    """Load a PPO policy checkpoint. Handles both full training checkpoints
+    (saved as {epoch, model_state_dict, ...}) and raw state dicts."""
+    network = PPOPolicyNetwork((4, 8, 8), n_actions=NUM_ACTIONS).to(DEVICE)
+    data = torch.load(path, map_location=DEVICE, weights_only=False)
+    state_dict = data["model_state_dict"] if isinstance(data, dict) and "model_state_dict" in data else data
+    load_policy_state_dict(network, state_dict)
+    network.eval()
+    return network
+
+
 @app.on_event("startup")
 def load_models():
     for m in MODELS:
@@ -83,10 +96,15 @@ def load_models():
             print(f"WARNING: checkpoint not found, skipping model '{m['id']}': {ckpt_path}")
             continue
         try:
-            network, is_wdl = _load_az_checkpoint(str(ckpt_path))
-            MODEL_REGISTRY[m["id"]] = {**m, "network": network, "is_wdl": is_wdl}
-            arch = "WDL" if is_wdl else "scalar"
-            print(f"  Loaded {m['label']} ({arch})")
+            if m["type"] == "ppo":
+                network = _load_ppo_checkpoint(str(ckpt_path))
+                MODEL_REGISTRY[m["id"]] = {**m, "network": network}
+                print(f"  Loaded {m['label']} (PPO)")
+            else:
+                network, is_wdl = _load_az_checkpoint(str(ckpt_path))
+                MODEL_REGISTRY[m["id"]] = {**m, "network": network, "is_wdl": is_wdl}
+                arch = "WDL" if is_wdl else "scalar"
+                print(f"  Loaded {m['label']} ({arch})")
         except Exception as e:
             print(f"WARNING: failed to load '{m['id']}': {e}")
 
@@ -128,15 +146,61 @@ def _legal_moves(env: CheckersEnv) -> list[dict]:
 
 def _quick_eval(env: CheckersEnv, session: dict) -> float:
     """Single forward pass — returns value from AI's perspective."""
-    network = session["mcts"].network
+    network = session["mcts"].network if "mcts" in session else session["network"]
     state_t = torch.FloatTensor(env.get_board_state()).unsqueeze(0).to(DEVICE)
     with torch.no_grad():
         _, v = network(state_t)
-    raw = float(v.item())  # from CURRENT player's perspective
+    raw = float(v.squeeze().item())  # from CURRENT player's perspective
     # Flip to AI's perspective when it's the human's turn
     if env.game.turn == session["human_color"]:
         return -raw
     return raw
+
+
+def _run_ppo_turn(session: dict) -> tuple[Optional[str], float, bool, Optional[str], list]:
+    """Execute the AI's complete turn using greedy PPO policy (no MCTS).
+
+    Returns (move_notation, value, done, winner_str, hop_boards).
+    """
+    env: CheckersEnv = session["env"]
+    network = session["network"]
+    done = False
+    winner = None
+    value = 0.0
+    last_move = None
+    hop_boards: list = []
+
+    while True:
+        mask = env.get_action_mask()
+        if mask.sum() == 0:
+            _, _, done, _, info = env.step(0)
+            winner = _winner_str(info.get("winner"))
+            break
+
+        state_t = torch.FloatTensor(env.get_board_state()).unsqueeze(0).to(DEVICE)
+        mask_t  = torch.FloatTensor(mask).unsqueeze(0).to(DEVICE)
+        with torch.no_grad():
+            logits, v = network(state_t)
+        value = float(v.squeeze().item())
+
+        masked_logits = logits + torch.where(
+            mask_t > 0,
+            torch.zeros_like(logits),
+            torch.full_like(logits, -1e10),
+        )
+        action = int(masked_logits.argmax(dim=1).item())
+
+        _, _, done, _, info = env.step(action)
+        turn_complete = info.get("turn_complete", True)
+        hop_boards.append(_board_state(env))
+
+        if turn_complete or done:
+            last_move = env.game.moves[-1] if env.game.moves else None
+            if done:
+                winner = _winner_str(info.get("winner"))
+            break
+
+    return last_move, value, done, winner, hop_boards
 
 
 def _run_ai_turn(session: dict) -> tuple[Optional[str], float, bool, Optional[str], list]:
@@ -223,6 +287,7 @@ def get_models():
         {
             "id":                  m["id"],
             "label":               m["label"],
+            "description":         m.get("description", ""),
             "supports_difficulty": m["supports_difficulty"],
         }
         for m in MODELS
@@ -243,21 +308,31 @@ def new_game(req: NewGameRequest):
     env.reset()
 
     entry = MODEL_REGISTRY[req.model_id]
-    mcts = MCTSSearch(
-        network=entry["network"],
-        num_simulations=sims,
-        device=DEVICE,
-    )
-
     game_id = str(uuid.uuid4())
-    games[game_id] = {
-        "env":         env,
-        "mcts":        mcts,
-        "human_color": human_color,
-        "ai_color":    ai_color,
-        "is_wdl":      entry["is_wdl"],
-        "model_label": entry["label"],
-    }
+
+    if entry["type"] == "ppo":
+        games[game_id] = {
+            "env":         env,
+            "network":     entry["network"],
+            "human_color": human_color,
+            "ai_color":    ai_color,
+            "is_ppo":      True,
+            "model_label": entry["label"],
+        }
+    else:
+        mcts = MCTSSearch(
+            network=entry["network"],
+            num_simulations=sims,
+            device=DEVICE,
+        )
+        games[game_id] = {
+            "env":         env,
+            "mcts":        mcts,
+            "human_color": human_color,
+            "ai_color":    ai_color,
+            "is_wdl":      entry["is_wdl"],
+            "model_label": entry["label"],
+        }
 
     ai_move = None
     value = None
@@ -270,8 +345,9 @@ def new_game(req: NewGameRequest):
 
     # If human plays Red, AI (Blue) moves first
     ai_hop_boards: list = []
+    _ai_turn = _run_ppo_turn if games[game_id].get("is_ppo") else _run_ai_turn
     if human_color == RED:
-        ai_move, value, done, winner, ai_hop_boards = _run_ai_turn(games[game_id])
+        ai_move, value, done, winner, ai_hop_boards = _ai_turn(games[game_id])
 
     post_ai_value = _quick_eval(env, games[game_id]) if ai_move else None
 
@@ -348,8 +424,9 @@ def make_move(req: MoveRequest):
 
     # Human turn complete — run AI turn if game still going
     ai_hop_boards: list = []
+    _ai_turn = _run_ppo_turn if session.get("is_ppo") else _run_ai_turn
     if not done:
-        ai_move, value, done, winner, ai_hop_boards = _run_ai_turn(session)
+        ai_move, value, done, winner, ai_hop_boards = _ai_turn(session)
 
     post_ai_value = _quick_eval(env, session) if ai_move and not done else None
 
