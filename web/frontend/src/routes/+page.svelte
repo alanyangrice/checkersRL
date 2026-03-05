@@ -175,7 +175,7 @@
 				await sleep(500);
 				const fullPath = parsePath(resp.ai_move);
 				if (resp.ai_boards && resp.ai_boards.length > 1) {
-					await animateHops(resp.ai_boards as number[][][][], fullPath);
+					await animateHops(resp.ai_boards as BoardState[], fullPath);
 				}
 				snapshots = [
 					startSnap,
