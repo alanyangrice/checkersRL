@@ -12,6 +12,7 @@ import pandas as pd
 import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
+from matplotlib.transforms import blended_transform_factory
 import seaborn as sns
 
 warnings.filterwarnings("ignore")
@@ -23,12 +24,12 @@ matplotlib.use("Agg")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = {
-    "az_scalar_train":  os.path.join(ROOT, "RL_models/MCTS/alphazero_training_progress_parallel_v1.csv"),
-    "az_scalar_eval":   os.path.join(ROOT, "RL_models/MCTS/alphazero_eval_benchmarks_v1.csv"),
-    "az_wdl_train":     os.path.join(ROOT, "RL_models/MCTS/alphazero_training_progress_parallel.csv"),
-    "az_wdl_eval":      os.path.join(ROOT, "RL_models/MCTS/alphazero_eval_benchmarks.csv"),
-    "ppo_cs_train":     os.path.join(ROOT, "RL_models/PPO_Model/training_progress_parallel_run5.csv"),
-    "ppo_cs_bench":     os.path.join(ROOT, "RL_models/PPO_Model/benchmark_parallel_run5.csv"),
+    "az_scalar_train":  os.path.join(ROOT, "RL_models/MCTS/alphazero_training_progress_parallel_scalar.csv"),
+    "az_scalar_eval":   os.path.join(ROOT, "RL_models/MCTS/alphazero_eval_benchmarks_scalar.csv"),
+    "az_wdl_train":     os.path.join(ROOT, "RL_models/MCTS/alphazero_training_progress_parallel_wdl.csv"),
+    "az_wdl_eval":      os.path.join(ROOT, "RL_models/MCTS/alphazero_eval_benchmarks_wdl.csv"),
+    "ppo_cs_train":     os.path.join(ROOT, "RL_models/PPO_Model/training_progress_parallel_cs.csv"),
+    "ppo_cs_bench":     os.path.join(ROOT, "RL_models/PPO_Model/benchmark_parallel_cs.csv"),
     "ppo_tactical":     os.path.join(ROOT, "RL_models/PPO_Model/training_progress_tactical.csv"),
     "ppo_terminal":     os.path.join(ROOT, "RL_models/PPO_Model/training_progress_terminal.csv"),
     "ppo_aggressive":   os.path.join(ROOT, "RL_models/PPO_Model/training_progress_aggressive.csv"),
@@ -129,12 +130,11 @@ def smooth_line(ax, x, y, color, label=None, window=5, zorder=3, lw=None):
 
 def add_phase_vlines(ax, phases, ylim_frac=0.97, color="0.45"):
     """Draw vertical dashed lines with rotated text labels for phase boundaries."""
+    trans = blended_transform_factory(ax.transData, ax.transAxes)
     for epoch, label in phases.items():
         ax.axvline(epoch, color=color, lw=1.1, ls="--", zorder=1)
-        ylim = ax.get_ylim()
-        ax.text(epoch + 0.8, ylim[0] + (ylim[1] - ylim[0]) * ylim_frac,
-                label, fontsize=7.5, color=color,
-                va="top", rotation=90, clip_on=True)
+        ax.text(epoch + 0.8, ylim_frac, label, fontsize=7.5, color=color,
+                va="top", rotation=90, clip_on=True, transform=trans)
 
 
 def set_epoch_ticks(ax, step=10):
@@ -354,7 +354,7 @@ def az_scalar_figures(dfs):
     ax2.set_ylabel("Predicted Value")
     ax2.set_title("(B) Value Head Calibration")
     ax2.set_ylim(-1.25, 1.25)
-    ax2.legend(fontsize=8, loc="upper left")
+    ax2.legend(fontsize=8, loc="lower right", bbox_to_anchor=(1.0, 0.15))
     set_epoch_ticks(ax2, step=20)
 
     fig.suptitle("AlphaZero Scalar — Evaluation Benchmarks", fontsize=11, fontweight="bold")
@@ -521,7 +521,7 @@ def az_wdl_figures(dfs):
     ax2.set_ylabel("Predicted Value")
     ax2.set_title("(B) Value Head Calibration")
     ax2.set_ylim(-1.25, 1.25)
-    ax2.legend(fontsize=8, loc="upper left")
+    ax2.legend(fontsize=8, loc="lower right", bbox_to_anchor=(1.0, 0.15))
     set_epoch_ticks(ax2, step=10)
 
     fig.suptitle("AlphaZero WDL — Evaluation Benchmarks", fontsize=11, fontweight="bold")
@@ -638,7 +638,7 @@ def ppo_curriculum_figures(dfs):
 
     ylim = ax.get_ylim()
     ax.text(SWITCH + 1, 107,
-            "Curriculum switch\n(mid-game->full board)",
+            "Curriculum switch",
             fontsize=7.5, color="0.35", va="top", rotation=90, clip_on=True)
 
     ax.set_xlabel("Epoch")

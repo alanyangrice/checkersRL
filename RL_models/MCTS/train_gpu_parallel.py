@@ -8,7 +8,7 @@ Architecture
                         │  AlphaZeroInferenceServer (thread)  │
   Worker 0 ──req──►     │    batches leaf-eval requests       │
   Worker 1 ──req──►     │    runs one forward pass for all    │
-    ...       ...       │    sends (logits, value) back       │
+    ...      ...        │    sends (logits, value) back       │
   Worker N ──req──►     │                                     │
        ▲                │  Training loop                      │
        │                │    samples replay buffer            │

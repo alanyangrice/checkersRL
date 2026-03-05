@@ -6,7 +6,7 @@
 <div class="max-w-2xl flex flex-col gap-8">
 
 	<div>
-		<h1 class="text-2xl font-medium text-gray-900">Project Writeup</h1>
+		<h1 class="text-2xl font-semibold text-gray-900">Project Writeup</h1>
 		<p class="text-gray-500 mt-2 text-sm">Currently in progress...</p>
 	</div>
 

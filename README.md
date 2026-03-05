@@ -15,15 +15,17 @@ A fully playable checkers game with reinforcement learning agents trained via **
 
 ## Technologies
 
-| Technology | Purpose |
-|---|---|
-| **Python** | Core language |
-| **Pygame** | Game rendering & user input |
-| **PyTorch** | Neural network + GPU training |
-| **NumPy** | Board state encoding & array operations |
-| **Gymnasium** | RL environment interface |
-| **FastAPI / SvelteKit** | Web backend and frontend |
-| **multiprocessing** | Parallel game simulation across CPU workers |
+
+| Technology              | Purpose                                     |
+| ----------------------- | ------------------------------------------- |
+| **Python**              | Core language                               |
+| **Pygame**              | Game rendering & user input                 |
+| **PyTorch**             | Neural network + GPU training               |
+| **NumPy**               | Board state encoding & array operations     |
+| **Gymnasium**           | RL environment interface                    |
+| **FastAPI / SvelteKit** | Web backend and frontend                    |
+| **multiprocessing**     | Parallel game simulation across CPU workers |
+
 
 ## Project Structure
 
@@ -94,30 +96,47 @@ Each move runs N simulations: **Select** (PUCT, c=1.5) → **Expand** → **Eval
 - **CPU Workers**: simulate games in parallel; opponent inference runs CPU-local; a dynamic task queue eliminates straggler delays
 - **PPO Update**: runs on GPU in the main process after all games complete each epoch
 
-### Training Configuration
+### PPO Training Configuration
 
-| Parameter | Value |
-|---|---|
-| Learning rate | 1e-4 (cosine annealed to 1e-6) |
-| Discount (gamma) | 0.99 |
-| PPO clip range | 0.2 |
-| GAE lambda | 0.95 |
-| Mini-batch size | 2048 |
-| Games per epoch | 5000 |
+
+| Parameter        | Value                          |
+| ---------------- | ------------------------------ |
+| Learning rate    | 1e-4 (cosine annealed to 1e-6) |
+| Discount (gamma) | 0.99                           |
+| PPO clip range   | 0.2                            |
+| GAE lambda       | 0.95                           |
+| Mini-batch size  | 2048                           |
+| Games per epoch  | 5000                           |
+
+
+### AlphaZero Training Configuration
+
+
+| Parameter                | Value                                            |
+| ------------------------ | ------------------------------------------------ |
+| Games per epoch          | 100 MCTS self-play games                         |
+| Simulations per move     | 75 (endgame) → 200 (mid-game) → 400 (full 12v12) |
+| Temperature              | T=1.0 for first 20 moves, then T=0.4             |
+| Replay buffer            | 500,000 positions (FIFO)                         |
+| Gradient steps per epoch | adaptive: clip(35 × newpositions / 256, 50, 500) |
+| Gradient clip            | 1.0                                              |
+
 
 ### Reward Shaping (PPO mode)
 
-All shaped rewards scaled by 0.5 so terminal outcomes dominate.
+All shaped rewards scaled by 0.5 so terminal outcomes dominate. Values below are the defaults for single-agent training; league agents override the tie penalty per-agent (tactical: −200, aggressive: −500).
 
-| Signal | Reward |
-|---|---|
-| Win | +100 |
-| Loss | −100 |
-| King promotion | +7.5 |
-| Capture | +5.0 |
-| Capture penalty (opponent) | −2.5 retroactive per captured piece |
-| Tie | −80 base − up to −48 stall (scales with material advantage and total pieces) |
-| Time penalty | −sqrt(moves)/10 per non-terminal move |
+
+| Signal                     | Reward                                                                       |
+| -------------------------- | ---------------------------------------------------------------------------- |
+| Win                        | +100                                                                         |
+| Loss                       | −100                                                                         |
+| King promotion             | +7.5                                                                         |
+| Capture                    | +5.0                                                                         |
+| Capture penalty (opponent) | −2.5 retroactive per captured piece                                          |
+| Tie (default)              | −80 base − up to −48 stall (scales with material advantage and total pieces) |
+| Time penalty               | −sqrt(moves)/10 per non-terminal move                                        |
+
 
 ### Multi-Agent League Play
 
@@ -125,11 +144,13 @@ Standard self-play causes **co-evolution collapse** — both agents converge to 
 
 Our approach: **reward-diverse league training** with three agent types sharing a unified opponent pool. When any agent samples a pool opponent, it draws from all three agents' checkpoints — guaranteeing cross-style exposure every epoch.
 
-| Agent type | Reward profile | Emergent play style |
-|---|---|---|
-| `tactical` | Balanced captures + king promotion + tie penalty −200 | Well-rounded baseline |
-| `terminal` | Terminal only (win/loss/tie), no shaping | Long-horizon positional |
-| `aggressive` | 2× capture bonus, king promotion +25, tie penalty −500 | Piece-hungry, forces exchanges |
+
+| Agent type   | Reward profile                           | Emergent play style            |
+| ------------ | ---------------------------------------- | ------------------------------ |
+| `tactical`   | Balanced captures + king promotion       | Well-rounded baseline          |
+| `terminal`   | Terminal only (win/loss/tie), no shaping | Long-horizon positional        |
+| `aggressive` | 2× capture bonus, king promotion +25     | Piece-hungry, forces exchanges |
+
 
 New agent types can be added by extending `LEAGUE_AGENTS` in `training_config.py`.
 
@@ -236,27 +257,23 @@ cd web/frontend && npm run build
 
 ## References
 
-1. **Schulman, J., Wolski, F., Dhariwal, P., Radford, A., & Klimov, O.** (2017). *Proximal Policy Optimization Algorithms.* arXiv:1707.06347. [[paper]](https://arxiv.org/abs/1707.06347) — Core training algorithm.
-
+1. **Schulman, J., Wolski, F., Dhariwal, P., Radford, A., & Klimov, O.** (2017). *Proximal Policy Optimization Algorithms.* arXiv:1707.06347. [[paper]](https://arxiv.org/abs/1707.06347) — Core PPO training algorithm.
 2. **Schulman, J., Moritz, P., Levine, S., Jordan, M., & Abbeel, P.** (2015). *High-Dimensional Continuous Control Using Generalized Advantage Estimation.* arXiv:1506.02438. [[paper]](https://arxiv.org/abs/1506.02438) — GAE for lower-variance policy gradient.
-
-3. **Silver, D., Hubert, T., Schrittwieser, J., et al.** (2018). *A General Reinforcement Learning Algorithm that Masters Chess, Shogi, and Go Through Self-Play.* Science, 362(6419). arXiv:1712.01815. [[paper]](https://arxiv.org/abs/1712.01815) — AlphaZero: residual CNN architecture, self-play training, 1x1 conv heads.
-
+3. **Silver, D., Hubert, T., Schrittwieser, J., et al.** (2018). *A General Reinforcement Learning Algorithm that Masters Chess, Shogi, and Go Through Self-Play.* Science, 362(6419). arXiv:1712.01815. [[paper]](https://arxiv.org/abs/1712.01815) — AlphaZero: residual CNN architecture, MCTS self-play training, replay buffer and training step design.
 4. **He, K., Zhang, X., Ren, S., & Sun, J.** (2016). *Deep Residual Learning for Image Recognition.* CVPR 2016. arXiv:1512.03385. [[paper]](https://arxiv.org/abs/1512.03385) — Residual blocks with skip connections.
-
 5. **Raileanu, R., Goldstein, M., Yarats, D., Kostrikov, I., & Fergus, R.** (2021). *Automatic Data Augmentation for Generalization in Reinforcement Learning.* NeurIPS 2021. arXiv:2006.12862. [[paper]](https://arxiv.org/abs/2006.12862) — DrAC: observation augmentation in actor-critic training.
-
-6. **Huang, S., & Ontanon, S.** (2020). *A Closer Look at Invalid Action Masking in Policy Gradient Algorithms.* arXiv:2006.14171. [[paper]](https://arxiv.org/abs/2006.14171) — Analysis of consistent action masking in PPO.
-
+6. **Huang, S., & Ontanon, S.** (2020). *A Closer Look at Invalid Action Masking in Policy Gradient Algorithms.* arXiv:2006.14171. [[paper]](https://arxiv.org/abs/2006.14171) — Consistent action masking during both collection and PPO update to preserve importance ratios.
 7. **Coulom, R.** (2006). *Efficient Selectivity and Backup Operators in Monte-Carlo Tree Search.* Computers and Games. [[paper]](https://link.springer.com/chapter/10.1007/978-3-540-75538-8_7) — Foundational MCTS with UCT.
-
 8. **Rosin, C. D.** (2011). *Multi-armed Bandits with Episode Context.* Annals of Mathematics and Artificial Intelligence, 61(3), 203–230. — PUCT selection formula used in AlphaZero MCTS.
-
-9. **Vinyals, O., Babuschkin, I., Czarnecki, W. M., et al.** (DeepMind). (2019). *Grandmaster level in StarCraft II using multi-agent reinforcement learning.* Nature, 575(7782), 350–354. https://doi.org/10.1038/s41586-019-1724-z — League play with agent-role diversity (main agents, exploiters) and PFSP opponent sampling to prevent co-evolution collapse.
-
+9. **Vinyals, O., Babuschkin, I., Czarnecki, W. M., et al.** (DeepMind). (2019). *Grandmaster level in StarCraft II using multi-agent reinforcement learning.* Nature, 575(7782), 350–354. [[paper]](https://doi.org/10.1038/s41586-019-1724-z) — League play with agent-role diversity and PFSP opponent sampling to prevent co-evolution collapse.
 10. **Berner, C., Brockman, G., Chan, B., et al.** (OpenAI). (2019). *Dota 2 with Large Scale Deep Reinforcement Learning.* arXiv:1912.06680. [[paper]](https://arxiv.org/abs/1912.06680) — Population-based training with diverse reward shaping and historical policy sampling (80% self-play / 20% historical) to prevent strategy cycling.
-
-11. **Lanctot, M., Zambaldi, V., Gruslys, A., et al.** (2017). *A Unified Game-Theoretic Approach to Multiagent Reinforcement Learning.* NeurIPS 2017. arXiv:1711.00832. [[paper]](https://arxiv.org/abs/1711.00832) — PSRO: the game-theoretic foundation showing naive self-play converges to a pathological Nash equilibrium; best responses to the mixture of past policies provably converges to the true Nash.
+11. **Lanctot, M., Zambaldi, V., Gruslys, A., et al.** (2017). *A Unified Game-Theoretic Approach to Multiagent Reinforcement Learning.* NeurIPS 2017. arXiv:1711.00832. [[paper]](https://arxiv.org/abs/1711.00832) — PSRO: game-theoretic foundation showing naive self-play converges to a pathological Nash equilibrium; best responses against the mixture of past policies provably converges to the true Nash.
+12. **Lc0 Team.** (2020, April). *WDL Head.* Leela Chess Zero Blog. [[blog]](https://lczero.org/blog/2020/04/wdl-head/) — Separately predicting P(win), P(draw), P(loss) gives more calibrated evaluations in draw-heavy games and enables principled contempt via P(draw) for the material-ahead side. See also v0.30.0 release notes (Jul 2023) for WDL-based contempt implementation. [[release]](https://github.com/LeelaChessZero/lc0/releases/tag/v0.30.0)
+13. **Willemsen, D., Baier, H., & Kaisers, M.** (2022). *Value targets in off-policy AlphaZero: a new greedy backup.* Neural Computing and Applications, 34(3), 1801–1814. — Soft-Z value blending (SOFT_Z_ALPHA=0.8): mixing MCTS Q-values with game outcomes as training targets to reduce on-policy bias from exploratory Dirichlet-noised self-play.
+14. **Trudeau, F., & Bowling, M.** (2023). *Go-Exploit: Improving AlphaZero with Starting Positions from High-Regret States.* arXiv:2302.12359. [[paper]](https://arxiv.org/abs/2302.12359) — Regret-guided starting position diversity: replaying positions where the value estimate diverged most from the final outcome to direct training toward misevaluated states.
+15. **Tsai, J. Y., et al.** (2026). *RGSC: Regret-Guided Self-play Curriculum.* arXiv:2602.20809. [[paper]](https://arxiv.org/abs/2602.20809) — Curriculum using high-regret states (|MCTS Q − outcome| > 0.5) as self-play starting positions for training position diversity.
+16. **Joshi, A.** (2025). arXiv:2504.07757. [[paper]](https://arxiv.org/abs/2504.07757) — Corroborates simulation count non-monotonicity in AlphaZero evaluation; motivates matching EVAL_SIMULATIONS to the training simulation budget in gating tests.
+17. **Wu, D.** (2019). *Accelerating Self-Play Learning in Go.* arXiv:1902.10565. [[paper]](https://arxiv.org/abs/1902.10565) — KataGo: higher replay ratios and increased training steps per epoch for improved sample efficiency in AlphaZero-style training.
 
 ## License
 
