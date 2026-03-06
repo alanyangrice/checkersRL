@@ -5,10 +5,9 @@ os.environ["SDL_AUDIODRIVER"] = "dummy"
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 from checkers_game.constants import BLUE, RED, ALL_ACTIONS, encode_action
-from RL_models.checkers_env import CheckersEnv
-from RL_models.MCTS.AlphaZeroNetwork import AlphaZeroNetwork
-from RL_models.MCTS.WDLAlphaZeroNetwork import WDLAlphaZeroNetwork
-from RL_models.MCTS.mcts_search import MCTSSearch
+from RL_models.envs import CheckersEnv
+from RL_models.networks import AlphaZeroNetwork, WDLAlphaZeroNetwork
+from RL_models.mcts.mcts_search import MCTSSearch
 from web.backend.models_config import MODELS
 
 env = CheckersEnv()

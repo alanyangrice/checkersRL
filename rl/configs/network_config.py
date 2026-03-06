@@ -1,0 +1,8 @@
+"""Network architecture constants shared across MCTS and PPO models."""
+
+BACKBONE_CHANNELS = 256
+NUM_RES_BLOCKS = 5
+POLICY_HEAD_CHANNELS = 2
+
+MCTS_VALUE_HEAD_CHANNELS = 32
+PPO_VALUE_HEAD_CHANNELS = 1

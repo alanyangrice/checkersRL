@@ -33,12 +33,11 @@ from pydantic import BaseModel
 from checkers_game.constants import (
     BLUE, RED, NUM_ACTIONS, ALL_ACTIONS, encode_action,
 )
-from RL_models.checkers_env import CheckersEnv
-from RL_models.MCTS.AlphaZeroNetwork import AlphaZeroNetwork
-from RL_models.MCTS.WDLAlphaZeroNetwork import WDLAlphaZeroNetwork
-from RL_models.MCTS.mcts_search import MCTSSearch
-from RL_models.PPO_Model.PolicyNetwork import PPOPolicyNetwork
-from RL_models.PPO_Model.Agent import load_policy_state_dict
+from RL_models.envs import CheckersEnv
+from RL_models.networks import AlphaZeroNetwork, WDLAlphaZeroNetwork
+from RL_models.mcts.mcts_search import MCTSSearch
+from RL_models.networks import PPOPolicyNetwork
+from RL_models.ppo.agent import load_policy_state_dict
 
 from web.backend.models_config import MODELS
 from web.backend.sessions import games
