@@ -1,4 +1,4 @@
-import type { ModelInfo, BoardResponse, AZStats, PPOStats, BenchmarkStats } from './types';
+import type { ModelInfo, BoardResponse } from './types';
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
 	const res = await fetch(path, options);
@@ -38,15 +38,11 @@ export const api = {
 		});
 	},
 
-	statsAlphaZero(): Promise<AZStats> {
-		return request<AZStats>('/api/training/alphazero');
-	},
-
-	statsPPO(): Promise<PPOStats> {
-		return request<PPOStats>('/api/training/ppo');
-	},
-
-	statsBenchmarks(): Promise<BenchmarkStats> {
-		return request<BenchmarkStats>('/api/training/benchmarks');
+	aiMove(gameId: string): Promise<BoardResponse> {
+		return request<BoardResponse>('/api/ai_move', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ game_id: gameId }),
+		});
 	},
 };

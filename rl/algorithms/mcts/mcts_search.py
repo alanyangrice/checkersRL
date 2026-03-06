@@ -54,13 +54,6 @@ class MCTSSearch:
         move_cap=None,
         config=None,
     ):
-        config = config or default_config
-        self.config = config
-        self.num_simulations = num_simulations or config.NUM_SIMULATIONS
-        self.c_puct = c_puct or config.C_PUCT
-        self.dirichlet_alpha = dirichlet_alpha or config.DIRICHLET_ALPHA
-        self.dirichlet_epsilon = dirichlet_epsilon or config.DIRICHLET_EPSILON
-        self.move_cap = move_cap or config.MAX_GAME_MOVES_FULL
         """Create an MCTS search object.
 
         Exactly one of *network* or *evaluator* must be supplied:
@@ -80,14 +73,17 @@ class MCTSSearch:
         if network is not None and evaluator is not None:
             raise ValueError("Provide network or evaluator, not both")
 
+        config = config or default_config
+        self.config = config
+        
         self.network   = network
         self.evaluator = evaluator
-        self.num_simulations = num_simulations
-        self.c_puct = c_puct
-        self.dirichlet_alpha = dirichlet_alpha
-        self.dirichlet_epsilon = dirichlet_epsilon
+        self.num_simulations = num_simulations or config.NUM_SIMULATIONS
+        self.c_puct = c_puct or config.C_PUCT
+        self.dirichlet_alpha = dirichlet_alpha or config.DIRICHLET_ALPHA
+        self.dirichlet_epsilon = dirichlet_epsilon or config.DIRICHLET_EPSILON
         self.device = device or torch.device("cpu")
-        self.move_cap = move_cap
+        self.move_cap = move_cap or config.MAX_GAME_MOVES_FULL
 
         self._root = None  # cached root node for tree reuse between moves
 
@@ -148,8 +144,9 @@ class MCTSSearch:
         priors, root_value, action_mask = self._evaluate(env)
 
         if action_mask.sum() == 0:
+            # Current player has no legal moves -> they lose
             self._root = None
-            return np.zeros(NUM_ACTIONS, dtype=np.float32), root_value
+            return np.zeros(NUM_ACTIONS, dtype=np.float32), -1.0
 
         if add_noise:
             priors = self._add_dirichlet_noise(priors, action_mask)
@@ -178,7 +175,11 @@ class MCTSSearch:
 
             # --- SELECT ---------------------------------------------------
             while node.is_expanded and not node.is_terminal:
-                node = node.best_child(self.c_puct)
+                best_c = node.best_child(self.c_puct)
+                if best_c is None:
+                    # In case of empty children (no valid actions/masked out)
+                    break
+                node = best_c
                 _, _, done, _, info = env_copy.step(node.action)
                 node_player = env_copy.game.turn
                 search_path.append((node, node_player))

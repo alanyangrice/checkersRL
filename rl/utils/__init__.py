@@ -9,11 +9,11 @@ from rl.utils.action_utils import (
     uniform_log_prob,
 )
 from rl.utils.seed_utils import set_seed
-from rl.training.checkpoint_utils import (
+from rl.training_utils.checkpoint_utils import (
     find_latest_checkpoint_path,
     prune_checkpoints,
 )
-from rl.training.device_utils import (
+from rl.training_utils.device_utils import (
     get_device,
     torch_compile_available,
 )

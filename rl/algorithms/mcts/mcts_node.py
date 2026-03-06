@@ -51,7 +51,8 @@ class MCTSNode:
             return 0.0
 
         parent_visits = self.parent.visit_count
-        exploration = c_puct * self.prior * math.sqrt(max(parent_visits, 1)) / (1 + self.visit_count)
+        prior = self.prior if self.prior is not None else 0.0
+        exploration = c_puct * prior * math.sqrt(max(parent_visits, 1)) / (1 + self.visit_count)
         return self.q_value + exploration
 
     @property
@@ -65,6 +66,8 @@ class MCTSNode:
 
     def best_child(self, c_puct=1.5):
         """Select the child with the highest UCB score."""
+        if not self.children:
+            return None
         return max(self.children.values(), key=lambda c: c.ucb_score(c_puct))
 
     def best_action_by_visits(self):

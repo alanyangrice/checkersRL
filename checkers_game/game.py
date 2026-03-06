@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 class Game:
-    def __init__(self, no_progress_draw_moves=40):
+    def __init__(self, no_progress_draw_moves=80):
         self.board = Board()
 
         self.turn = BLUE  # Blue starts first
@@ -296,6 +296,7 @@ class Game:
 
         # No-progress draw (WCDF 40-move rule)
         if self._no_progress_count >= self._no_progress_draw_moves:
+            print(f"DEBUG TIE: No progress count reached {self._no_progress_count}")
             return "Tie"
 
         # Board state repetition — key includes the side-to-move so that
@@ -304,6 +305,7 @@ class Game:
         board_hash = (self.board.get_board_hash(), self.turn)
         self.board_states[board_hash] = self.board_states.get(board_hash, 0) + 1
         if self.board_states[board_hash] >= 5:
+            print(f"DEBUG TIE: 5-fold repetition reached")
             return "Tie"
 
         return None

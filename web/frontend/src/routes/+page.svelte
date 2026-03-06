@@ -234,34 +234,43 @@
 					}];
 				}
 
-				// 2. Brief pause so the human's move is visible before the AI responds
-				await sleep(500);
-
-				// 3. Animate AI multi-capture hops, then push AI snapshot
-				if (resp.ai_move) {
-					const fullPath = parsePath(resp.ai_move);
-					if (resp.ai_boards && resp.ai_boards.length > 1) {
-						await animateHops(resp.ai_boards as BoardState[], fullPath);
-					}
-					snapshots = [...snapshots, {
-						board:       resp.board,
-						aiMovePath:  fullPath,
-						notation:    `AI: ${resp.ai_move}`,
-						value:       resp.post_ai_value,
-						by:          'ai',
-					}];
-					lastAiMove = resp.ai_move;
-					aiMovePath = fullPath;
-					notify(resp.done ? `AI played ${resp.ai_move} — ${winnerText(resp.winner)}` : `AI played ${resp.ai_move}`);
-				} else if (resp.done) {
-					notify(winnerText(resp.winner));
-					showEndOverlay = true;
-				}
-
 				preMoveBoard = null;
 				humanPath = [];
 				viewIndex = null;
-				if (resp.done) showEndOverlay = true;
+
+				if (resp.done) {
+					notify(winnerText(resp.winner));
+					showEndOverlay = true;
+				} else {
+					// 2. Brief pause so the human's move is visible before the AI responds
+					await sleep(500);
+
+					// 3. Request AI move
+					const aiResp = await api.aiMove(gameId);
+					applyLiveState(aiResp);
+
+					if (aiResp.ai_move) {
+						const fullPath = parsePath(aiResp.ai_move);
+						if (aiResp.ai_boards && aiResp.ai_boards.length > 1) {
+							await animateHops(aiResp.ai_boards as BoardState[], fullPath);
+						}
+						snapshots = [...snapshots, {
+							board:       aiResp.board,
+							aiMovePath:  fullPath,
+							notation:    `AI: ${aiResp.ai_move}`,
+							value:       aiResp.post_ai_value,
+							by:          'ai',
+						}];
+						lastAiMove = aiResp.ai_move;
+						aiMovePath = fullPath;
+						notify(aiResp.done ? `AI played ${aiResp.ai_move} — ${winnerText(aiResp.winner)}` : `AI played ${aiResp.ai_move}`);
+					}
+
+					if (aiResp.done) {
+						notify(winnerText(aiResp.winner));
+						showEndOverlay = true;
+					}
+				}
 			}
 		} catch (e: unknown) {
 			error = e instanceof Error ? e.message : 'Move failed.';

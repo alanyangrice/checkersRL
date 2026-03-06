@@ -105,7 +105,7 @@ class NumpyCheckersEnv:
 
     @classmethod
     def from_env(cls, env, move_cap=250, adjudicate_cap=False,
-                 no_progress_count=0, no_progress_draw_moves=40):
+                 no_progress_count=0, no_progress_draw_moves=80):
         """Convert a running CheckersEnv snapshot to NumpyCheckersEnv.
 
         Called once per MCTS search call — the conversion cost is negligible
@@ -172,7 +172,7 @@ class NumpyCheckersEnv:
                    is_capture_turn=False, action_mask=None,
                    base_counts=None, delta_counts=None,
                    move_cap=250, adjudicate_cap=False,
-                   no_progress_count=0, no_progress_draw_moves=40):
+                   no_progress_count=0, no_progress_draw_moves=80):
         """Internal factory used by from_env() and fast_clone().
 
         Repetition tracking uses two dicts:

@@ -10,7 +10,7 @@ import torch.nn as nn
 
 from checkers_game.constants import BLUE, RED
 
-from rl.training.checkpoint_utils import find_latest_checkpoint_path
+from rl.training_utils.checkpoint_utils import find_latest_checkpoint_path
 from rl.configs.mcts_config import MCTSConfig
 
 default_config = MCTSConfig()

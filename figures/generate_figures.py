@@ -24,16 +24,16 @@ matplotlib.use("Agg")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = {
-    "az_scalar_train":  os.path.join(ROOT, "RL_models/MCTS/alphazero_training_progress_parallel_scalar.csv"),
-    "az_scalar_eval":   os.path.join(ROOT, "RL_models/MCTS/alphazero_eval_benchmarks_scalar.csv"),
-    "az_wdl_train":     os.path.join(ROOT, "RL_models/MCTS/alphazero_training_progress_parallel_wdl.csv"),
-    "az_wdl_eval":      os.path.join(ROOT, "RL_models/MCTS/alphazero_eval_benchmarks_wdl.csv"),
-    "ppo_cs_train":     os.path.join(ROOT, "RL_models/PPO_Model/training_progress_parallel_cs.csv"),
-    "ppo_cs_bench":     os.path.join(ROOT, "RL_models/PPO_Model/benchmark_parallel_cs.csv"),
-    "ppo_tactical":     os.path.join(ROOT, "RL_models/PPO_Model/training_progress_tactical.csv"),
-    "ppo_terminal":     os.path.join(ROOT, "RL_models/PPO_Model/training_progress_terminal.csv"),
-    "ppo_aggressive":   os.path.join(ROOT, "RL_models/PPO_Model/training_progress_aggressive.csv"),
-    "ppo_league_bench": os.path.join(ROOT, "RL_models/PPO_Model/benchmark_league.csv"),
+    "az_scalar_train":  os.path.join(ROOT, "rl/training_results/mcts/alphazero_training_progress_parallel.csv"),
+    "az_scalar_eval":   os.path.join(ROOT, "rl/training_results/mcts/alphazero_eval_benchmarks.csv"),
+    "az_wdl_train":     os.path.join(ROOT, "rl/training_results/mcts/alphazero_training_progress_parallel_wdl.csv"),
+    "az_wdl_eval":      os.path.join(ROOT, "rl/training_results/mcts/alphazero_eval_benchmarks_wdl.csv"),
+    "ppo_cs_train":     os.path.join(ROOT, "rl/training_results/ppo/training_progress_parallel_run5.csv"),
+    "ppo_cs_bench":     os.path.join(ROOT, "rl/training_results/ppo/benchmark_parallel_run5.csv"),
+    "ppo_tactical":     os.path.join(ROOT, "rl/training_results/ppo/training_progress_tactical.csv"),
+    "ppo_terminal":     os.path.join(ROOT, "rl/training_results/ppo/training_progress_terminal.csv"),
+    "ppo_aggressive":   os.path.join(ROOT, "rl/training_results/ppo/training_progress_aggressive.csv"),
+    "ppo_league_bench": os.path.join(ROOT, "rl/training_results/ppo/benchmark_league.csv"),
 }
 
 OUT = {

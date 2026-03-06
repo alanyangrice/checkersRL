@@ -16,9 +16,9 @@ from rl.algorithms.mcts.utils import (
     get_curriculum_options,
     get_material,
 )
-from rl.training.gpu_inference_server import AlphaZeroInferenceServer
-from rl.training.worker_pool import BaseWorkerContext
-from rl.training.parallel_utils import attach_shm_buffers, WORKER_EXIT as WORKER_EXIT, WORKER_BATCH_DONE as WORKER_BATCH_DONE
+from rl.training_utils.gpu_inference_server import AlphaZeroInferenceServer
+from rl.training_utils.worker_pool import BaseWorkerContext
+from rl.training_utils.parallel_utils import attach_shm_buffers, WORKER_EXIT as WORKER_EXIT, WORKER_BATCH_DONE as WORKER_BATCH_DONE
 from rl.configs.mcts_config import MCTSConfig
 
 default_config = MCTSConfig()
