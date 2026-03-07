@@ -1,5 +1,9 @@
 # Ignore folders
-rl/training_results/
+rl/training_results/mcts/alphazero_checkpoints*
+rl/training_results/mcts/az_detailed_games_parallel*
+rl/training_results/ppo/opponent_pool*
+rl/training_results/ppo/ppo_saved_models*
+rl/training_results/ppo/training_progress_detailed*
 
 # Ignore Python cache
 __pycache__/

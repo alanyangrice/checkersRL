@@ -50,9 +50,6 @@ from checkers_game.constants import (
     board_number_to_position, position_to_board_number,
 )
 
-from rl.configs.mcts_config import MCTSConfig
-_default_config = MCTSConfig()
-
 # ── Board cell constants ──────────────────────────────────────────────────────
 EMPTY      = np.int8(0)
 BLUE_PIECE = np.int8(1)
@@ -454,11 +451,12 @@ class NumpyCheckersEnv:
         Kings count as KING_MATERIAL_VALUE regular pieces.
         Equal material → "Tie".
         """
+        from RL_models.MCTS import training_config as cfg  # local import avoids circular dep
         b = self._board
         blue_mat = (float(np.sum(b == BLUE_PIECE)) +
-                    _default_config.KING_MATERIAL_VALUE * float(np.sum(b == BLUE_KING)))
+                    cfg.KING_MATERIAL_VALUE * float(np.sum(b == BLUE_KING)))
         red_mat  = (float(np.sum(b == RED_PIECE)) +
-                    _default_config.KING_MATERIAL_VALUE * float(np.sum(b == RED_KING)))
+                    cfg.KING_MATERIAL_VALUE * float(np.sum(b == RED_KING)))
         if blue_mat > red_mat:
             return BLUE
         elif red_mat > blue_mat:

@@ -118,45 +118,106 @@ def resume_from_checkpoint(model_dir, buffer_path, network, optimizer, device,
                            network_type_str, use_wdl, replay_buffer, config=None):
     """Load latest checkpoint and replay buffer. Returns start_epoch or 0 if none."""
     config = config or default_config
-    path = find_latest_checkpoint_path(model_dir, prefix="az_epoch_")
-    if path is None:
+    
+    # If gating is enabled, the true "latest state" to resume from is the reference model,
+    # because standard checkpoints might contain weights that were rejected by the gate.
+    if config.GATE_ENABLED:
+        ref_path = os.path.join(model_dir, "az_reference_model.pt")
+        latest_path = find_latest_checkpoint_path(model_dir, prefix="az_epoch_")
+        
+        # If there's an az_epoch_N.pt that is strictly newer than the reference model,
+        # it means the last run was killed *before* a gating test happened for that epoch.
+        # So we should resume from the latest epoch, not the older reference model.
+        if latest_path is not None and os.path.exists(ref_path):
+            latest_epoch = int(os.path.basename(latest_path).split('_')[-1].split('.')[0])
+            
+            ref_ckpt = torch.load(ref_path, map_location=device, weights_only=False)
+            ref_epoch = ref_ckpt.get("epoch", 0)
+            
+            # If the latest checkpoint is exactly the same epoch as the reference, we use the reference.
+            # If the latest checkpoint is newer (e.g. 140 vs ref 105), we use the latest checkpoint.
+            if latest_epoch > ref_epoch:
+                path = latest_path
+            else:
+                path = ref_path
+        elif os.path.exists(ref_path):
+            path = ref_path
+        else:
+            path = latest_path
+    else:
+        path = find_latest_checkpoint_path(model_dir, prefix="az_epoch_")
+
+    if path is None or not os.path.exists(path):
         return 0
 
     ckpt = torch.load(path, map_location=device, weights_only=False)
-    ckpt_network_type = ckpt.get("network_type", "scalar")
-    if ckpt_network_type != network_type_str:
-        raise RuntimeError(
-            f"Checkpoint network_type='{ckpt_network_type}' does not match "
-            f"--network-type '{network_type_str}'. Use the correct flag or "
-            f"start a new run from scratch."
-        )
+    
+    # Validation checks
+    if "network_type" in ckpt: # Reference models might not have this key, standard checkpoints do
+        ckpt_network_type = ckpt.get("network_type", "scalar")
+        if ckpt_network_type != network_type_str:
+            raise RuntimeError(
+                f"Checkpoint network_type='{ckpt_network_type}' does not match "
+                f"--network-type '{network_type_str}'. Use the correct flag or "
+                f"start a new run from scratch."
+            )
+            
     # Backward compatibility with unified DualHeadResNet
     state_dict = ckpt["model_state_dict"]
-    if not any(k.startswith('net.') for k in state_dict):
+    
+    model_has_net = any(k.startswith('net.') for k in network.state_dict().keys())
+    ckpt_has_net = any(k.startswith('net.') for k in state_dict.keys())
+    
+    if model_has_net and not ckpt_has_net:
         state_dict = {f"net.{k}": v for k, v in state_dict.items()}
+    elif ckpt_has_net and not model_has_net:
+        state_dict = {k.replace('net.', '', 1): v for k, v in state_dict.items() if k.startswith('net.')}
+        
     network.load_state_dict(state_dict)
-    optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+    
+    if "optimizer_state_dict" in ckpt:
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        
     start_epoch = ckpt.get("epoch", 0)
     for pg in optimizer.param_groups:
         pg["lr"] = config.get_lr(start_epoch)
+        
     if "rng_state_torch" in ckpt:
-        torch.random.set_rng_state(ckpt["rng_state_torch"])
+        torch.random.set_rng_state(ckpt["rng_state_torch"].cpu())
     if "rng_state_numpy" in ckpt:
         np.random.set_state(ckpt["rng_state_numpy"])
     if "rng_state_python" in ckpt:
         import random
         random.setstate(ckpt["rng_state_python"])
-    print(f"Resumed from epoch {start_epoch}")
+        
+    print(f"Resumed from epoch {start_epoch} (using {os.path.basename(path)})")
 
-    if os.path.exists(buffer_path):
-        buf_data = np.load(buffer_path)
+    # When resuming from a reference model, load the reference buffer instead of the live buffer
+    if config.GATE_ENABLED and os.path.basename(path) == "az_reference_model.pt":
+        target_buffer_path = os.path.join(model_dir, "az_reference_buffer.npz")
+    else:
+        target_buffer_path = buffer_path
+
+    if os.path.exists(target_buffer_path):
+        buf_data = np.load(target_buffer_path)
         states, policies, outcomes = (
             buf_data["states"], buf_data["policies"], buf_data["outcomes"]
         )
         for s, p, o in zip(states, policies, outcomes):
             target = o if use_wdl else float(o)
             replay_buffer.append((s, p, target))
-        print(f"  Replay buffer restored: {len(replay_buffer):,} positions")
+        print(f"  Replay buffer restored from {os.path.basename(target_buffer_path)}: {len(replay_buffer):,} positions")
+    elif os.path.exists(os.path.join(model_dir, "az_reference_buffer.npz")): # Fallback to reference buffer if live buffer is missing
+        fallback_path = os.path.join(model_dir, "az_reference_buffer.npz")
+        buf_data = np.load(fallback_path)
+        states, policies, outcomes = (
+            buf_data["states"], buf_data["policies"], buf_data["outcomes"]
+        )
+        for s, p, o in zip(states, policies, outcomes):
+            target = o if use_wdl else float(o)
+            replay_buffer.append((s, p, target))
+        print(f"  Replay buffer restored from {os.path.basename(fallback_path)} (fallback): {len(replay_buffer):,} positions")
+        
     return start_epoch
 
 

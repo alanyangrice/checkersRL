@@ -262,6 +262,16 @@ class WorkerContext(BaseWorkerContext):
         input_shape  = (4, 8, 8)
         NetworkClass = WDLAlphaZeroNetwork if use_wdl else AlphaZeroNetwork
         self._server_model = NetworkClass(input_shape, NUM_ACTIONS).to(device)
+        
+        # Handle state dict key mismatches (e.g., 'net.' prefix)
+        model_has_net = any(k.startswith('net.') for k in self._server_model.state_dict().keys())
+        ckpt_has_net = any(k.startswith('net.') for k in initial_state_dict.keys())
+        
+        if model_has_net and not ckpt_has_net:
+            initial_state_dict = {f"net.{k}": v for k, v in initial_state_dict.items()}
+        elif ckpt_has_net and not model_has_net:
+            initial_state_dict = {k.replace('net.', '', 1): v for k, v in initial_state_dict.items() if k.startswith('net.')}
+            
         self._server_model.load_state_dict(initial_state_dict)
         self._server_model.eval()
 

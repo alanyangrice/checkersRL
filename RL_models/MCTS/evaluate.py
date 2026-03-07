@@ -7,43 +7,27 @@ Provides:
                                       dummy (uniform) network on a 2-move position.
   4. test_value_head_calibration() — checks value head on positions with known
                                       outcome bias (4v1, 1v4, 3v3 piece counts).
-  5. EvalContext                  — parallel two-network gating (workers + GPU servers).
 
 Gating games use stochastic openings (temperature=1 for the first K moves)
 to produce diverse game lines even when policies are sharp.
 """
 
 import random as _random
-import threading
-from multiprocessing import Process, Queue
-from multiprocessing import shared_memory as _shm_module
 
 import numpy as np
 import torch
 import torch.nn as nn
 
-from rl.envs import CheckersEnv
-
-from rl.algorithms.mcts.mcts_search import MCTSSearch
-from rl.networks import AlphaZeroNetwork, WDLAlphaZeroNetwork
-from rl.algorithms.mcts.parallel_infra import AlphaZeroInferenceServer
-from rl.algorithms.mcts.parallel_infra import RemoteEvaluator
-from rl.training_utils.parallel_utils import WORKER_EXIT
-from rl.training_utils.gpu_inference_server import SHUTDOWN
-from rl.training_utils.parallel_utils import shutdown_workers
-from rl.training_utils.parallel_utils import WORKER_BATCH_DONE
-from rl.training_utils.parallel_utils import collect_results
-from rl.training_utils.parallel_utils import attach_shm_buffers
-from rl.algorithms.mcts.utils import adjudicate_move_cap
+from RL_models.checkers_env import CheckersEnv
+from RL_models.MCTS.mcts_search import MCTSSearch
+from RL_models.MCTS.AlphaZeroNetwork import AlphaZeroNetwork
+from RL_models.MCTS import training_config as cfg
 from checkers_game.constants import (
     BLUE, RED, NUM_ACTIONS, ROWS, COLS,
     board_number_to_position, position_to_board_number, encode_action,
 )
-from checkers_game.board import Board
 from checkers_game.piece import Piece
 
-from rl.configs.mcts_config import MCTSConfig
-default_config = MCTSConfig()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -60,13 +44,35 @@ def freeze_state_dict(model):
     return {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
 
 
+def _adjudicate_move_cap(env):
+    """Determine winner at move cap based on material (same rule as training)."""
+    if not cfg.MOVE_CAP_ADJUDICATE:
+        return "Tie"
+    board = env.game.board.board
+    blue_mat = sum(
+        cfg.KING_MATERIAL_VALUE if (p != 0 and p.color == BLUE and p.king)
+        else (1.0 if p != 0 and p.color == BLUE else 0.0)
+        for row in board for p in row
+    )
+    red_mat = sum(
+        cfg.KING_MATERIAL_VALUE if (p != 0 and p.color == RED and p.king)
+        else (1.0 if p != 0 and p.color == RED else 0.0)
+        for row in board for p in row
+    )
+    if blue_mat > red_mat:
+        return BLUE
+    elif red_mat > blue_mat:
+        return RED
+    return "Tie"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Game runner
 # ─────────────────────────────────────────────────────────────────────────────
 
-EVAL_OPENING_MOVES = 6  # stochastic opening depth for gating diversity
+_EVAL_OPENING_MOVES = 6  # stochastic opening depth for gating diversity
 
-def play_eval_game(blue_agent, red_agent, max_moves=150,
+def _play_eval_game(blue_agent, red_agent, max_moves=150,
                     stochastic_opening=0):
     """Play one evaluation game between two agents.
 
@@ -87,7 +93,7 @@ def play_eval_game(blue_agent, red_agent, max_moves=150,
 
     while not done:
         if move_count >= max_moves:
-            return adjudicate_move_cap(env), move_count
+            return _adjudicate_move_cap(env), move_count
 
         mask = env.get_action_mask()
         if mask.sum() == 0:
@@ -106,9 +112,8 @@ def play_eval_game(blue_agent, red_agent, max_moves=150,
     return info.get("winner", "Tie"), move_count
 
 
-def make_mcts_agent(network, device, num_simulations=None,
-                     stochastic_opening_moves=0, config=None):
-    config = config or default_config
+def _make_mcts_agent(network, device, num_simulations=None,
+                     stochastic_opening_moves=0):
     """Create an MCTS agent: greedy after opening, stochastic for first K moves.
 
     Args:
@@ -116,11 +121,10 @@ def make_mcts_agent(network, device, num_simulations=None,
             After that, temperature=0 (greedy).  Provides game diversity for
             gating without injecting Dirichlet noise.
     """
-    sims = num_simulations or config.NUM_SIMULATIONS
+    sims = num_simulations or cfg.NUM_SIMULATIONS
     mcts = MCTSSearch(
         network=network, num_simulations=sims,
-        c_puct=config.C_PUCT, device=device,
-        config=config
+        c_puct=cfg.C_PUCT, device=device,
     )
     move_counter = [0]
 
@@ -143,7 +147,7 @@ def make_mcts_agent(network, device, num_simulations=None,
     return agent
 
 
-def random_agent(env):
+def _random_agent(env):
     """Select a uniformly random legal action."""
     mask = env.get_action_mask()
     valid = np.where(mask > 0)[0]
@@ -155,14 +159,13 @@ def random_agent(env):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def play_vs_random(network, device, num_games=40, num_simulations=100,
-                   verbose=False, config=None):
-    config = config or default_config
+                   verbose=False):
     """Play games against a random opponent.  Half as BLUE, half as RED.
 
     Returns dict: wins, losses, ties, win_rate, score, games, avg_moves.
     """
     network.eval()
-    mcts_agent = make_mcts_agent(network, device, num_simulations, config=config)
+    mcts_agent = _make_mcts_agent(network, device, num_simulations)
     half = num_games // 2
 
     wins = losses = ties = 0
@@ -170,10 +173,10 @@ def play_vs_random(network, device, num_games=40, num_simulations=100,
 
     for i in range(num_games):
         if i < half:
-            winner, moves = play_eval_game(mcts_agent, random_agent)
+            winner, moves = _play_eval_game(mcts_agent, _random_agent)
             net_color = BLUE
         else:
-            winner, moves = play_eval_game(random_agent, mcts_agent)
+            winner, moves = _play_eval_game(_random_agent, mcts_agent)
             net_color = RED
 
         total_moves += moves
@@ -203,8 +206,7 @@ def play_vs_random(network, device, num_games=40, num_simulations=100,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def play_vs_network(new_net, old_net, device, num_games=40,
-                    num_simulations=100, verbose=False, config=None):
-    config = config or default_config
+                    num_simulations=100, verbose=False):
     """Play games between two networks.  Half as BLUE, half as RED.
 
     Uses stochastic openings (first K moves at temperature=1) to produce
@@ -214,13 +216,13 @@ def play_vs_network(new_net, old_net, device, num_games=40,
     """
     new_net.eval()
     old_net.eval()
-    new_agent = make_mcts_agent(
+    new_agent = _make_mcts_agent(
         new_net, device, num_simulations,
-        stochastic_opening_moves=EVAL_OPENING_MOVES, config=config
+        stochastic_opening_moves=_EVAL_OPENING_MOVES,
     )
-    old_agent = make_mcts_agent(
+    old_agent = _make_mcts_agent(
         old_net, device, num_simulations,
-        stochastic_opening_moves=EVAL_OPENING_MOVES, config=config
+        stochastic_opening_moves=_EVAL_OPENING_MOVES,
     )
     half = num_games // 2
 
@@ -231,10 +233,10 @@ def play_vs_network(new_net, old_net, device, num_games=40,
         new_agent.reset()
         old_agent.reset()
         if i < half:
-            winner, moves = play_eval_game(new_agent, old_agent)
+            winner, moves = _play_eval_game(new_agent, old_agent)
             new_color = BLUE
         else:
-            winner, moves = play_eval_game(old_agent, new_agent)
+            winner, moves = _play_eval_game(old_agent, new_agent)
             new_color = RED
 
         total_moves += moves
@@ -260,8 +262,7 @@ def play_vs_network(new_net, old_net, device, num_games=40,
 
 
 def gate_checkpoint(new_net, old_net, device, num_games=40,
-                    num_simulations=100, threshold=None, verbose=False, config=None):
-    config = config or default_config
+                    num_simulations=100, threshold=None, verbose=False):
     """Gating test: accept new_net if its score exceeds threshold.
 
     score = (wins + 0.5 * ties) / games
@@ -270,9 +271,9 @@ def gate_checkpoint(new_net, old_net, device, num_games=40,
     Returns (accepted: bool, stats: dict).
     """
     if threshold is None:
-        threshold = config.GATE_THRESHOLD
+        threshold = cfg.GATE_THRESHOLD
     stats = play_vs_network(new_net, old_net, device, num_games,
-                            num_simulations, verbose=verbose, config=config)
+                            num_simulations, verbose=verbose)
     accepted = stats["score"] >= threshold
     return accepted, stats
 
@@ -338,7 +339,7 @@ def test_value_head_calibration(network, device, n_boards=10):
 # 4) MCTS correctness: backup sign-convention test
 # ─────────────────────────────────────────────────────────────────────────────
 
-class DummyNetwork(nn.Module):
+class _DummyNetwork(nn.Module):
     """Uniform priors (logits=0) and value=0 for all states.
 
     Strips out all network influence so the ONLY thing driving MCTS visit
@@ -355,7 +356,7 @@ class DummyNetwork(nn.Module):
         return logits, value
 
 
-def setup_blocking_win_position():
+def _setup_blocking_win_position():
     """Construct a position with 4 legal regular moves, exactly 1 winning.
 
     Mandatory captures in checkers make it nearly impossible to have 2+ legal
@@ -381,6 +382,8 @@ def setup_blocking_win_position():
     With a dummy network (uniform priors, value=0), correct backup should
     direct >50% of visits to the winning move; inverted backup would avoid it.
     """
+    from checkers_game.board import Board
+
     env = CheckersEnv()
     env.reset()
 
@@ -414,7 +417,7 @@ def setup_blocking_win_position():
     return env, winning_action
 
 
-def test_mcts_correctness(device, num_simulations=80, config=None):
+def test_mcts_correctness(device, num_simulations=80):
     """Verify MCTS selects the winning action using a dummy (uniform) network.
 
     Uses a hand-constructed position with 4 legal regular moves, exactly 1
@@ -428,18 +431,17 @@ def test_mcts_correctness(device, num_simulations=80, config=None):
     Returns dict: passed, action_selected, winning_action, winning_visit_share,
                   root_value, num_legal_actions.
     """
-    config = config or default_config
-    env, winning_action = setup_blocking_win_position()
+    env, winning_action = _setup_blocking_win_position()
 
     mask = env.get_action_mask()
     num_legal = int(mask.sum())
 
-    dummy_net = DummyNetwork().to(device)
+    dummy_net = _DummyNetwork().to(device)
     dummy_net.eval()
 
     mcts = MCTSSearch(
         network=dummy_net, num_simulations=num_simulations,
-        c_puct=config.C_PUCT, device=device,
+        c_puct=cfg.C_PUCT, device=device,
     )
     mcts._root = None
 
@@ -464,20 +466,17 @@ def test_mcts_correctness(device, num_simulations=80, config=None):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_evaluation(network, device, best_state_dict=None,
-                   num_games_gate=40, eval_simulations=100, verbose=True,
-                   use_wdl=False, config=None):
-    config = config or default_config
+                   num_games_gate=40, eval_simulations=100, verbose=True):
     """Run gate evaluation and MCTS correctness test; return a summary dict.
 
     Args:
-        network:          current AlphaZeroNetwork or WDLAlphaZeroNetwork (eval mode).
+        network:          current AlphaZeroNetwork (eval mode).
         device:           torch device.
         best_state_dict:  deep-frozen state_dict of the reference model.
                           If None, gating is skipped.
         num_games_gate:   games to play for gating.
         eval_simulations: MCTS simulations per move during eval.
         verbose:          print per-game progress (default True).
-        use_wdl:          if True, use WDLAlphaZeroNetwork for the reference model.
 
     Returns dict: gate, gate_accepted, mcts_test.
     """
@@ -485,7 +484,7 @@ def run_evaluation(network, device, best_state_dict=None,
 
     if verbose:
         print("  MCTS correctness test...", flush=True)
-    mcts_result = test_mcts_correctness(device, config=config)
+    mcts_result = test_mcts_correctness(device)
 
     gate_result = None
     gate_accepted = None
@@ -494,23 +493,12 @@ def run_evaluation(network, device, best_state_dict=None,
             print(f"  vs prev ({num_games_gate} games, "
                   f"{eval_simulations} sims/move)...", flush=True)
         input_shape = (4, 8, 8)
-        BestNet = WDLAlphaZeroNetwork if use_wdl else AlphaZeroNetwork
-        best_net = BestNet(input_shape, NUM_ACTIONS).to(device)
-        
-        # Handle state dict key mismatches (e.g., 'net.' prefix)
-        model_has_net = any(k.startswith('net.') for k in best_net.state_dict().keys())
-        ckpt_has_net = any(k.startswith('net.') for k in best_state_dict.keys())
-        
-        if model_has_net and not ckpt_has_net:
-            best_state_dict = {f"net.{k}": v for k, v in best_state_dict.items()}
-        elif ckpt_has_net and not model_has_net:
-            best_state_dict = {k.replace('net.', '', 1): v for k, v in best_state_dict.items() if k.startswith('net.')}
-            
+        best_net = AlphaZeroNetwork(input_shape, NUM_ACTIONS).to(device)
         best_net.load_state_dict(best_state_dict)
         best_net.eval()
         gate_accepted, gate_result = gate_checkpoint(
             network, best_net, device, num_games_gate, eval_simulations,
-            verbose=verbose, config=config
+            verbose=verbose,
         )
 
     return {
@@ -536,264 +524,3 @@ def print_evaluation(eval_result, epoch):
         accepted = "ACCEPTED" if eval_result["gate_accepted"] else "rejected"
         print(f"  vs Prev: {g['wins']}W / {g['losses']}L / {g['ties']}T  "
               f"(score={g['score']:.0%}) → {accepted}")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 5) Parallel evaluation (two-network GPU, for train_gpu_parallel gating)
-# ─────────────────────────────────────────────────────────────────────────────
-
-EVAL_MAX_MOVES = 150
-EVAL_STOCHASTIC_MOVES = 6   # first N full-turn moves played at temperature=1
-
-
-def play_eval_game_parallel(task, new_eval, old_eval, config=None):
-    """Play one evaluation game using two remote evaluators.
-
-    new_eval routes to the current-epoch inference server.
-    old_eval routes to the reference-model inference server.
-
-    task keys: game_idx, num_games, num_simulations, stochastic_opening
-    """
-    config = config or default_config
-    game_idx = task["game_idx"]
-    num_games = task["num_games"]
-    num_simulations = task["num_simulations"]
-    stoch = task.get("stochastic_opening", EVAL_STOCHASTIC_MOVES)
-
-    new_color = BLUE if game_idx < num_games // 2 else RED
-
-    new_mcts = MCTSSearch(
-        evaluator=new_eval, num_simulations=num_simulations,
-        c_puct=config.C_PUCT, move_cap=EVAL_MAX_MOVES, config=config
-    )
-    old_mcts = MCTSSearch(
-        evaluator=old_eval, num_simulations=num_simulations,
-        c_puct=config.C_PUCT, move_cap=EVAL_MAX_MOVES, config=config
-    )
-
-    env = CheckersEnv()
-    env.reset()
-    new_mcts._root = old_mcts._root = None
-
-    move_count = 0
-    done = False
-    info = {}
-
-    while not done:
-        if move_count >= EVAL_MAX_MOVES:
-            info = {"winner": adjudicate_move_cap(env)}
-            break
-
-        mask = env.get_action_mask()
-        if mask.sum() == 0:
-            _, _, done, _, info = env.step(0)
-            break
-
-        temp = 1.0 if move_count < stoch else 0.0
-        active_mcts = new_mcts if env.game.turn == new_color else old_mcts
-        active_mcts._root = None
-
-        action, _, _ = active_mcts.select_action(
-            env, temperature=temp, add_noise=False,
-            no_progress_count=env.game._no_progress_count,
-        )
-        _, _, done, _, info = env.step(action)
-        if info.get("turn_complete", True):
-            move_count += 1
-            if not done and env.game._no_progress_count >= config.NO_PROGRESS_DRAW_MOVES:
-                info = {"winner": "Tie"}
-                done = True
-
-    winner = info.get("winner", "Tie")
-    return {"game_idx": game_idx, "winner": winner,
-            "new_color": new_color, "num_moves": move_count}
-
-
-def eval_worker_fn(worker_id,
-                    new_req_q, new_resp_q,
-                    old_req_q, old_resp_q,
-                    task_queue, results_queue,
-                    shm_new_state_name, shm_old_state_name,
-                    num_workers, config=None, seed=None):
-    if seed is not None:
-        from rl.utils.seed_utils import set_seed
-        set_seed(seed + worker_id)
-    """Persistent eval worker process."""
-    config = config or default_config
-
-    _shm_new, _, _state_buf_new, _ = attach_shm_buffers(
-        shm_new_state_name, None, num_workers, (4, 8, 8), 0
-    )
-    _shm_old, _, _state_buf_old, _ = attach_shm_buffers(
-        shm_old_state_name, None, num_workers, (4, 8, 8), 0
-    )
-
-    new_eval = RemoteEvaluator(worker_id, new_req_q, new_resp_q, _state_buf_new)
-    old_eval = RemoteEvaluator(worker_id, old_req_q, old_resp_q, _state_buf_old)
-
-    while True:
-        item = task_queue.get()
-        if item is WORKER_EXIT:
-            break
-        if item == WORKER_BATCH_DONE:
-            results_queue.put(WORKER_BATCH_DONE)
-            continue
-
-        task_idx, task = item
-        result = play_eval_game_parallel(task, new_eval, old_eval, config=config)
-        results_queue.put((task_idx, result))
-
-    _shm_new.close()
-    _shm_old.close()
-
-
-class EvalContext:
-    """Two-network GPU inference context for parallel evaluation games.
-
-    Mirrors WorkerContext but serves two networks (new and reference) via
-    separate inference server threads.  Workers interleave requests to both
-    servers within each game depending on the active player.
-
-    Usage:
-        with EvalContext(new_sd, old_sd, device, num_workers) as ectx:
-            stats = ectx.run_eval(num_games, num_simulations)
-    """
-
-    def __init__(self, new_state_dict, old_state_dict, device, num_workers,
-                 use_wdl=False, config=None, seed=None):
-        config = config or default_config
-        self.config = config
-
-        self.device = device
-        self.num_workers = num_workers
-
-        input_shape = (4, 8, 8)
-        NetworkClass = WDLAlphaZeroNetwork if use_wdl else AlphaZeroNetwork
-
-        self._new_model = NetworkClass(input_shape, NUM_ACTIONS).to(device)
-        
-        # Handle state dict key mismatches (e.g., 'net.' prefix)
-        model_has_net = any(k.startswith('net.') for k in self._new_model.state_dict().keys())
-        ckpt_has_net = any(k.startswith('net.') for k in new_state_dict.keys())
-        
-        if model_has_net and not ckpt_has_net:
-            new_state_dict = {f"net.{k}": v for k, v in new_state_dict.items()}
-        elif ckpt_has_net and not model_has_net:
-            new_state_dict = {k.replace('net.', '', 1): v for k, v in new_state_dict.items() if k.startswith('net.')}
-            
-        self._new_model.load_state_dict(new_state_dict)
-        self._new_model.eval()
-
-        self._old_model = NetworkClass(input_shape, NUM_ACTIONS).to(device)
-        
-        # Backward compatibility with unified DualHeadResNet
-        model_has_net = any(k.startswith('net.') for k in self._old_model.state_dict().keys())
-        ckpt_has_net = any(k.startswith('net.') for k in old_state_dict.keys())
-        
-        if model_has_net and not ckpt_has_net:
-            old_state_dict = {f"net.{k}": v for k, v in old_state_dict.items()}
-        elif ckpt_has_net and not model_has_net:
-            old_state_dict = {k.replace('net.', '', 1): v for k, v in old_state_dict.items() if k.startswith('net.')}
-
-        self._old_model.load_state_dict(old_state_dict)
-        self._old_model.eval()
-
-        self._new_req_q = Queue()
-        self._new_resp_qs = [Queue() for _ in range(num_workers)]
-        self._old_req_q = Queue()
-        self._old_resp_qs = [Queue() for _ in range(num_workers)]
-
-        self._task_queue = Queue()
-        self._results_queue = Queue()
-
-        _state_bytes = num_workers * 4 * 8 * 8 * 4
-        self._shm_new = _shm_module.SharedMemory(create=True, size=_state_bytes)
-        self._shm_old = _shm_module.SharedMemory(create=True, size=_state_bytes)
-        self._state_buf_new = np.ndarray((num_workers, 4, 8, 8), dtype=np.float32,
-                                         buffer=self._shm_new.buf)
-        self._state_buf_old = np.ndarray((num_workers, 4, 8, 8), dtype=np.float32,
-                                         buffer=self._shm_old.buf)
-
-        self._stop_new = threading.Event()
-        self._stop_old = threading.Event()
-        self._new_server = AlphaZeroInferenceServer(
-            self._new_model, device,
-            self._new_req_q, self._new_resp_qs,
-            self._stop_new,
-            max_batch=num_workers * 2,
-            state_buf=self._state_buf_new,
-        )
-        self._old_server = AlphaZeroInferenceServer(
-            self._old_model, device,
-            self._old_req_q, self._old_resp_qs,
-            self._stop_old,
-            max_batch=num_workers * 2,
-            state_buf=self._state_buf_old,
-        )
-        self._new_server.start()
-        self._old_server.start()
-
-        self._workers = []
-        for wid in range(num_workers):
-            p = Process(
-                target=eval_worker_fn,
-                args=(
-                    wid,
-                    self._new_req_q, self._new_resp_qs[wid],
-                    self._old_req_q, self._old_resp_qs[wid],
-                    self._task_queue, self._results_queue,
-                    self._shm_new.name, self._shm_old.name,
-                    num_workers, self.config, seed,
-                ),
-            )
-            p.start()
-            self._workers.append(p)
-
-    def run_eval(self, num_games, num_simulations, label="eval"):
-        """Distribute eval games across workers; return aggregate stats dict."""
-        for i in range(num_games):
-            self._task_queue.put((i, {
-                "game_idx": i,
-                "num_games": num_games,
-                "num_simulations": num_simulations,
-                "stochastic_opening": EVAL_STOCHASTIC_MOVES,
-            }))
-        for _ in range(self.num_workers):
-            self._task_queue.put(WORKER_BATCH_DONE)
-
-        results = collect_results(
-            self._results_queue, self.num_workers, self._workers, num_games, label, max(10, num_games // 5),
-            batch_done_sentinel=WORKER_BATCH_DONE
-        )
-
-        wins = sum(1 for r in results if r["winner"] == r["new_color"])
-        losses = sum(1 for r in results
-                     if r["winner"] not in ("Tie", "None")
-                     and r["winner"] != r["new_color"])
-        ties = sum(1 for r in results if r["winner"] in ("Tie", "None"))
-        total_moves = sum(r["num_moves"] for r in results)
-        n = max(num_games, 1)
-        return {
-            "wins": wins, "losses": losses, "ties": ties,
-            "win_rate": wins / n,
-            "score": (wins + 0.5 * ties) / n,
-            "games": num_games,
-            "avg_moves": total_moves / n,
-        }
-
-    def shutdown(self):
-
-        shutdown_workers(
-            self._workers, self._task_queue, self._stop_new, self._new_req_q, self._new_server,
-            [self._shm_new], exit_sentinel=WORKER_EXIT, shutdown_sentinel=SHUTDOWN
-        )
-        shutdown_workers(
-            [], self._task_queue, self._stop_old, self._old_req_q, self._old_server,
-            [self._shm_old], exit_sentinel=WORKER_EXIT, shutdown_sentinel=SHUTDOWN
-        )
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_):
-        self.shutdown()

@@ -43,7 +43,24 @@ def collect_results(results_queue, num_workers, workers, total, label, log_inter
             done = len(result_map)
             if done - reported >= log_interval or done == total:
                 alive = sum(1 for p in workers if p.is_alive())
-                print(f"  {label}: {done}/{total} games ({alive} workers active)", flush=True)
+                
+                wins = losses = ties = 0
+                has_eval_stats = False
+                for r in result_map.values():
+                    if isinstance(r, dict) and "new_color" in r and "winner" in r:
+                        has_eval_stats = True
+                        if r["winner"] in ("Tie", "None"):
+                            ties += 1
+                        elif r["winner"] == r["new_color"]:
+                            wins += 1
+                        else:
+                            losses += 1
+                            
+                if has_eval_stats:
+                    print(f"  {label}: {done}/{total} games ({alive} workers active) - {wins}W / {losses}L / {ties}T", flush=True)
+                else:
+                    print(f"  {label}: {done}/{total} games ({alive} workers active)", flush=True)
+                
                 reported = done
         except Exception:
             if not any(p.is_alive() for p in workers) and len(result_map) < total:

@@ -48,21 +48,20 @@ class DualHeadResNet(nn.Module):
         self.value_fc1 = nn.Linear(value_flat, backbone_channels)
         self.value_fc2 = nn.Linear(backbone_channels, value_out_features)
 
-    def _backbone_forward(self, x):
+    def forward(self, x):
+        # Shared backbone
         out = F.relu(self.initial_bn(self.initial_conv(x)))
         out = self.res_blocks(out)
 
+        # Policy head → logits (no activation; caller applies softmax/log-softmax)
         p = F.relu(self.policy_bn(self.policy_conv(out)))
         p = p.view(p.size(0), -1)
         logits = self.policy_fc(p)
 
+        # Value head → FC2 (caller applies activation)
         v = F.relu(self.value_bn(self.value_conv(out)))
         v = v.view(v.size(0), -1)
         v = F.relu(self.value_fc1(v))
-        
-        return logits, v
-
-    def forward(self, x):
-        logits, v = self._backbone_forward(x)
         raw_value = self.value_fc2(v)
+
         return logits, raw_value

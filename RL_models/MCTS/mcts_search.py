@@ -32,12 +32,10 @@ Key correctness notes
 import numpy as np
 import torch
 
+from RL_models.numpy_checkers_env import NumpyCheckersEnv
+from RL_models.MCTS.mcts_node import MCTSNode
+from RL_models.MCTS import training_config as cfg
 from checkers_game.constants import NUM_ACTIONS
-from rl.envs import NumpyCheckersEnv
-from rl.algorithms.mcts.mcts_node import MCTSNode
-from rl.configs.mcts_config import MCTSConfig
-
-default_config = MCTSConfig()
 
 
 class MCTSSearch:
@@ -45,14 +43,13 @@ class MCTSSearch:
     def __init__(
         self,
         network=None,
-        num_simulations=None,
-        c_puct=None,
-        dirichlet_alpha=None,
-        dirichlet_epsilon=None,
+        num_simulations=cfg.NUM_SIMULATIONS,
+        c_puct=cfg.C_PUCT,
+        dirichlet_alpha=cfg.DIRICHLET_ALPHA,
+        dirichlet_epsilon=cfg.DIRICHLET_EPSILON,
         device=None,
         evaluator=None,
-        move_cap=None,
-        config=None,
+        move_cap=cfg.MAX_GAME_MOVES_FULL,
     ):
         """Create an MCTS search object.
 
@@ -66,24 +63,21 @@ class MCTSSearch:
         Args:
             move_cap: Maximum full turns per simulation — must match the outer
                       game loop's cap so MCTS sees the same terminal condition.
-                      Pass config.get_max_game_moves(epoch) from the game loop.
+                      Pass cfg.get_max_game_moves(epoch) from the game loop.
         """
         if network is None and evaluator is None:
             raise ValueError("Provide either network or evaluator")
         if network is not None and evaluator is not None:
             raise ValueError("Provide network or evaluator, not both")
 
-        config = config or default_config
-        self.config = config
-        
         self.network   = network
         self.evaluator = evaluator
-        self.num_simulations = num_simulations or config.NUM_SIMULATIONS
-        self.c_puct = c_puct or config.C_PUCT
-        self.dirichlet_alpha = dirichlet_alpha or config.DIRICHLET_ALPHA
-        self.dirichlet_epsilon = dirichlet_epsilon or config.DIRICHLET_EPSILON
+        self.num_simulations = num_simulations
+        self.c_puct = c_puct
+        self.dirichlet_alpha = dirichlet_alpha
+        self.dirichlet_epsilon = dirichlet_epsilon
         self.device = device or torch.device("cpu")
-        self.move_cap = move_cap or config.MAX_GAME_MOVES_FULL
+        self.move_cap = move_cap
 
         self._root = None  # cached root node for tree reuse between moves
 
@@ -129,9 +123,9 @@ class MCTSSearch:
             env = NumpyCheckersEnv.from_env(
                 env,
                 move_cap=self.move_cap,
-                adjudicate_cap=self.config.MOVE_CAP_ADJUDICATE,
+                adjudicate_cap=cfg.MOVE_CAP_ADJUDICATE,
                 no_progress_count=no_progress_count,
-                no_progress_draw_moves=self.config.NO_PROGRESS_DRAW_MOVES,
+                no_progress_draw_moves=cfg.NO_PROGRESS_DRAW_MOVES,
             )
 
         # ------------------------------------------------------------------ #
@@ -144,9 +138,8 @@ class MCTSSearch:
         priors, root_value, action_mask = self._evaluate(env)
 
         if action_mask.sum() == 0:
-            # Current player has no legal moves -> they lose
             self._root = None
-            return np.zeros(NUM_ACTIONS, dtype=np.float32), -1.0
+            return np.zeros(NUM_ACTIONS, dtype=np.float32), root_value
 
         if add_noise:
             priors = self._add_dirichlet_noise(priors, action_mask)
@@ -175,11 +168,7 @@ class MCTSSearch:
 
             # --- SELECT ---------------------------------------------------
             while node.is_expanded and not node.is_terminal:
-                best_c = node.best_child(self.c_puct)
-                if best_c is None:
-                    # In case of empty children (no valid actions/masked out)
-                    break
-                node = best_c
+                node = node.best_child(self.c_puct)
                 _, _, done, _, info = env_copy.step(node.action)
                 node_player = env_copy.game.turn
                 search_path.append((node, node_player))
@@ -250,7 +239,7 @@ class MCTSSearch:
             log_probs = np.log(action_probs + 1e-10) / temperature
             exp_probs = np.exp(log_probs - log_probs.max())
             tempered = exp_probs / exp_probs.sum()
-            action = int(np.random.choice(NUM_ACTIONS, p=tempered.astype(np.float64) / tempered.astype(np.float64).sum()))
+            action = int(np.random.choice(NUM_ACTIONS, p=tempered))
 
         return action, action_probs, root_value
 
@@ -361,7 +350,7 @@ class MCTSSearch:
 
         Returns +1 if current_player won, -1 if current_player lost, 0.0 for ties.
 
-        Ties intentionally use 0.0, not config.CONTEMPT_VALUE.  Contempt is
+        Ties intentionally use 0.0, not cfg.CONTEMPT_VALUE.  Contempt is
         non-zero-sum (both players get -0.05) but the backup sign-flip assumes
         zero-sum ("bad for opponent = good for me").  Applying a negative tie
         value here causes the flip to convert it to a positive reward for the

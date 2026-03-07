@@ -359,13 +359,23 @@ def train_alphazero_parallel(num_workers=None, use_wdl=False, seed=None, config=
                     # to the last accepted reference so training resumes from solid ground.
                     print(f"  Gate rejected — reverting to epoch-{prev_eval_epoch} "
                           f"reference...", flush=True)
+                          
+                    # Handle state dict key mismatches (e.g., 'net.' prefix)
+                    model_has_net = any(k.startswith('net.') for k in network.state_dict().keys())
+                    ckpt_has_net = any(k.startswith('net.') for k in prev_eval_state_dict.keys())
+                    
+                    if model_has_net and not ckpt_has_net:
+                        prev_eval_state_dict = {f"net.{k}": v for k, v in prev_eval_state_dict.items()}
+                    elif ckpt_has_net and not model_has_net:
+                        prev_eval_state_dict = {k.replace('net.', '', 1): v for k, v in prev_eval_state_dict.items() if k.startswith('net.')}
+                        
                     network.load_state_dict(prev_eval_state_dict)
                     _ref_ckpt = torch.load(reference_model_path,
                                            map_location=device, weights_only=False)
                     if "optimizer_state_dict" in _ref_ckpt:
                         optimizer.load_state_dict(_ref_ckpt["optimizer_state_dict"])
                     if "rng_state_torch" in _ref_ckpt:
-                        torch.random.set_rng_state(_ref_ckpt["rng_state_torch"])
+                        torch.random.set_rng_state(_ref_ckpt["rng_state_torch"].cpu())
                     if "rng_state_numpy" in _ref_ckpt:
                         np.random.set_state(_ref_ckpt["rng_state_numpy"])
                     if "rng_state_python" in _ref_ckpt:

@@ -116,8 +116,15 @@ class BatchedGPUServer(threading.Thread, ABC):
         """Override in subclasses if custom load logic needed (e.g. torch.compile)."""
         # We need to gracefully handle models wrapped in `torch.compile` which adds an `_orig_mod.` prefix
         # and our unified DualHeadResNet which nests layers under `net.`
-        if not any(k.startswith('net.') for k in state_dict):
+        
+        # Check if the checkpoint has nested 'net.' keys while the model does not (or vice versa)
+        model_has_net = any(k.startswith('net.') for k in self.model.state_dict().keys())
+        ckpt_has_net = any(k.startswith('net.') for k in state_dict.keys())
+        
+        if model_has_net and not ckpt_has_net:
             state_dict = {f"net.{k}": v for k, v in state_dict.items()}
+        elif ckpt_has_net and not model_has_net:
+            state_dict = {k.replace('net.', '', 1): v for k, v in state_dict.items() if k.startswith('net.')}
             
         getattr(self.model, '_orig_mod', self.model).load_state_dict(state_dict)
 
