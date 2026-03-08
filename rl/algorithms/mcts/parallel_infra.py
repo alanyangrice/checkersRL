@@ -13,7 +13,6 @@ from rl.algorithms.mcts.mcts_search import MCTSSearch
 from rl.networks import AlphaZeroNetwork, WDLAlphaZeroNetwork
 from rl.algorithms.mcts.utils import (
     adjudicate_move_cap,
-    get_curriculum_options,
     get_material,
 )
 from rl.training_utils.gpu_inference_server import AlphaZeroInferenceServer
@@ -75,7 +74,7 @@ def _play_game(worker_id, request_queue, response_queue,
         worker_id, request_queue, response_queue, state_buf, mask_buf
     )
 
-    curriculum_opts = get_curriculum_options(epoch)
+    curriculum_opts = config.get_curriculum_options(epoch)
     num_sims = config.get_num_simulations(epoch)
     temp_threshold, temp_late = config.get_temperature_config(epoch)
     effective_c_puct = c_puct if c_puct is not None else config.C_PUCT

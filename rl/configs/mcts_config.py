@@ -201,3 +201,30 @@ class MCTSConfig:
             return self.NUM_WORKERS
         cpu = os.cpu_count() or 4
         return max(1, min(cpu - 2, 24))
+
+
+    def get_curriculum_options(self, epoch):
+        """Generate guaranteed-asymmetric board options for the current curriculum phase.
+
+        The weak side draws its piece count first, then the strong side draws from
+        [weak+1, strong_max], guaranteeing a strict material advantage on every game.
+        Which color is the strong side is re-rolled 50/50 each game so both BLUE and
+        RED learn to play from both material situations equally.
+
+        Phase 1: weak ∈ [WEAK_MIN, WEAK_MAX], strong ∈ [weak+1, STRONG_MAX] — endgame
+        Phase 2: weak ∈ [WEAK_MIN, WEAK_MAX], strong ∈ [weak+1, STRONG_MAX] — mid-game
+        Phase 3 (full): returns None for standard 12v12.
+        """
+        import random as _random
+        if epoch < self.CURRICULUM_PHASE1_END:
+            weak = _random.randint(self.CURRICULUM_PHASE1_WEAK_MIN, self.CURRICULUM_PHASE1_WEAK_MAX)
+            strong = _random.randint(weak + 1, self.CURRICULUM_PHASE1_STRONG_MAX)
+        elif epoch < self.CURRICULUM_PHASE2_END:
+            weak = _random.randint(self.CURRICULUM_PHASE2_WEAK_MIN, self.CURRICULUM_PHASE2_WEAK_MAX)
+            strong = _random.randint(weak + 1, self.CURRICULUM_PHASE2_STRONG_MAX)
+        else:
+            return None
+
+        if _random.random() < 0.5:
+            return {"num_blue": strong, "num_red": weak}
+        return {"num_blue": weak, "num_red": strong}

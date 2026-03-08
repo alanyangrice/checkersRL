@@ -31,7 +31,7 @@ def load_az_checkpoint(path, device):
     """
     checkpoint = torch.load(path, map_location=device, weights_only=False)
     sd = checkpoint["model_state_dict"]
-    is_wdl = sd["value_fc2.weight"].shape[0] == 3
+    is_wdl = sd["net.value_fc2.weight"].shape[0] == 3
     NetworkClass = WDLAlphaZeroNetwork if is_wdl else AlphaZeroNetwork
     network = NetworkClass((4, 8, 8), n_actions=NUM_ACTIONS).to(device)
     network.load_state_dict(sd)
