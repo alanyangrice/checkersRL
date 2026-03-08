@@ -348,6 +348,8 @@ class MCTSSearch:
             if parent_player != player:
                 value = -value
 
+            value *= self.config.DISCOUNT
+
             node.visit_count += 1
             node.value_sum += value
 

@@ -35,6 +35,7 @@ class MCTSConfig:
     NUM_SIMULATIONS_CURRICULUM_P2: int = 200
     C_PUCT: float = 1.5
     C_PUCT_WDL: float = 1.5
+    DISCOUNT: float = 0.999
 
     # ---------------------------------------------------------------------------
     # Network & optimiser
