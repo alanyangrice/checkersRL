@@ -33,32 +33,17 @@ A fully playable checkers game with reinforcement learning agents trained via **
 checkersRL/
 ├── checkers_game/                  # Core game engine (board, rules, move validation)
 ├── figures/                        # Training curve generation scripts
-├── RL_models/
-│   ├── checkers_env.py             # Gymnasium environment wrapper
-│   ├── numpy_checkers_env.py       # Fast NumPy env for MCTS simulations
-│   ├── play_agent.py               # Interactive play vs. trained agent
-│   ├── replay_game.py              # Visual replay of recorded games
-│   ├── az_vs_ppo.py                # Head-to-head evaluation: AlphaZero vs PPO
-│   ├── PPO_Model/
-│   │   ├── Agent.py                # PPO agent: GAE, DrAC augmentation, value clipping
-│   │   ├── PolicyNetwork.py        # ResNet policy/value network
-│   │   ├── Memory.py               # Experience buffer
-│   │   ├── OpponentPool.py         # Past-checkpoint pool with PFSP sampling
-│   │   ├── training_config.py      # Centralized hyperparameter configuration
-│   │   ├── train.py                # Sequential single-process training
-│   │   ├── train_parallel.py       # CPU-parallel training
-│   │   ├── train_gpu_parallel.py   # GPU inference server + CPU workers (recommended)
-│   │   ├── train_league.py         # Multi-agent league training
-│   │   └── benchmark/              # CPU vs. GPU latency and epoch benchmarks
-│   └── MCTS/
-│       ├── mcts_node.py            # MCTSNode: PUCT scoring, visit counts
-│       ├── mcts_search.py          # MCTS: select/expand/evaluate/backup loop
-│       ├── AlphaZeroNetwork.py     # Scalar value network (tanh, MSE loss)
-│       ├── WDLAlphaZeroNetwork.py  # WDL value network (softmax, cross-entropy)
-│       ├── alphazero_trainer.py    # AlphaZero training loop
-│       ├── train_gpu_parallel.py   # Parallel AlphaZero with GPU inference server
-│       ├── evaluate.py             # Gating eval, value calibration, correctness tests
-│       └── training_config.py      # AlphaZero hyperparameters and curriculum
+├── rl/
+│   ├── algorithms/
+│   │   ├── ppo/                    # PPO implementation (Agent, Memory, trainer, etc.)
+│   │   └── mcts/                   # AlphaZero MCTS implementation
+│   ├── configs/                    # Centralized hyperparameter configuration
+│   ├── envs/                       # Gymnasium and NumPy environment wrappers
+│   ├── eval/                       # Evaluation scripts for gating and benchmarking
+│   ├── networks/                   # ResNet policy/value architectures (Scalar, WDL, PPO)
+│   ├── scripts/                    # Entry points (play, replay, az_vs_ppo, benchmarks)
+│   ├── training_utils/             # GPU inference server, parallel workers, checkpointing
+│   └── utils/                      # Helper functions (seeding, actions)
 └── web/
     ├── backend/                    # FastAPI server, model registry, game sessions
     └── frontend/                   # SvelteKit board UI
@@ -184,27 +169,37 @@ python -m checkers_game.main
 
 ### Train the Agent
 
+Activate the virtual environment first (if using one):
+
+```bash
+# Windows (PowerShell)
+.\.venv\Scripts\Activate.ps1
+
+# Linux / macOS
+source .venv/bin/activate
+```
+
 ```bash
 # GPU-accelerated parallel training (recommended)
-python -m RL_models.PPO_Model.train_gpu_parallel
+python -m rl.algorithms.ppo.trainer
 
 # CPU-only parallel training
-python -m RL_models.PPO_Model.train_parallel
+# Note: Deprecated / use the unified trainer above
 
 # Sequential training (single process)
-python -m RL_models.PPO_Model.train
+# Note: Deprecated / use the unified trainer above
 
 # AlphaZero: scalar value head
-python -m RL_models.MCTS.alphazero_trainer
+python -m rl.algorithms.mcts.trainer
 
 # AlphaZero: WDL value head
-python -m RL_models.MCTS.alphazero_trainer --network-type wdl
+python -m rl.algorithms.mcts.trainer --network-type wdl
 
 # AlphaZero: GPU-accelerated parallel
-python -m RL_models.MCTS.train_gpu_parallel
+python -m rl.algorithms.mcts.trainer
 
 # Multi-agent league play
-python -m RL_models.PPO_Model.train_league
+python -m rl.algorithms.ppo.train_league
 ```
 
 All training scripts auto-resume from the latest checkpoint.
@@ -213,27 +208,27 @@ All training scripts auto-resume from the latest checkpoint.
 
 ```bash
 # Direct policy (fast) — loads latest checkpoint
-python -m RL_models.play_agent
+python -m rl.scripts.play_agent
 
 # Specific epoch
-python -m RL_models.play_agent --epoch 50
+python -m rl.scripts.play_agent --epoch 50
 
 # With MCTS search (stronger but slower)
-python -m RL_models.play_agent --mcts --simulations 100
+python -m rl.scripts.play_agent --mcts --simulations 100
 ```
 
 ### AlphaZero vs PPO Head-to-Head
 
 ```bash
-python -m RL_models.az_vs_ppo
+python -m rl.scripts.az_vs_ppo
 ```
 
 ### Replay a Training Game
 
 ```bash
-python -m RL_models.replay_game --file RL_models/PPO_Model/training_progress_detailed_parallel/detailed_games_epoch_50.zip --game 5
+python -m rl.scripts.replay_game --file rl/training_results/ppo/training_progress_detailed_parallel/detailed_games_epoch_50.zip --game 5
 
-python -m RL_models.replay_game --moves "11-15, 24-20, 8-11, 28-24"
+python -m rl.scripts.replay_game --moves "11-15, 24-20, 8-11, 28-24"
 ```
 
 **Replay controls**: Arrow keys (step), Space (auto-play), Up/Down (speed), Home/End (jump), Q (quit)
@@ -241,8 +236,8 @@ python -m RL_models.replay_game --moves "11-15, 24-20, 8-11, 28-24"
 ### Run Benchmarks
 
 ```bash
-python -m RL_models.PPO_Model.benchmark.benchmark_inference
-python -m RL_models.PPO_Model.benchmark.benchmark_train
+python -m rl.scripts.benchmark_inference
+python -m rl.scripts.benchmark_train   # requires checkpoint at ppo/ppo_saved_models_parallel/
 ```
 
 ### Start the Web Interface
@@ -253,6 +248,24 @@ uvicorn web.backend.main:app --host 0.0.0.0 --port 8000
 
 # Frontend (build once; served statically by the backend)
 cd web/frontend && npm run build
+```
+
+### Run Tests
+
+```bash
+# With unittest (no extra deps)
+python -m unittest tests.test_rl_models -v
+
+# With pytest (install: pip install pytest)
+python -m pytest tests/test_rl_models.py -v
+```
+
+### Lint and Format
+
+```bash
+# With ruff (install: pip install ruff)
+ruff check RL_models/
+ruff format RL_models/
 ```
 
 ## References

@@ -32,76 +32,65 @@
 			src: '/figures/az_scalar/AZ-S-2_value_polarization.png',
 			alt: 'AlphaZero Scalar value head polarization',
 			caption:
-			"Mean raw value-head output v_θ(s) (side-to-move perspective, evaluated once per move before MCTS, \
-			averaged over all moves in decisive games) for games eventually won (green) vs lost (red); faint \
-			traces = per-epoch raw means, thick = 5-epoch centered rolling average, grey band = gap between smoothed \
-			curves, dotted lines = ±1 output bounds, dashed verticals = Phase 2 (epoch 16) and Phase 3 (epoch 66). \
-			Curves start near-zero and undifferentiated at epoch 1 and grow strongly polarized through Phases 1–2 (mean \
-			separation Δ = V_win − V_loss ≈ 1.2); at the Phase 3 boundary the winner value drops from +0.618 to +0.331 \
-			and the loser from −0.690 to −0.459 in a single epoch (Δ ≈ 0.7), and the reduced separation persists through \
-			epoch 135. Because this metric is v_θ directly rather than the post-search Q-value (logged separately as \
-			avg_mcts_q_*), the contraction is attributable to a change in the network's value estimates on the on-policy \
-			distribution — likely driven by the longer games (avg moves: ~74 → ~135) altering the game-stage mix and shrinking \
-			the decisive-only sample — motivating the WDL head comparison.",
+			"Mean raw value-head output v_θ(s) (side-to-move, evaluated pre-MCTS, averaged over all moves in decisive games only) " +
+			"for the eventual winner (green) and loser (red); faint traces show per-epoch means, thick lines a 5-epoch centered rolling average. " +
+			"Polarization grows in Phases 1–2 but drops sharply at Phase-3 onset (e.g., epoch 65→66: winner +0.618 → +0.331, loser -0.690 → -0.459) " +
+			"and remains reduced through epoch 250 (winner +0.175, loser -0.301). Because this measures raw on-policy evaluations, " +
+			"the contraction is consistent with a distribution shift: Phase-3 games are much longer (~74 → ~135 moves) and more drawish " +
+			"(84% → 43% decisive), potentially diluting the average with ambiguous early/midgame states. Calibration on clear synthetic " +
+			"positions remains saturated near ±1, indicating the head still recognizes obvious wins/losses—motivating the WDL comparison " +
+			"and move-stage analysis.",
 			wide: true,
 		},
 		{
 			src: '/figures/az_scalar/AZ-S-5_eval_benchmarks.png',
 			alt: 'AlphaZero Scalar evaluation benchmarks',
 			caption:
-			"Two panels over 27 checkpoints (every 5 epochs, 5–130). (A) Arena gate score vs the current reference model \
-			(50 games; score = (W + 0.5T)/50; accept ≥ 0.55); green ▲ accepted, red ▼ rejected; dashed verticals at Phase 2 \
-			(epoch 16) and Phase 3 (epoch 66). The gate accepts 15/27 checkpoints, with a mid-run stall at epochs 20–30 \
-			(all rejected) and late stagnation from epoch 115 onward (epochs 120/125/130 all rejected; epoch 120 worst at 0.39). \
+			"Two panels evaluating 50 checkpoints (every 5 epochs, 5–250). (A) Gate evaluation win rate vs. the current reference model \
+			(50 games). While the y-axis plots absolute win rate, the acceptance criteria requires a gate score of \
+			(W + 0.5T)/50 ≥ 0.55; green ▲ accepted, red ▼ rejected. Dashed verticals indicate the start of Phase 2 \
+			(epoch 16) and Phase 3 (epoch 66). The gate accepts 21/50 checkpoints, highlighting severe mid-run stalls at epochs 40–65 \
+			(all 6 rejected; lowest win rate 0.10 at epoch 45) and epochs 110–140 (all 7 rejected), alongside frequent late-stage rejections. \
 			(B) Raw network value v_θ (no MCTS) on synthetic 4v1 (clear-win), 1v4 (clear-loss), and 3v3 (equal) positions, \
-			each averaged over 10 random boards. Clear-win peaks at +0.998 (epoch 110); clear-loss reaches −0.999 (epoch 125); \
-			equal positions oscillate across Phase 3 (−0.408 to +0.251) despite the formal calibration check passing every epoch. \
-			The vs-random score saturates at 40/40 from epoch 10 and is uninformative; the equal-position volatility is the more \
-			sensitive diagnostic and motivates the WDL head, which models draw probability explicitly.",
+			each averaged over 10 random boards. Clear-win values saturate at +1.0 by epoch 165; clear-loss values smoothly reach \
+			−0.999 by epoch 250. However, equal positions oscillate wildly throughout training (−0.412 at epoch 25 to +0.540 at epoch 115) \
+			despite the formal calibration check passing every epoch. With the vs-random benchmark essentially saturating near 40/40 \
+			from epoch 10, this equal-position volatility serves as a more sensitive diagnostic, suggesting that evaluation of \
+			ambiguous mid-game states remains challenging.",
 			wide: true,
 		},
 		{
 			src: '/figures/az_scalar/AZ-S-1_loss_curves.png',
 			alt: 'AlphaZero Scalar training loss curves',
 			caption:
-			"Three stacked subplots over epochs 1–135 show policy loss (top), value loss on a log scale (middle), and total loss \
-			(bottom); faint traces are raw per-epoch values and solid lines are 5-epoch centered rolling averages; dashed verticals \
-			mark Phase 2 (epoch 16) and Phase 3 (epoch 66). Policy loss drops from 2.695 (epoch 1) to 1.282 (epoch 15), bumps at Phase \
-			2 onset to 1.361 (epoch 16), and gradually improves to ~1.283 by epoch 135, with only negligible disruption at the Phase 3 \
-			boundary; value loss reaches an early minimum near ~0.063 (≈epochs 11–13), rises to 0.086 at epoch 15, spikes sharply at \
-			Phase 2 onset to 0.151 (epoch 16), recovers to a Phase 2 local minimum (~0.068 at epoch 50), then rises steadily after Phase \
-			3 to 0.215 by epoch 135 — more than tripling from its minimum, with the rise already underway before the boundary (0.101 at \
-			epoch 65). The two heads respond differently to each phase transition (curriculum shift + MCTS budget increase + LR warm \
-			restart): policy loss recovers quickly and continues improving throughout, while value loss rises steadily in Phase 3 \
-			because the scalar regression target becomes harder to optimise as full-board games grow longer and produce more varied \
-			position evaluations; because total loss = policy + 3×value, the Phase 3 rise in total loss reflects value-head difficulty \
-			rather than policy regression.",
+			"Three stacked subplots over epochs 1–250 show policy (top), log-scale value (middle), and total (bottom) losses, with " +
+			"5-epoch rolling averages (solid) and Phase 2/3 boundaries at epochs 16 and 66 (dashed). Policy loss drops rapidly to " +
+			"1.282 initially, bumps slightly at phase transitions, and slowly declines to ~1.268 by epoch 250. Value loss is highly " +
+			"non-monotone: it hits an early minimum of ~0.063, spikes at Phase 2 (0.151), recovers, then surges after Phase 3 to peak " +
+			"at 0.217 (epoch 112) before declining to 0.124. The Phase 3 hump in total loss is value-driven, reflecting temporary " +
+			"difficulty predicting values under a harder distribution (longer games, deeper targets) before the network gradually adapts.",
 			wide: true,
 		},
 		{
 			src: '/figures/az_scalar/AZ-S-3_game_complexity.png',
 			alt: 'AlphaZero Scalar game complexity',
 			caption:
-			"Dual-axis plot: left y-axis (blue, 5-epoch centered rolling average) = average moves per self-play game; right y-axis \
-			(purple, dash-dot) = epoch wall-clock time in minutes (self-play dominated); dashed verticals at Phase 2 (epoch 16) and \
-			Phase 3 (epoch 66). Both curves jump sharply at each phase boundary — configuration-driven (curriculum + MCTS budget), \
-			not learning-driven — because epoch time scales as games × avg_moves × sims/move. Phase 1→2 (epoch 15→16): avg_moves 52.3→77.1 \
-			(+47%), epoch time 89.5→275.7s (~3.1×). Phase 2→3 (epoch 65→66): avg_moves 70.6→112.1 (+59%), epoch time 382.5→1027.7s \
-			(~2.7×). By epoch ~135, games average ~130–140 moves and epochs take ~15–17 min. The replay buffer (fixed 500k-position deque) \
-			saturates naturally during Phase 3 (~epoch 100–105) and remains at capacity via FIFO replacement.",
+			"Dual-axis plot (epochs 0–250): left y-axis (blue, 5-epoch rolling mean) is average moves per self-play game; right y-axis (purple) " +
+			"is epoch time. Dashed lines mark Phase 2 (epoch 16) and Phase 3 (epoch 66). Step increases at phase boundaries are driven by curriculum " +
+			"and MCTS budget changes, as epoch time scales with games × avg_moves × sims/move. At Phase 1→2, moves jump 56.7→80.3 (+42%) and time " +
+			"1.4→4.7 min (~3.3×). At Phase 2→3, moves jump 73.7→135.3 (+84%) and time 4.2→14.6 min (~3.5×). By epoch 250, games average 137 moves and " +
+			"epochs take 16.1 min. The 500k-position replay buffer saturates at epoch 88, marking a stable, high-throughput data regime.",
 		},
 		{
 			src: '/figures/az_scalar/AZ-S-4_policy_entropy.png',
 			alt: 'AlphaZero Scalar policy entropy decay',
 			caption:
-			"Shannon entropy (nats) of the MCTS visit-count policy targets sampled from the replay buffer (not the network softmax), \
-			shown as a 5-epoch centered rolling average; dotted line = initial entropy (1.311 nats); dashed verticals at Phase 2 \
-			(epoch 16) and Phase 3 (epoch 66). Entropy drops sharply through Phase 1 and at the Phase-2 transition (1.311 → 1.131 \
-			by epoch 16, −14%), plateaus through Phase 2 (~1.13–1.15), then decays steadily after Phase 3 — crossing 1.0 near epoch \
-			93 and reaching 0.966 at epoch 135 (total −26%) — consistent with sharper visit distributions under increased search budget \
-			and Phase-3 buffer turnover. The floor (~0.93 nats) is structurally maintained by Dirichlet root noise (α = 1.2, ε = 0.35) \
-			and high-temperature opening sampling (T = 1.0 for the first 20 moves), keeping visit counts diverse regardless of policy \
-			strength.",
+			"Shannon entropy (nats) of MCTS visit-count policy targets sampled from the replay buffer, " +
+			"shown as a 5-epoch rolling average; dotted line = initial (1.311 nats); dashed verticals at Phase 2 " +
+			"(epoch 16) and Phase 3 (epoch 66). Entropy drops rapidly in Phase 1 (1.311 → 1.150), steps down at Phase 2 (1.131), " +
+			"plateaus through Phase 2 (~1.11–1.18), then declines to a minimum of 0.932 at epoch 134 before rebounding to 1.015 " +
+			"by epoch 250. The nonzero floor is maintained by Dirichlet root noise (α=1.2, ε=0.35) and high-temperature opening " +
+			"sampling. The late-stage dynamics reflect changing target sharpness under higher search budgets and buffer distribution shifts.",
 		},
 	];
 
@@ -116,68 +105,59 @@
 			alt: 'AlphaZero WDL value head polarization',
 			caption:
 			"Mean raw WDL value-head output v_θ(s) = P(win) − P(loss) (side-to-move, evaluated once per move pre-MCTS, averaged over \
-			decisive games only) for eventual winners (green) and losers (red); faint = per-epoch raw, thick = 5-epoch centered rolling \
-			average, shading = gap, dotted lines = ±1 bounds, dashed verticals = Phase 2 (epoch 16) and Phase 3 (epoch 66); layout identical \
-			to AZ-S-2. Values initialise near zero (epoch 1: −0.052 / −0.050, Δ ≈ 0.002) and polarize sharply within one epoch (+0.541 / \
-			−0.546 at epoch 2), strengthening through Phase 2 to a peak window of Δ = 1.49–1.52 across epochs 57–60 (epoch 60: +0.669 / −0.823). \
-			At the Phase-3 onset, winner values contract much more than loser values (epoch 65→66: +0.592 → +0.292 vs. −0.720 → −0.589), \
-			collapsing Δ to ≈ 0.88; the system then stabilises at a lower separation through Phase 3 (epoch 89: +0.372 / −0.460; epoch 133: \
-			+0.355 / −0.472, Δ = 0.83). Both scalar and WDL runs exhibit the same Phase-3 contraction in raw network outputs, suggesting \
-			the instability is driven by the combined Phase-3 distribution shift (full 12v12 curriculum, MCTS budget doubling 200→400 sims, \
-			LR warm restart) rather than the choice of loss function; the WDL head reaches a wider Phase-2 peak separation (Δ ≈ 1.49 vs. ≈ \
-			1.22 for scalar at epoch 60), consistent with WDL supervision providing a richer signal in draw-prone regimes than a single \
-			scalar regression target.",
+			decisive games only) for eventual winners (green) and losers (red); faint traces show per-epoch raw means, thick lines a \
+			5-epoch centered rolling average. Values initialize near zero (epoch 1: −0.067 / −0.065) and polarize sharply (+0.539 / \
+			−0.571 at epoch 2), strengthening through Phase 2 to a peak spread of Δ = 1.45 at epoch 59 (+0.681 / −0.773). At Phase-3 \
+			onset (epoch 66), values contract sharply as in the scalar run (epoch 65→66: winner +0.572 → +0.448, loser −0.675 → −0.481), \
+			collapsing Δ from 1.246 to 0.928. This shared contraction confirms the instability is driven by the Phase-3 distribution shift \
+			(full 12v12 curriculum, longer games, increasing MCTS sims) rather than the objective function. Through extended training to epoch \
+			250, polarization slowly decays further (winner +0.274, loser −0.442, Δ=0.716), alongside a reduction in decisive self-play \
+			games (79% at epoch 65 → 67% at epoch 250).",
 			wide: true,
 		},
 		{
 			src: '/figures/az_wdl/AZ-W-5_eval_benchmarks.png',
 			alt: 'AlphaZero WDL evaluation benchmarks',
 			caption:
-			"Two panels over 26 checkpoints (epochs 5–130, every 5 epochs; training ongoing). (A) Model gating vs the current reference: \
-			y-axis shows raw win rate (W/50, ties counted as non-wins); accept/reject uses the tie-weighted gate score = (W + 0.5T)/50 ≥ \
-			0.55; green ▲ accepted, red ▼ rejected; dashed verticals at Phase 2 (epoch 16) and Phase 3 (epoch 66). Epoch 5 illustrates the \
-			distinction: raw win rate = 0.48 (24W/26T) but gate score = 0.74, so the checkpoint passes. The gate accepts 15/26 checkpoints \
-			(57.7%); the last accepted is epoch 115, after which epochs 120, 125, and 130 are all rejected. (B) Scalarized WDL value head \
-			output (P(win) − P(loss) + contempt × P(draw), no MCTS) on synthetic 4v1 (clear-win), 1v4 (clear-loss), and 3v3 (equal) boards, \
-			each averaged over 10 random positions; phase boundaries marked identically to (a). Clear-win peaks at +0.998 (epoch 110) and \
-			clear-loss reaches −0.999 (epoch 125); vs-random saturates at 40/40 (1.0) from epoch 10 and is uninformative. val_equal \
-			oscillates in [−0.41, +0.25] with no monotonic trend, ending at −0.408 at epoch 130; the formal calibration check passes at \
-			every checkpoint. Compared with the scalar run (15/27 accepted; same terminal stagnation), the WDL run's acceptance rate is \
-			marginally higher and val_equal shows oscillation rather than monotone positive drift — consistent with an explicit draw channel; \
-			under negative contempt, a negative val_equal can also reflect elevated P(draw) rather than pure miscalibration.",
+			"Two panels evaluating 50 checkpoints (every 5 epochs, 5–250). (A) Model gating vs the current reference: y-axis shows raw win \
+			rate (W/50, ties counted as non-wins); accept/reject uses the tie-weighted gate score = (W + 0.5T)/50 ≥ 0.55; green ▲ accepted, \
+			red ▼ rejected; dashed verticals at Phase 2 (epoch 16) and Phase 3 (epoch 66). Epoch 5 illustrates the distinction: raw win rate \
+			= 0.48 (24W/26T) but gate score = 0.74, so the checkpoint passes. The gate accepts 25/50 checkpoints (50%), remaining intermittently \
+			active throughout training; the last accepted checkpoint is epoch 240, while the worst performance occurs at epoch 170 (0.08 win \
+			rate, 0.42 score). (B) Scalarized WDL value head output (P(win) − P(loss) + contempt × P(draw), no MCTS) on synthetic 4v1 \
+			(clear-win), 1v4 (clear-loss), and 3v3 (equal) boards, each averaged over 10 random positions; phase boundaries marked identically \
+			to (a). Clear-win peaks at +0.9998 (epoch 175) and clear-loss reaches −1.000 (epoch 250); vs-random averages ~0.998 and is \
+			uninformative. Equal-position values oscillate persistently between +0.251 (epoch 95) and −0.585 (epoch 245), ending at −0.473; \
+			nevertheless, the formal calibration check passes at every checkpoint. This persistent volatility indicates that ambiguous \
+			equal-material states remain difficult to evaluate stably without MCTS, even with an explicit draw channel; under negative \
+			contempt, part of the late negative drift may also reflect elevated P(draw) rather than pure miscalibration.",
 			wide: true,
 		},
 		{
 			src: '/figures/az_wdl/AZ-W-1_loss_curves.png',
 			alt: 'AlphaZero WDL training loss curves',
 			caption:
-			"Three stacked subplots over epochs 1–133 show policy loss (top), value loss on a log scale (middle), and total loss (bottom); \
+			"Three stacked subplots over epochs 1–250 show policy loss (top), value loss on a log scale (middle), and total loss (bottom); \
 			faint traces are raw per-epoch values and solid lines are 5-epoch centered rolling averages; dashed verticals mark Phase 2 \
-			(epoch 16) and Phase 3 (epoch 66). Policy loss drops from 2.176 (epoch 1) to 1.285 (epoch 10), bumps to 1.372 at Phase-2 onset \
-			(epoch 16), and stabilises around 1.31–1.37 through epoch 133; value loss traces a U-shape within each phase — falling to 0.061 \
-			by epoch 10, rising to 0.122 at epoch 15 before spiking to 0.160 at the Phase-2 boundary, recovering to a minimum of 0.065 at \
-			epoch 49, then rising monotonically through Phase 3 to 0.171 (epoch 89) and 0.208 (epoch 133); at epoch 49 the logged WDL \
-			value-head loss is lower than the scalar run's (0.065 vs 0.075), though the objectives differ (cross-entropy vs MSE). WDL \
-			does not eliminate phase-transition instability — the value loss spikes at both boundaries just as in the scalar run, driven \
-			by the combined curriculum shift, MCTS budget doubling, and LR warm restart — but the Phase-3 rise in total loss (total = \
-			policy + 3×value) is value-driven, reflecting the increased difficulty of outcome supervision in long full-board games rather \
-			than policy regression; by epoch 133 the WDL value loss (0.208) matches the scalar's (0.215 at epoch 135), indicating comparable \
-			long-run instability despite the different loss objective.",
+			(epoch 16) and Phase 3 (epoch 66). Policy loss drops from 2.176 (epoch 1) to 1.285 (epoch 10), bumps to 1.372 at Phase-2 onset, \
+			and remains in the ~1.28–1.37 range, ending at 1.281 by epoch 250. Value loss traces a non-monotone path: it hits an early \
+			minimum of 0.059 at epoch 55, spikes at the Phase-2 boundary (0.160), and surges significantly in Phase 3. Unlike the policy \
+			loss, Phase 3 value loss continues rising to peak at 0.225 (epoch 138) before partially recovering to 0.192 at epoch 250. \
+			The Phase-3 rise in total loss (total = policy + 3×value) is thus entirely value-driven, highlighting the sustained difficulty \
+			of outcome supervision in long full-board games.",
 			wide: true,
 		},
 		{
 			src: '/figures/az_wdl/AZ-W-3_game_complexity.png',
 			alt: 'AlphaZero WDL game complexity',
 			caption:
-			"Dual-axis plot (x = epochs 1–133): left y-axis shows average moves per self-play game (5-epoch centered rolling mean with raw \
+			"Dual-axis plot (x = epochs 1–250): left y-axis shows average moves per self-play game (5-epoch centered rolling mean with raw \
 			trace); right y-axis shows epoch wall-clock time (minutes, dash-dot); dashed verticals mark Phase 2 (epoch 16) and Phase 3 \
-			(epoch 66). Both curves are dominated by configuration-driven jumps — the Phase 1→2 transition (epoch 15→16) increases avg_moves \
-			52.3→77.1 (+47%) and epoch time 89.5→275.7 s (~3.1×); the Phase 2→3 transition (epoch 65→66) increases avg_moves 70.6→112.1 (+59%) \
-			and epoch time 382→1028 s (~2.7×); by epoch 133, games average 120.9 moves and epochs take 17.9 min. These jumps reflect the \
-			simultaneous curriculum shift, MCTS budget doubling (75→200→400 sims/move), and LR warm restart at each boundary, making the plot a \
-			workload control check rather than a learning-progress metric; the Phase-2 jump magnitudes are closely aligned with the scalar run \
-			(+41.6% moves, ~3.3× time), consistent with both value-head variants being trained under comparable self-play conditions, and late \
-			Phase-3 game lengths converge similarly (WDL 120.9 at epoch 133 vs scalar 138.5 at epoch 135).",
+			(epoch 66). Phase transitions drive massive immediate jumps due to curriculum shifts and MCTS budget changes (75→200→400 sims/move): \
+			Phase 1→2 (epoch 15→16) increases avg_moves 52.3→77.1 and epoch time 1.5→4.6 min (~3.1×); Phase 2→3 (epoch 65→66) increases \
+			avg_moves 70.6→112.1 and epoch time 6.4→17.1 min (~2.7×). However, Phase 3 is not flat: game length drifts upward to peak at \
+			141.5 moves (epoch 156), driving epoch time to a maximum of 22.7 min (epoch 213), before relaxing to 114.4 moves and 16.7 min \
+			by epoch 250. The 500k-position replay buffer saturates at epoch 91.",
 		},
 		{
 			src: '/figures/az_wdl/AZ-W-4_policy_entropy.png',
@@ -185,13 +165,11 @@
 			caption:
 			"Shannon entropy (nats) of the MCTS visit-count policy targets sampled from the replay buffer (faint = raw per-epoch, thick = \
 			5-epoch centered rolling average); dotted line = initial entropy (1.360 nats); dashed verticals at Phase 2 (epoch 16) and Phase \
-			3 (epoch 66). Entropy starts at 1.360 nats — slightly above the scalar run's 1.311 — drops to 1.139 by epoch 16, holds a plateau \
-			of ~1.14–1.19 through Phase 2, then declines steadily after Phase 3 to 1.052 at epoch 89 and 1.005 by epoch 133 (≈26% total \
-			reduction). The phase-wise structure is driven by configuration changes — MCTS budget increases (75→200→400 sims/move) sharpen \
-			visit distributions at each boundary, Phase 3 buffer turnover replaces plateau-era positions with longer full-board games — while \
-			the nonzero floor is maintained by Dirichlet root noise (α=1.2, ε=0.35) and high-temperature opening sampling; the modestly higher \
-			late-training entropy in WDL relative to the scalar run (1.005 at epoch 133 vs 0.966 at epoch 135) is consistent with a less \
-			concentrated visit distribution, though this plot alone does not establish causality.",
+			3 (epoch 66). Entropy starts at 1.360 nats, drops to 1.139 by epoch 16, holds a plateau of ~1.14–1.19 through Phase 2, and then \
+			declines overall through Phase 3 to reach a global minimum of 0.924 at epoch 170. By epoch 250, entropy partially rebounds to \
+			0.984. The phase-wise structure is driven by configuration changes—MCTS budget increases sharpen visit distributions at each \
+			boundary, and Phase 3 buffer turnover replaces plateau-era positions with longer full-board games. The nonzero floor is \
+			maintained by Dirichlet root noise (α=1.2, ε=0.35) and high-temperature opening sampling.",
 		},
 	];
 
@@ -204,31 +182,26 @@
 			alt: 'AlphaZero Scalar vs WDL value polarization comparison',
 			caption:
 			"Mean raw pre-MCTS value-head output v_θ(s) (scalar: tanh output; WDL: P(win)−P(loss)) averaged over decisive-game moves for \
-			eventual winners and losers across epochs 1–135 (clipped to scalar run length); WDL in red (winner solid, loser dash-dot), scalar \
-			in blue (winner dashed, loser dotted); shaded bands show the polarization separation between winner and loser curves per model (8% \
-			alpha fill, not a CI); 5-epoch centered rolling averages with faint raw traces; dotted horizontals at ±1; dashed verticals at Phase \
-			2 (epoch 16) and Phase 3 (epoch 66). Both models polarize rapidly after a single self-play epoch (epoch 2: WDL +0.539/−0.571, scalar \
-			+0.512/−0.651 — scalar loser is initially more negative, so WDL has no initialization advantage), but WDL accumulates a wider \
-			separation through Phase 2 (raw epoch-49 spread 1.369 vs. 1.214, +12.8%) and remains wider late in Phase 3 (≈0.83 near end of WDL \
-			trace vs. ≈0.65 near end of scalar trace). Both models contract sharply at the Phase-3 onset (epoch 66: WDL +0.448/−0.481, scalar \
-			+0.331/−0.459), confirming this collapse is curriculum-driven (12v12 shift + 200→400 MCTS sims + LR warm restart) rather than \
-			architecture-dependent; the growing Phase-2 gap is consistent with categorical cross-entropy providing more informative gradients \
-			under increasing outcome ambiguity in longer-horizon play.",
+			eventual winners and losers across epochs 1–250; WDL in red (winner solid, loser dash-dot), scalar in blue (winner dashed, \
+			loser dotted); shaded bands show polarization separation (Δ); 5-epoch centered rolling averages with faint raw traces. Both \
+			models polarize rapidly after a single self-play epoch, with scalar attaining a slightly wider peak separation in Phase 2 \
+			(Δ=1.47 at epoch 50 vs. WDL Δ=1.45 at epoch 59). However, WDL proves significantly more resilient to the Phase-3 curriculum \
+			shift (epoch 66): the scalar spread collapses to 0.789, while WDL retains a spread of 0.928. This relative advantage persists \
+			throughout the rest of training; by epoch 250, WDL maintains a much wider polarization gap (Δ=0.716) than the scalar model (Δ=0.477).",
 			wide: true,
 		},
 		{
 			src: '/figures/az_comparison/AZ-C-1_loss_comparison.png',
 			alt: 'AlphaZero Scalar vs WDL loss comparison',
 			caption:
-			"Two-panel figure over epochs 1–135: (a) policy loss; (b) value loss on a log scale (scalar = MSE on tanh, WDL = cross-entropy \
-			on W/D/L targets); WDL solid red, scalar dashed blue; 5-epoch centered rolling averages with faint raw traces; dashed verticals \
-			at Phase 2 (epoch 16) and Phase 3 (epoch 66). Policy losses track nearly identically after epoch 10 — WDL shows slightly larger \
-			phase-boundary bumps (epoch 16: 1.372 vs. 1.361; epoch 66: 1.399 vs. 1.384) and scalar ends marginally lower (~1.283 vs. ~1.311). \
-			Value loss tells a non-monotone story: WDL reaches a deeper Phase-2 minimum (0.0587 at epoch 55 vs. scalar 0.0735, ~20% lower), \
-			but then rises faster in late Phase 2 so that by epoch 65 WDL is actually higher (0.125 vs. 0.101); the curves cross near epoch \
-			70, converging to ~0.21 by the end. WDL's value-loss advantage is therefore concentrated in mid-Phase 2; in full-board Phase 3 \
-			both objectives become equally difficult, and the phase-transition spikes are driven by the shared configuration changes \
-			(curriculum shift, MCTS budget doubling, LR warm restart) rather than the value-head choice.",
+			"Two-panel figure over epochs 1–250: (a) policy loss; (b) value loss on a log scale (scalar = MSE on tanh, WDL = cross-entropy \
+			on W/D/L targets); WDL solid red, scalar dashed blue; 5-epoch centered rolling averages with faint raw traces. Policy losses \
+			track nearly identically throughout training, remaining near ~1.27–1.28 by epoch 250, with WDL showing slightly larger bumps \
+			at phase boundaries. Value loss tells a diverging story: while both objectives spike sharply at phase transitions, scalar value \
+			loss forms a distinct Phase-3 hump (peaking at 0.217) before substantially recovering to 0.124 by epoch 250. In contrast, WDL \
+			value loss rises later into Phase 3 (peaking at 0.225 near epoch 138) and exhibits a much weaker recovery, ending at 0.192. \
+			Though cross-entropy and MSE magnitudes are not strictly comparable, their differing trajectories suggest WDL outcome prediction \
+			remains challenging for longer during full-board play.",
 			wide: true,
 		},
 	];
@@ -416,7 +389,7 @@
 		<!-- Scalar -->
 		<div class="flex flex-col gap-4">
 			<h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider border-b border-gray-100 pb-2">
-				Scalar Value Head · 135 epochs
+				Scalar Value Head · 250 epochs
 			</h3>
 			<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
 			{#each azScalar as fig}
@@ -437,7 +410,7 @@
 		<!-- WDL -->
 		<div class="flex flex-col gap-4">
 			<h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider border-b border-gray-100 pb-2">
-				WDL Value Head · ongoing
+				WDL Value Head · 250 epochs
 			</h3>
 			<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
 			{#each azWdl as fig}
@@ -458,7 +431,7 @@
 		<!-- Comparison -->
 		<div class="flex flex-col gap-4">
 			<h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider border-b border-gray-100 pb-2">
-				Scalar vs. WDL Comparison · epochs 1–130
+				Scalar vs. WDL Comparison · epochs 1–250
 			</h3>
 			<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
 			{#each azComparison as fig}

@@ -19,7 +19,7 @@ from typing import Optional
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 
-# Add repo root to path so checkers_game and RL_models are importable
+# Add repo root to path so checkers_game and rl are importable
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
@@ -33,12 +33,11 @@ from pydantic import BaseModel
 from checkers_game.constants import (
     BLUE, RED, NUM_ACTIONS, ALL_ACTIONS, encode_action,
 )
-from RL_models.checkers_env import CheckersEnv
-from RL_models.MCTS.AlphaZeroNetwork import AlphaZeroNetwork
-from RL_models.MCTS.WDLAlphaZeroNetwork import WDLAlphaZeroNetwork
-from RL_models.MCTS.mcts_search import MCTSSearch
-from RL_models.PPO_Model.PolicyNetwork import PPOPolicyNetwork
-from RL_models.PPO_Model.Agent import load_policy_state_dict
+from rl.envs import CheckersEnv
+from rl.networks import AlphaZeroNetwork, WDLAlphaZeroNetwork
+from rl.algorithms.mcts.mcts_search import MCTSSearch
+from rl.networks import PPOPolicyNetwork
+from rl.algorithms.ppo.agent import load_policy_state_dict
 
 from web.backend.models_config import MODELS
 from web.backend.sessions import games
@@ -69,7 +68,20 @@ def _load_az_checkpoint(path: str) -> tuple:
     """Load an AZ checkpoint, auto-detect WDL vs scalar. Returns (network, is_wdl)."""
     checkpoint = torch.load(path, map_location=DEVICE, weights_only=False)
     sd = checkpoint["model_state_dict"]
-    is_wdl = sd["value_fc2.weight"].shape[0] == 3
+    
+    # Check if the keys have a "net." prefix. If the checkpoint doesn't use the wrapper, we might need to adjust.
+    # The new rl/networks/core.py structure wraps things in self.net.
+    
+    # Handle legacy checkpoints without the "net." prefix 
+    if any(k.startswith("value_fc2.weight") for k in sd.keys()):
+        is_wdl = sd["value_fc2.weight"].shape[0] == 3
+        # Add the 'net.' prefix to all keys to be compatible with the new DualHeadResNet wrapper
+        new_sd = {f"net.{k}": v for k, v in sd.items()}
+        sd = new_sd
+    else:
+        # Checkpoint is already in the new format with 'net.' prefix
+        is_wdl = sd["net.value_fc2.weight"].shape[0] == 3
+
     NetworkClass = WDLAlphaZeroNetwork if is_wdl else AlphaZeroNetwork
     network = NetworkClass((4, 8, 8), n_actions=NUM_ACTIONS).to(DEVICE)
     network.load_state_dict(sd)
@@ -83,6 +95,12 @@ def _load_ppo_checkpoint(path: str):
     network = PPOPolicyNetwork((4, 8, 8), n_actions=NUM_ACTIONS).to(DEVICE)
     data = torch.load(path, map_location=DEVICE, weights_only=False)
     state_dict = data["model_state_dict"] if isinstance(data, dict) and "model_state_dict" in data else data
+    
+    # Check if keys are missing the 'net.' prefix and apply it if needed
+    if any(k.startswith("policy_fc.weight") for k in state_dict.keys()):
+        new_sd = {f"net.{k}": v for k, v in state_dict.items()}
+        state_dict = new_sd
+        
     load_policy_state_dict(network, state_dict)
     network.eval()
     return network
@@ -257,6 +275,10 @@ class MoveRequest(BaseModel):
     to_sq: int
 
 
+class AIMoveRequest(BaseModel):
+    game_id: str
+
+
 class BoardResponse(BaseModel):
     game_id: str
     board: list                        # [4][8][8] — board after AI responded
@@ -419,21 +441,51 @@ def make_move(req: MoveRequest):
     ai_move = None
     value = None
 
-    # Snapshot board after human's turn, before AI responds
+    # Snapshot board after human's turn
     board_after_human = _board_state(env)
+    post_value = _quick_eval(env, session) if not done else None
 
-    # Human turn complete — run AI turn if game still going
+    return BoardResponse(
+        game_id=req.game_id,
+        board=board_after_human,
+        board_after_human=board_after_human,
+        initial_board=None,
+        initial_value=None,
+        post_ai_value=None,
+        ai_boards=None,
+        turn=_color_str(env.game.turn),
+        legal_moves=[] if done else _legal_moves(env),
+        done=done,
+        winner=winner,
+        value=post_value,
+        ai_move=None,
+        turn_complete=True,
+        human_color="blue" if session["human_color"] == BLUE else "red",
+        capturing_sq=None,
+    )
+
+
+@app.post("/api/ai_move", response_model=BoardResponse)
+def make_ai_move(req: AIMoveRequest):
+    if req.game_id not in games:
+        raise HTTPException(status_code=404, detail="Game not found. Start a new game.")
+
+    session = games[req.game_id]
+    env: CheckersEnv = session["env"]
+
+    if env.game.turn == session["human_color"]:
+        raise HTTPException(status_code=400, detail="Not the AI's turn.")
+
     ai_hop_boards: list = []
     _ai_turn = _run_ppo_turn if session.get("is_ppo") else _run_ai_turn
-    if not done:
-        ai_move, value, done, winner, ai_hop_boards = _ai_turn(session)
+    ai_move, value, done, winner, ai_hop_boards = _ai_turn(session)
 
-    post_ai_value = _quick_eval(env, session) if ai_move and not done else None
+    post_ai_value = _quick_eval(env, session) if not done else None
 
     return BoardResponse(
         game_id=req.game_id,
         board=_board_state(env),
-        board_after_human=board_after_human,
+        board_after_human=None,
         initial_board=None,
         initial_value=None,
         post_ai_value=post_ai_value,
@@ -448,84 +500,6 @@ def make_move(req: MoveRequest):
         human_color="blue" if session["human_color"] == BLUE else "red",
         capturing_sq=None,
     )
-
-
-# ---------------------------------------------------------------------------
-# Stats endpoints
-# ---------------------------------------------------------------------------
-
-def _read_csv(path: Path) -> list[dict]:
-    if not path.exists():
-        return []
-    with open(path, newline="") as f:
-        return list(csv.DictReader(f))
-
-
-@app.get("/api/training/alphazero")
-def stats_alphazero():
-    rows = _read_csv(REPO_ROOT / "RL_models/MCTS/alphazero_training_progress_parallel.csv")
-    return {
-        "epochs":       [int(r["epoch"]) for r in rows],
-        "policy_loss":  [float(r["policy_loss"]) for r in rows],
-        "value_loss":   [float(r["value_loss"]) for r in rows],
-        "total_loss":   [float(r["total_loss"]) for r in rows],
-        "win_rate":     [round(int(r["blue_wins"]) / int(r["games"]), 3) for r in rows],
-        "tie_rate":     [round(int(r["ties"]) / int(r["games"]), 3) for r in rows],
-        "loss_rate":    [round(int(r["red_wins"]) / int(r["games"]), 3) for r in rows],
-        "entropy":      [float(r["policy_entropy_nats"]) for r in rows],
-        "avg_moves":    [float(r["avg_moves"]) for r in rows],
-    }
-
-
-@app.get("/api/training/ppo")
-def stats_ppo():
-    rows = _read_csv(REPO_ROOT / "RL_models/PPO_Model/training_progress_parallel_run5.csv")
-    return {
-        "epochs":         [int(r["epoch"]) for r in rows],
-        "avg_reward":     [float(r["average_epoch_reward"]) for r in rows],
-        "win_rate_blue":  [float(r["win_rate_blue"]) for r in rows],
-        "win_rate_red":   [float(r["win_rate_red"]) for r in rows],
-        "tie_rate":       [float(r["tie_rate"]) for r in rows],
-        "avg_ep_length":  [float(r["average_episode_length"]) for r in rows],
-    }
-
-
-@app.get("/api/training/benchmarks")
-def stats_benchmarks():
-    az_rows = _read_csv(REPO_ROOT / "RL_models/MCTS/alphazero_eval_benchmarks.csv")
-    league_rows = _read_csv(REPO_ROOT / "RL_models/PPO_Model/benchmark_league_run6.csv")
-
-    az = {
-        "epochs":         [int(r["epoch"]) for r in az_rows],
-        "gate_win_rate":  [float(r["gate_win_rate"]) for r in az_rows],
-        "gate_score":     [float(r["gate_score"]) for r in az_rows],
-        "gate_accepted":  [r["gate_accepted"] == "True" for r in az_rows],
-        "vs_random_score":[float(r["vs_random_score"]) for r in az_rows],
-    }
-
-    # League: extract head-to-head win rates at the last epoch
-    league = {}
-    if league_rows:
-        last = league_rows[-1]
-        league = {
-            "epoch": int(last["epoch"]),
-            "tactical_vs_random":   float(last.get("tactical_vs_random_win", 0)),
-            "terminal_vs_random":   float(last.get("terminal_vs_random_win", 0)),
-            "aggressive_vs_random": float(last.get("aggressive_vs_random_win", 0)),
-            "tactical_vs_terminal": float(last.get("tactical_vs_terminal_win", 0)),
-            "tactical_vs_aggressive": float(last.get("tactical_vs_aggressive_win", 0)),
-            "terminal_vs_aggressive": float(last.get("terminal_vs_aggressive_win", 0)),
-        }
-
-        # Full time series for league matchups
-        league["series"] = {
-            "epochs":                    [int(r["epoch"]) for r in league_rows],
-            "tactical_vs_random":        [float(r.get("tactical_vs_random_win", 0)) for r in league_rows],
-            "terminal_vs_random":        [float(r.get("terminal_vs_random_win", 0)) for r in league_rows],
-            "aggressive_vs_random":      [float(r.get("aggressive_vs_random_win", 0)) for r in league_rows],
-        }
-
-    return {"alphazero": az, "ppo_league": league}
 
 
 # ---------------------------------------------------------------------------

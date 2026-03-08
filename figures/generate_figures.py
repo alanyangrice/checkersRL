@@ -24,16 +24,16 @@ matplotlib.use("Agg")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = {
-    "az_scalar_train":  os.path.join(ROOT, "RL_models/MCTS/alphazero_training_progress_parallel_scalar.csv"),
-    "az_scalar_eval":   os.path.join(ROOT, "RL_models/MCTS/alphazero_eval_benchmarks_scalar.csv"),
-    "az_wdl_train":     os.path.join(ROOT, "RL_models/MCTS/alphazero_training_progress_parallel_wdl.csv"),
-    "az_wdl_eval":      os.path.join(ROOT, "RL_models/MCTS/alphazero_eval_benchmarks_wdl.csv"),
-    "ppo_cs_train":     os.path.join(ROOT, "RL_models/PPO_Model/training_progress_parallel_cs.csv"),
-    "ppo_cs_bench":     os.path.join(ROOT, "RL_models/PPO_Model/benchmark_parallel_cs.csv"),
-    "ppo_tactical":     os.path.join(ROOT, "RL_models/PPO_Model/training_progress_tactical.csv"),
-    "ppo_terminal":     os.path.join(ROOT, "RL_models/PPO_Model/training_progress_terminal.csv"),
-    "ppo_aggressive":   os.path.join(ROOT, "RL_models/PPO_Model/training_progress_aggressive.csv"),
-    "ppo_league_bench": os.path.join(ROOT, "RL_models/PPO_Model/benchmark_league.csv"),
+    "az_scalar_train":  os.path.join(ROOT, "rl/training_results/mcts/alphazero_training_progress_parallel_scalar.csv"),
+    "az_scalar_eval":   os.path.join(ROOT, "rl/training_results/mcts/alphazero_eval_benchmarks_scalar.csv"),
+    "az_wdl_train":     os.path.join(ROOT, "rl/training_results/mcts/alphazero_training_progress_parallel_wdl.csv"),
+    "az_wdl_eval":      os.path.join(ROOT, "rl/training_results/mcts/alphazero_eval_benchmarks_wdl.csv"),
+    "ppo_cs_train":     os.path.join(ROOT, "rl/training_results/ppo/training_progress_parallel_cs.csv"),
+    "ppo_cs_bench":     os.path.join(ROOT, "rl/training_results/ppo/benchmark_parallel_cs.csv"),
+    "ppo_tactical":     os.path.join(ROOT, "rl/training_results/ppo/training_progress_tactical.csv"),
+    "ppo_terminal":     os.path.join(ROOT, "rl/training_results/ppo/training_progress_terminal.csv"),
+    "ppo_aggressive":   os.path.join(ROOT, "rl/training_results/ppo/training_progress_aggressive.csv"),
+    "ppo_league_bench": os.path.join(ROOT, "rl/training_results/ppo/benchmark_league.csv"),
 }
 
 OUT = {
@@ -140,6 +140,8 @@ def add_phase_vlines(ax, phases, ylim_frac=0.97, color="0.45"):
 def set_epoch_ticks(ax, step=10):
     """Force x-axis major ticks every `step` epochs."""
     ax.xaxis.set_major_locator(ticker.MultipleLocator(step))
+    ax.margins(x=0)
+    ax.tick_params(axis="x", rotation=45)
 
 
 def save_fig(fig, outdir, name):
@@ -219,6 +221,8 @@ def az_scalar_figures(dfs):
         ax.set_ylabel(ylabel)
         if use_log:
             ax.set_yscale("log")
+        if col == "policy_loss":
+            ax.set_ylim(top=2.0)
         ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.3g"))
         set_epoch_ticks(ax)
 
@@ -308,8 +312,8 @@ def az_scalar_figures(dfs):
     # ---- AZ-S-5: Evaluation Benchmarks --------------------------------------
     if ev.empty:
         return
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8.5, 3.8))
-    fig.subplots_adjust(wspace=0.38)
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6.5, 7.5), sharex=True)
+    fig.subplots_adjust(hspace=0.25)
 
     # Panel A: gate win rate with accepted/rejected markers
     ax1.plot(ev["epoch"], ev["gate_win_rate"], color=color, lw=1.9,
@@ -323,12 +327,12 @@ def az_scalar_figures(dfs):
     for ep_p in phases:
         ax1.axvline(ep_p, color="0.45", lw=1.0, ls="--", zorder=1)
     add_phase_vlines(ax1, phases)
-    ax1.set_xlabel("Epoch")
     ax1.set_ylabel("Gate Win Rate")
     ax1.set_title("(A) Model Gating")
     ax1.legend(fontsize=8)
     ax1.set_ylim(0, 0.80)
-    set_epoch_ticks(ax1, step=20)
+    set_epoch_ticks(ax1, step=10)
+    ax1.margins(x=0.02)
 
     # Panel B: value head calibration — more informative than vs_random (which saturates)
     val_colors = {
@@ -354,8 +358,9 @@ def az_scalar_figures(dfs):
     ax2.set_ylabel("Predicted Value")
     ax2.set_title("(B) Value Head Calibration")
     ax2.set_ylim(-1.25, 1.25)
-    ax2.legend(fontsize=8, loc="lower right", bbox_to_anchor=(1.0, 0.15))
-    set_epoch_ticks(ax2, step=20)
+    ax2.legend(fontsize=8, loc="lower right", bbox_to_anchor=(1.0, 0.55))
+    set_epoch_ticks(ax2, step=10)
+    ax2.margins(x=0.02)
 
     fig.suptitle("AlphaZero Scalar — Evaluation Benchmarks", fontsize=11, fontweight="bold")
     save_fig(fig, outdir, "AZ-S-5_eval_benchmarks")
@@ -387,6 +392,8 @@ def az_wdl_figures(dfs):
         ax.set_ylabel(ylabel)
         if use_log:
             ax.set_yscale("log")
+        if col == "policy_loss":
+            ax.set_ylim(top=2.0)
         ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.3g"))
         set_epoch_ticks(ax)
 
@@ -450,7 +457,7 @@ def az_wdl_figures(dfs):
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Avg Moves per Game")
     ax.set_title("AlphaZero WDL — Game Complexity")
-    ax.legend(loc="upper left")
+    ax.legend(loc="lower right")
     set_epoch_ticks(ax)
     save_fig(fig, outdir, "AZ-W-3_game_complexity")
 
@@ -476,8 +483,8 @@ def az_wdl_figures(dfs):
     # ---- AZ-W-5: Evaluation Benchmarks --------------------------------------
     if ev.empty:
         return
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8.5, 3.8))
-    fig.subplots_adjust(wspace=0.38)
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6.5, 7.5), sharex=True)
+    fig.subplots_adjust(hspace=0.25)
 
     ax1.plot(ev["epoch"], ev["gate_win_rate"], color=color, lw=1.9,
              label="Gate win rate", zorder=3)
@@ -490,12 +497,12 @@ def az_wdl_figures(dfs):
     for ep_p in phases:
         ax1.axvline(ep_p, color="0.45", lw=1.0, ls="--", zorder=1)
     add_phase_vlines(ax1, phases)
-    ax1.set_xlabel("Epoch")
     ax1.set_ylabel("Gate Win Rate")
     ax1.set_title("(A) Model Gating")
     ax1.legend(fontsize=8)
-    ax1.set_ylim(0, 0.65)
+    ax1.set_ylim(0, 0.80)
     set_epoch_ticks(ax1, step=10)
+    ax1.margins(x=0.02)
 
     # Panel B: value head calibration
     val_colors = {
@@ -516,13 +523,13 @@ def az_wdl_figures(dfs):
     ax2.axhline(-1, color="0.72", lw=0.8, ls=":")
     for ep_p in phases:
         ax2.axvline(ep_p, color="0.45", lw=1.0, ls="--", zorder=1)
-    add_phase_vlines(ax2, phases)
     ax2.set_xlabel("Epoch")
     ax2.set_ylabel("Predicted Value")
     ax2.set_title("(B) Value Head Calibration")
     ax2.set_ylim(-1.25, 1.25)
-    ax2.legend(fontsize=8, loc="lower right", bbox_to_anchor=(1.0, 0.15))
+    ax2.legend(fontsize=8, loc="lower right", bbox_to_anchor=(1.0, 0.55))
     set_epoch_ticks(ax2, step=10)
+    ax2.margins(x=0.02)
 
     fig.suptitle("AlphaZero WDL — Evaluation Benchmarks", fontsize=11, fontweight="bold")
     save_fig(fig, outdir, "AZ-W-5_eval_benchmarks")
@@ -542,8 +549,8 @@ def az_comparison_figures(dfs):
     w_trim = w[w["epoch"] <= max_epoch]
 
     # ---- AZ-C-1: Loss Comparison -------------------------------------------
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8.5, 3.8))
-    fig.subplots_adjust(wspace=0.35)
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6.5, 7.5), sharex=True)
+    fig.subplots_adjust(hspace=0.25)
 
     for ax, col, ylabel, title in [
         (ax1, "policy_loss", "Policy Loss", "(A) Policy Loss"),
@@ -559,13 +566,15 @@ def az_comparison_figures(dfs):
 
         for ep_p, lbl in PHASE_LABELS.items():
             ax.axvline(ep_p, color="0.45", lw=1.1, ls="--", zorder=1)
-        add_phase_vlines(ax, PHASE_LABELS)
-        ax.set_xlabel("Epoch")
+        if ax == ax1:
+            add_phase_vlines(ax, PHASE_LABELS)
         ax.set_ylabel(ylabel)
         ax.set_title(title)
-        ax.margins(x=0.02)
+        if col == "policy_loss":
+            ax.set_ylim(top=2.0)
         set_epoch_ticks(ax)
 
+    ax2.set_xlabel("Epoch")
     ax2.set_yscale("log")
 
     # Single shared legend at figure level — one entry per model
@@ -576,10 +585,10 @@ def az_comparison_figures(dfs):
     ]
     fig.legend(handles=legend_handles, loc="upper center",
                ncol=2, fontsize=9, framealpha=0.9,
-               bbox_to_anchor=(0.5, 1.01))
+               bbox_to_anchor=(0.5, 0.96))
 
     fig.suptitle(f"AlphaZero: Scalar vs. WDL — Loss Comparison (Epochs 1\u2013{max_epoch})",
-                 fontsize=11, fontweight="bold", y=1.07)
+                 fontsize=11, fontweight="bold", y=0.98)
     save_fig(fig, outdir, "AZ-C-1_loss_comparison")
 
     # ---- AZ-C-2: Value Polarization Comparison ------------------------------
@@ -629,22 +638,22 @@ def ppo_curriculum_figures(dfs):
 
     # ---- PPO-CS-1: vs-Random Win Rate ----------------------------------------
     fig, ax = plt.subplots(figsize=(5.5, 3.8))
-    ax.plot(bm["epoch"], bm["vs_random_win"] * 100, color=color, lw=1.9,
+    ax.plot(bm["epoch"], bm["vs_random_win"], color=color, lw=1.9,
             marker="o", ms=5, label="vs. Random win rate")
     ax.axvline(SWITCH, color="0.45", lw=1.1, ls="--")
-    ax.fill_between(bm["epoch"], 50, bm["vs_random_win"] * 100,
+    ax.fill_between(bm["epoch"], 0.50, bm["vs_random_win"],
                     where=bm["vs_random_win"] > 0.5, alpha=0.1, color=color)
-    ax.axhline(50, color="0.6", lw=0.8, ls=":", label="Random baseline (50%)")
+    ax.axhline(0.50, color="0.6", lw=0.8, ls=":", label="Random baseline (0.50)")
 
     ylim = ax.get_ylim()
-    ax.text(SWITCH + 1, 107,
+    ax.text(SWITCH + 1, 1.07,
             "Curriculum switch",
             fontsize=7.5, color="0.35", va="top", rotation=90, clip_on=True)
 
     ax.set_xlabel("Epoch")
-    ax.set_ylabel("Win Rate vs. Random (%)")
+    ax.set_ylabel("Win Rate vs. Random")
     ax.set_title("PPO Curriculum — Performance vs. Random Agent")
-    ax.set_ylim(35, 112)
+    ax.set_ylim(0.35, 1.12)
     ax.legend(fontsize=8)
     set_epoch_ticks(ax)
     save_fig(fig, outdir, "PPO-CS-1_vs_random_win_rate")
@@ -757,14 +766,14 @@ def ppo_league_figures(dfs):
         "Aggressive": "aggressive_vs_random_win",
     }
     for name, _, col_color, marker in agents:
-        ax.plot(bm["epoch"], bm[cols[name]] * 100,
+        ax.plot(bm["epoch"], bm[cols[name]],
                 color=col_color, lw=1.9, marker=marker, ms=5, label=name)
 
-    ax.axhline(50, color="0.6", lw=0.8, ls=":", label="Random baseline (50%)")
+    ax.axhline(0.50, color="0.6", lw=0.8, ls=":", label="Random baseline (0.50)")
     ax.set_xlabel("Epoch")
-    ax.set_ylabel("Win Rate vs. Random (%)")
+    ax.set_ylabel("Win Rate vs. Random")
     ax.set_title("PPO League — Performance vs. Random Agent")
-    ax.set_ylim(35, 110)
+    ax.set_ylim(0.35, 1.10)
     ax.legend(fontsize=8)
     set_epoch_ticks(ax, step=10)
     save_fig(fig, outdir, "PPO-L-1_vs_random_win_rate")
@@ -894,7 +903,7 @@ def ppo_comparison_figures(dfs):
     fig, ax = plt.subplots(figsize=(6, 4))
 
     # Curriculum run (dashed) — no run number in label
-    ax.plot(bm_cs["epoch"], bm_cs["vs_random_win"] * 100,
+    ax.plot(bm_cs["epoch"], bm_cs["vs_random_win"],
             color=C["scalar"], lw=2.0, ls="--", marker="o", ms=5,
             label="Curriculum")
 
@@ -905,17 +914,17 @@ def ppo_comparison_figures(dfs):
         ("aggressive_vs_random_win", "Aggressive (League)", C["aggressive"], "^"),
     ]
     for col, label, col_color, marker in league_cols:
-        ax.plot(bm_lg["epoch"], bm_lg[col] * 100,
+        ax.plot(bm_lg["epoch"], bm_lg[col],
                 color=col_color, lw=1.9, ls="-", marker=marker, ms=5, label=label)
 
-    ax.axhline(50,  color="0.6", lw=0.8, ls=":", label="Random baseline (50%)")
-    ax.axhline(100, color="0.7", lw=0.7, ls=":")
+    ax.axhline(0.50,  color="0.6", lw=0.8, ls=":", label="Random baseline (0.50)")
+    ax.axhline(1.0, color="0.7", lw=0.7, ls=":")
 
     ax.set_xlabel("Epoch")
-    ax.set_ylabel("Win Rate vs. Random (%)")
+    ax.set_ylabel("Win Rate vs. Random")
     ax.set_title("PPO Training Comparison — Win Rate vs. Random Agent",
                  fontweight="bold")
-    ax.set_ylim(35, 112)
+    ax.set_ylim(0.35, 1.12)
     ax.legend(fontsize=8.5, loc="lower right")
     set_epoch_ticks(ax)
     save_fig(fig, outdir, "PPO-C-1_ppo_comparison")
