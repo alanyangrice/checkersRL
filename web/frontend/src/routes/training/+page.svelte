@@ -389,7 +389,7 @@
 		<!-- Scalar -->
 		<div class="flex flex-col gap-4">
 			<h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider border-b border-gray-100 pb-2">
-				Scalar Value Head · 250 epochs
+				Scalar Value Head
 			</h3>
 			<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
 			{#each azScalar as fig}
@@ -410,7 +410,7 @@
 		<!-- WDL -->
 		<div class="flex flex-col gap-4">
 			<h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider border-b border-gray-100 pb-2">
-				WDL Value Head · 250 epochs
+				WDL Value Head
 			</h3>
 			<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
 			{#each azWdl as fig}
@@ -431,7 +431,7 @@
 		<!-- Comparison -->
 		<div class="flex flex-col gap-4">
 			<h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider border-b border-gray-100 pb-2">
-				Scalar vs. WDL Comparison · epochs 1–250
+				Scalar vs. WDL Comparison
 			</h3>
 			<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
 			{#each azComparison as fig}
@@ -468,7 +468,7 @@
 		<!-- Curriculum -->
 		<div class="flex flex-col gap-4">
 			<h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider border-b border-gray-100 pb-2">
-				Curriculum + Self-Play · 110 epochs
+				Curriculum + Self-Play
 			</h3>
 			<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
 			{#each ppoCurriculum as fig}
@@ -489,7 +489,7 @@
 		<!-- League -->
 		<div class="flex flex-col gap-4">
 			<h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider border-b border-gray-100 pb-2">
-				League Training · Tactical · Terminal · Aggressive · 102 epochs
+				League Training · Tactical · Terminal · Aggressive
 			</h3>
 			<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
 			{#each ppoLeague as fig}
