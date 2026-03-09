@@ -160,11 +160,11 @@
 
 				// King crown
 				if (p.king) {
-					ctx.font = `bold ${Math.round(cell * 0.35)}px serif`;
+					ctx.font = `bold ${Math.round(cell * 0.55)}px serif`;
 					ctx.textAlign = 'center';
 					ctx.textBaseline = 'middle';
 					ctx.fillStyle = 'rgba(255,255,255,0.9)';
-					ctx.fillText('♛', cx, cy + 1);
+					ctx.fillText('♛', cx, cy + 2);
 				}
 			}
 		}
