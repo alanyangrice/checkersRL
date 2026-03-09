@@ -243,9 +243,9 @@ def _run_ai_turn(session: dict) -> tuple[Optional[str], float, bool, Optional[st
             winner = _winner_str(info.get("winner"))
             break
 
-        mcts._root = None
         action, _, root_value = mcts.select_action(env, temperature=0.0)
         _, _, done, _, info = env.step(action)
+        mcts.update_root(action)
         turn_complete = info.get("turn_complete", True)
 
         hop_boards.append(_board_state(env))  # board after this individual hop
@@ -414,6 +414,8 @@ def make_move(req: MoveRequest):
 
     # Apply human move
     _, _, done, _, info = env.step(action)
+    if "mcts" in session:
+        session["mcts"].update_root(action)
     turn_complete = info.get("turn_complete", True)
     winner = _winner_str(info.get("winner")) if done else None
 
