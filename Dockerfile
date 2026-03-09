@@ -3,7 +3,7 @@ FROM node:20-slim AS frontend-builder
 
 WORKDIR /frontend
 COPY web/frontend/package.json web/frontend/package-lock.json* ./
-RUN npm ci --prefer-offline
+RUN npm install
 
 COPY web/frontend/ .
 RUN npm run build
