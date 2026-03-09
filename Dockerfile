@@ -33,7 +33,8 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 # Copy repo source (game logic + model code + backend + config)
 COPY checkers_game/    ./checkers_game/
-COPY RL_models/        ./RL_models/
+COPY rl/               ./rl/
+COPY displayed_model/  ./displayed_model/
 COPY web/              ./web/
 
 # Copy built frontend into expected location
@@ -41,4 +42,4 @@ COPY --from=frontend-builder /frontend/build ./web/frontend/build
 
 EXPOSE 8000
 
-CMD ["uvicorn", "web.backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD sh -c "uvicorn web.backend.main:app --host 0.0.0.0 --port ${PORT:-8000}"
