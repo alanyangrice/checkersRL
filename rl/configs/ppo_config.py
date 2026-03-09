@@ -179,6 +179,9 @@ class PPOConfig:
 
     def get_epsilon(self, epoch):
         """Compute exploration epsilon for the given epoch."""
+        # For resumed runs, check if epoch exceeds decay epochs
+        if epoch >= self.EPSILON_DECAY_EPOCHS:
+            return self.EPSILON_END
         return max(self.EPSILON_END, self.EPSILON_START - epoch / self.EPSILON_DECAY_EPOCHS)
 
 

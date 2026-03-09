@@ -139,14 +139,27 @@ class OpponentPool:
 
         for r in pool_results:
             fname = os.path.basename(r["opponent_path"])
-            entry = stats.setdefault(fname, {"w": 0, "l": 0, "t": 0, "n": 0})
-            tie   = not r["blue_win"] and not r["red_win"]
-            if tie:
-                entry["t"] += 1
-            elif r["agent_win"]:
-                entry["w"] += 1
+            entry = stats.setdefault(fname, {"win_rate": 0.5, "n": 0})
+            
+            # Transition old stats format to EMA
+            if "win_rate" not in entry:
+                if "w" in entry and entry.get("n", 0) > 0:
+                    entry["win_rate"] = entry["w"] / entry["n"]
+                else:
+                    entry["win_rate"] = 0.5
+                for key in ["w", "l", "t"]:
+                    if key in entry:
+                        del entry[key]
+
+            # Exponential Moving Average (alpha = 0.05)
+            alpha = 0.05
+            is_win = 1.0 if r["agent_win"] else 0.0
+            
+            if entry["n"] == 0:
+                entry["win_rate"] = is_win
             else:
-                entry["l"] += 1
+                entry["win_rate"] = (alpha * is_win) + ((1 - alpha) * entry["win_rate"])
+                
             entry["n"] += 1
 
         self._save_stats(stats, agent_name)
@@ -174,10 +187,18 @@ class OpponentPool:
         for fname in all_files:
             entry = stats.get(fname, {})
             n = entry.get("n", 0)
-            if n >= self.config.OPPONENT_MIN_GAMES:
-                win_rate = entry["w"] / n
+            
+            if "win_rate" not in entry:
+                if "w" in entry and n > 0:
+                    win_rate = entry["w"] / n
+                else:
+                    win_rate = self.config.OPPONENT_PRIOR_WIN_RATE
             else:
+                win_rate = entry["win_rate"]
+
+            if n < self.config.OPPONENT_MIN_GAMES:
                 win_rate = self.config.OPPONENT_PRIOR_WIN_RATE
+                
             weights.append((1.0 - win_rate) / self.config.OPPONENT_SAMPLING_TEMPERATURE)
 
         # Numerically stable softmax
