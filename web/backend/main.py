@@ -27,6 +27,7 @@ import numpy as np
 import torch
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -510,7 +511,19 @@ def make_ai_move(req: AIMoveRequest):
 
 FRONTEND_BUILD = REPO_ROOT / "web" / "frontend" / "build"
 if FRONTEND_BUILD.exists():
-    app.mount("/", StaticFiles(directory=str(FRONTEND_BUILD), html=True), name="static")
+    # Mount /_app/ separately for efficient static asset serving (JS, CSS, etc.)
+    _app_dir = FRONTEND_BUILD / "_app"
+    if _app_dir.exists():
+        app.mount("/_app", StaticFiles(directory=str(_app_dir)), name="static_app")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        """Serve static files; fall back to 200.html for SPA client-side routing."""
+        target = FRONTEND_BUILD / full_path
+        if target.is_file():
+            return FileResponse(str(target))
+        fallback = FRONTEND_BUILD / "200.html"
+        return FileResponse(str(fallback if fallback.exists() else FRONTEND_BUILD / "index.html"))
 else:
     @app.get("/")
     def root():
