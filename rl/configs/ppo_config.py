@@ -69,7 +69,7 @@ class PPOConfig:
             "capture_bonus":      10.0,
             "capture_penalty":    -5.0,
             "king_bonus":         15.0,
-            "tie_base":          -90,
+            "tie_base":          -80,
             "shaping_scale":       0.5,
             "time_penalty_scale":  1.0,
             "gamma":               0.99,
@@ -82,7 +82,7 @@ class PPOConfig:
             "capture_bonus":      0.0,
             "capture_penalty":    0.0,
             "king_bonus":         0.0,
-            "tie_base":          -90,    # accepts draws more readily; winning is the only signal
+            "tie_base":          -80,    # accepts draws more readily; winning is the only signal
             "shaping_scale":      0.0,
             "time_penalty_scale": 0.0,
             "gamma":              0.995,  # needs very long horizon since terminal signal is all there is
@@ -97,7 +97,7 @@ class PPOConfig:
             "capture_bonus":      15.0,
             "capture_penalty":    -8.0,
             "king_bonus":         20.0,
-            "tie_base":           -90,
+            "tie_base":           -80,
             "shaping_scale":       0.8,
             "time_penalty_scale":  2.0,  # urgency: finish faster
             "gamma":               0.99,
@@ -123,12 +123,17 @@ class PPOConfig:
 
     CURRICULUM_ENABLED: bool = True
 
-    # Phase 1: mid-game positions (4-9 pieces per side)
-    # NOTE: 2-5 piece endgame phases were avoided — very small positions are
-    # often theoretical draws and train passive play rather than curing it.
-    CURRICULUM_PHASE1_END_EPOCH: int = 20  # switch to full 12v12 after this epoch
-    CURRICULUM_PHASE1_PIECES_MIN: int = 4
-    CURRICULUM_PHASE1_PIECES_MAX: int = 9
+    # ---------------------------------------------------------------------------
+    # Curriculum learning phases
+    # ---------------------------------------------------------------------------
+    CURRICULUM_PHASE1_END: int = 15
+    CURRICULUM_PHASE2_END: int = 65
+    CURRICULUM_PHASE1_WEAK_MIN: int = 1
+    CURRICULUM_PHASE1_WEAK_MAX: int = 5
+    CURRICULUM_PHASE1_STRONG_MAX: int = 6
+    CURRICULUM_PHASE2_WEAK_MIN: int = 5
+    CURRICULUM_PHASE2_WEAK_MAX: int = 9
+    CURRICULUM_PHASE2_STRONG_MAX: int = 10
 
 
     # ─────────────────────────────────────────────────────────────────────
@@ -188,10 +193,10 @@ class PPOConfig:
     def get_league_pool_prob(self, league_epoch):
         """Return pool opponent probability for the current league epoch.
 
-        Lower during curriculum (epoch < self.CURRICULUM_PHASE1_END_EPOCH) and higher
+        Lower during curriculum (epoch < self.CURRICULUM_PHASE2_END) and higher
         once all three agent types have had a chance to add checkpoints.
         """
-        if self.CURRICULUM_ENABLED and league_epoch < self.CURRICULUM_PHASE1_END_EPOCH:
+        if self.CURRICULUM_ENABLED and league_epoch < self.CURRICULUM_PHASE2_END:
             return self.LEAGUE_POOL_OPPONENT_PROB_EARLY
         return self.LEAGUE_POOL_OPPONENT_PROB_FULL
 
@@ -202,7 +207,7 @@ class PPOConfig:
         Lower during curriculum (position diversity already helps) and higher
         once full 12v12 games start (needed to fight passive co-evolution).
         """
-        if self.CURRICULUM_ENABLED and epoch < self.CURRICULUM_PHASE1_END_EPOCH:
+        if self.CURRICULUM_ENABLED and epoch < self.CURRICULUM_PHASE2_END:
             return self.POOL_OPPONENT_PROB_CURRICULUM
         return self.POOL_OPPONENT_PROB_FULL
 
@@ -211,15 +216,23 @@ class PPOConfig:
         """Generate guaranteed-asymmetric board options for the current curriculum phase.
 
         The weak side draws its piece count first, then the strong side draws from
-        [weak+1, max], guaranteeing a strict material advantage on every game.
+        [weak+1, strong_max], guaranteeing a strict material advantage on every game.
         Which color is the strong side is re-rolled 50/50 each game.
         """
         if not self.CURRICULUM_ENABLED:
             return None
-        if epoch < self.CURRICULUM_PHASE1_END_EPOCH:
-            import random as _random
-            return {"num_blue": _random.randint(self.CURRICULUM_PHASE1_PIECES_MIN,
-                                                self.CURRICULUM_PHASE1_PIECES_MAX),
-                    "num_red":  _random.randint(self.CURRICULUM_PHASE1_PIECES_MIN,
-                                                self.CURRICULUM_PHASE1_PIECES_MAX)}
-        return None  # full 12v12
+            
+        import random as _random
+        if epoch < self.CURRICULUM_PHASE1_END:
+            weak = _random.randint(self.CURRICULUM_PHASE1_WEAK_MIN, self.CURRICULUM_PHASE1_WEAK_MAX)
+            strong = _random.randint(weak + 1, self.CURRICULUM_PHASE1_STRONG_MAX)
+        elif epoch < self.CURRICULUM_PHASE2_END:
+            weak = _random.randint(self.CURRICULUM_PHASE2_WEAK_MIN, self.CURRICULUM_PHASE2_WEAK_MAX)
+            strong = _random.randint(weak + 1, self.CURRICULUM_PHASE2_STRONG_MAX)
+        else:
+            return None  # Phase 3: full 12v12
+            
+        if _random.random() < 0.5:
+            return {"num_blue": strong, "num_red": weak}
+        else:
+            return {"num_blue": weak, "num_red": strong}

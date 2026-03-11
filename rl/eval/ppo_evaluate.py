@@ -57,7 +57,7 @@ def get_benchmark_opponent(n_actions, opp_path):
     return _benchmark_opponents[opp_path]
 
 
-def play_benchmark_game(n_actions, opponent_type, opponent_model_path=None):
+def play_benchmark_game(n_actions, opponent_type, opponent_model_path=None, agent_color=None):
     """Play a single benchmark game (no memory/training, just win/loss/tie).
 
     Uses the worker-level _benchmark_agent set by _init_benchmark_worker.
@@ -67,6 +67,7 @@ def play_benchmark_game(n_actions, opponent_type, opponent_model_path=None):
         n_actions: Size of the action space.
         opponent_type: "random" or "model".
         opponent_model_path: Path to opponent model (only for opponent_type="model").
+        agent_color: BLUE or RED. If None, chosen randomly.
 
     Returns:
         dict with keys: agent_color, agent_win, opponent_win, tie, steps
@@ -77,7 +78,8 @@ def play_benchmark_game(n_actions, opponent_type, opponent_model_path=None):
     if opponent_type == "model" and opponent_model_path is not None:
         opponent = get_benchmark_opponent(n_actions, opponent_model_path)
 
-    agent_color = BLUE if random.random() < 0.5 else RED
+    if agent_color is None:
+        agent_color = BLUE if random.random() < 0.5 else RED
     opponent_color = RED if agent_color == BLUE else BLUE
 
     env = CheckersEnv()
@@ -99,12 +101,14 @@ def play_benchmark_game(n_actions, opponent_type, opponent_model_path=None):
         current_turn = env.game.turn
         if current_turn == agent_color:
             with torch.no_grad():
-                action, _, _ = agent.select_action(state, action_mask, deterministic=True)
+                # Agent always plays deterministically in evaluation
+                action, _, _ = agent.select_action(state, action_mask, deterministic=False)
         elif opponent_type == "random":
             action = random_action_from_mask(action_mask)
         else:
             with torch.no_grad():
-                action, _, _ = opponent.select_action(state, action_mask, deterministic=True)
+                # Opponent always plays deterministically in evaluation
+                action, _, _ = opponent.select_action(state, action_mask, deterministic=False)
 
         next_state, _, done, _, info = env.step(action)
         steps += 1
@@ -112,8 +116,10 @@ def play_benchmark_game(n_actions, opponent_type, opponent_model_path=None):
 
     winner = info.get("winner", "Tie")
     agent_win = 1 if winner == agent_color else 0
-    opponent_win = 1 if (winner != agent_color and winner not in ("Tie", "None")) else 0
-    tie = 1 if winner == "Tie" else 0
+    opponent_win = 1 if winner == opponent_color else 0
+    
+    # A tie is everything else (actual "Tie", or "None" if max moves hit, or just neither won)
+    tie = 1 if (agent_win == 0 and opponent_win == 0) else 0
 
     return {
         "agent_color": "BLUE" if agent_color == BLUE else "RED",
@@ -134,7 +140,7 @@ def run_benchmark_cpu(agent, n_actions, num_processes, reference_model_path, num
         dict with keys: vs_random, vs_reference (if reference exists)
     """
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    temp_path = os.path.join(base_dir, "training_results", "ppo", "PPO_saved_models_parallel", f"_benchmark_temp_{os.getpid()}.pt")
+    temp_path = os.path.join(base_dir, "training_results", "ppo", "ppo_saved_models_parallel", f"_benchmark_temp_{os.getpid()}.pt")
     os.makedirs(os.path.dirname(temp_path), exist_ok=True)
     torch.save({"model_state_dict": get_policy_state_dict(agent.policy)}, temp_path)
 
@@ -142,7 +148,7 @@ def run_benchmark_cpu(agent, n_actions, num_processes, reference_model_path, num
     try:
         with Pool(num_processes, initializer=init_benchmark_worker,
                   initargs=(n_actions, temp_path, seed)) as p:
-            random_args = [(n_actions, "random", None)] * num_games
+            random_args = [(n_actions, "random", None, BLUE if i < num_games // 2 else RED) for i in range(num_games)]
             random_results = p.starmap(play_benchmark_game, random_args)
 
             wins = sum(r["agent_win"] for r in random_results)
@@ -157,7 +163,7 @@ def run_benchmark_cpu(agent, n_actions, num_processes, reference_model_path, num
             }
 
             if reference_model_path and os.path.exists(reference_model_path):
-                ref_args = [(n_actions, "model", reference_model_path)] * num_games
+                ref_args = [(n_actions, "model", reference_model_path, BLUE if i < num_games // 2 else RED) for i in range(num_games)]
                 ref_results = p.starmap(play_benchmark_game, ref_args)
 
                 wins = sum(r["agent_win"] for r in ref_results)
@@ -204,21 +210,23 @@ def run_benchmark(ctx, device, n_actions, num_workers,
 
     # vs Random (optional — skip for pairwise cross-agent benchmarks)
     if include_random:
-        for _ in range(num_games):
+        for i in range(num_games):
             tasks.append({
                 "mode": "benchmark",
                 "opponent_type": "random",
                 "opponent_model_path": None,
+                "agent_color": BLUE if i < num_games // 2 else RED,
             })
 
     # vs Reference model
     has_ref = reference_model_path and os.path.exists(reference_model_path)
     if has_ref:
-        for _ in range(num_games):
+        for i in range(num_games):
             tasks.append({
                 "mode": "benchmark",
                 "opponent_type": "model",
                 "opponent_model_path": reference_model_path,
+                "agent_color": BLUE if i < num_games // 2 else RED,
             })
 
     # vs Extra opponents (e.g. other league agent types)
@@ -227,16 +235,16 @@ def run_benchmark(ctx, device, n_actions, num_workers,
         for label, path in extra_opponents.items():
             if path and os.path.exists(path):
                 valid_extras[label] = path
-                for _ in range(num_games):
+                for i in range(num_games):
                     tasks.append({
                         "mode": "benchmark",
                         "opponent_type": "model",
                         "opponent_model_path": path,
+                        "agent_color": BLUE if i < num_games // 2 else RED,
                     })
 
-    ctx.set_deterministic(True)
-    all_results = ctx.run_tasks(tasks, label="benchmark")
     ctx.set_deterministic(False)
+    all_results = ctx.run_tasks(tasks, label="benchmark")
 
     def tally(slice_results):
         return {

@@ -26,8 +26,6 @@ from rl.networks import PPOPolicyNetwork
 from rl.utils.action_utils import random_action_from_mask, uniform_log_prob
 from checkers_game.constants import BLUE, RED, NUM_ACTIONS
 
-get_curriculum_options = default_config.get_curriculum_options
-
 # ─────────────────────────────────────────────────────────────────────
 # Worker process — plays games, uses GPU server for agent inference
 # ─────────────────────────────────────────────────────────────────────
@@ -65,7 +63,7 @@ def play_game(worker_id, request_queue, response_queue,
         opponent_label = os.path.splitext(os.path.basename(opponent_model_path))[0]
 
     blue_memory, red_memory = Memory(), Memory()
-    curriculum_opts = get_curriculum_options(epoch)
+    curriculum_opts = config.get_curriculum_options(epoch)
     state, _ = env.reset(options=curriculum_opts)
     done = False
 
@@ -229,7 +227,7 @@ def play_game(worker_id, request_queue, response_queue,
 def play_benchmark_game(worker_id, request_queue, response_queue,
                          n_actions, opponent_type, opponent_model_path, opp_cache,
                          reward_config=None,
-                         state_buf=None, mask_buf=None):
+                         state_buf=None, mask_buf=None, agent_color=None):
     """Play a single benchmark game using GPU server for agent inference."""
     env = CheckersEnv(reward_config=None)  # benchmarks only track outcomes, not rewards
 
@@ -237,9 +235,11 @@ def play_benchmark_game(worker_id, request_queue, response_queue,
     if opponent_type == "model" and opponent_model_path is not None:
         opponent = load_opponent(n_actions, opponent_model_path, opp_cache)
 
-    agent_color = BLUE if random.random() < 0.5 else RED
+    if agent_color is None:
+        agent_color = BLUE if random.random() < 0.5 else RED
     opponent_color = RED if agent_color == BLUE else BLUE
 
+    # In benchmark games, we only want to track if the *agent* won or lost
     state, _ = env.reset()
     done = False
     steps = 0
@@ -270,16 +270,19 @@ def play_benchmark_game(worker_id, request_queue, response_queue,
             action = random_action_from_mask(action_mask)
         else:
             with torch.no_grad():
-                action, _, _ = opponent.select_action(state, action_mask, deterministic=True)
+                action, _, _ = opponent.select_action(state, action_mask, deterministic=False)
 
         next_state, _, done, _, info = env.step(action)
         steps += 1
         state = next_state
 
     winner = info.get("winner", "Tie")
+    # For agent_win/opponent_win, check against exactly who won
     agent_win = 1 if winner == agent_color else 0
-    opponent_win = 1 if (winner != agent_color and winner != "Tie" and winner != "None") else 0
-    tie = 1 if winner == "Tie" else 0
+    opponent_win = 1 if winner == opponent_color else 0
+    
+    # A tie is everything else (actual "Tie", or "None" if max moves hit, or just neither won)
+    tie = 1 if (agent_win == 0 and opponent_win == 0) else 0
 
     return {
         "agent_color": "BLUE" if agent_color == BLUE else "RED",
@@ -360,6 +363,7 @@ def worker_fn(worker_id, request_queue, response_queue, results_queue,
                 task["opponent_model_path"], opp_cache,
                 reward_config=reward_config,
                 state_buf=_state_buf, mask_buf=_mask_buf,
+                agent_color=task.get("agent_color", None)
             )
 
         results_queue.put((task_index, result))
@@ -432,7 +436,3 @@ class WorkerContext(BaseWorkerContext):
     def run_tasks(self, game_tasks, label="games"):
         from rl.training_utils.parallel_utils import WORKER_BATCH_DONE
         return self._distribute_tasks_and_collect(game_tasks, label, log_interval=500, batch_done_sentinel=WORKER_BATCH_DONE)
-
-
-
-

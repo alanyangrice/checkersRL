@@ -131,7 +131,7 @@ def train_gpu_parallel(num_epochs=None, num_games=None,
             )
 
             stats = ppo_utils.aggregate_epoch_stats(all_results, num_games)
-            pool.batch_update_stats(all_results, agent_name=agent_type)
+            pool.batch_update_stats(all_results, epoch=epoch + 1, agent_name=agent_type)
             ppo_utils.run_ppo_epoch_update(agent, all_results)
 
             # Save to opponent pool periodically (namespaced by agent_type if set)

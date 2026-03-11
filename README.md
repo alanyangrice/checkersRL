@@ -180,26 +180,18 @@ source .venv/bin/activate
 ```
 
 ```bash
-# GPU-accelerated parallel training (recommended)
+# GPU-accelerated parallel training
+# PPO: Curriculum + Self Play + Opponent Pools
 python -m rl.algorithms.ppo.trainer
 
-# CPU-only parallel training
-# Note: Deprecated / use the unified trainer above
-
-# Sequential training (single process)
-# Note: Deprecated / use the unified trainer above
+# PPO: Multi-agent league play
+python -m rl.algorithms.ppo.train_league
 
 # AlphaZero: scalar value head
 python -m rl.algorithms.mcts.trainer
 
 # AlphaZero: WDL value head
 python -m rl.algorithms.mcts.trainer --network-type wdl
-
-# AlphaZero: GPU-accelerated parallel
-python -m rl.algorithms.mcts.trainer
-
-# Multi-agent league play
-python -m rl.algorithms.ppo.train_league
 ```
 
 All training scripts auto-resume from the latest checkpoint.
