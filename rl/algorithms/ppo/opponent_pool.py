@@ -61,10 +61,9 @@ class OpponentPool:
 
     def _list_all_checkpoints(self):
         """Return active .pt files in the pool directory (cross-agent sampling)."""
+        all_agents = [None]
         if hasattr(self.config, "ACTIVE_AGENTS") and self.config.ACTIVE_AGENTS:
-            all_agents = self.config.ACTIVE_AGENTS
-        else:
-            all_agents = [None]
+            all_agents.extend(self.config.ACTIVE_AGENTS)
             
         active = []
         for a in all_agents:
@@ -140,13 +139,11 @@ class OpponentPool:
         # We do NOT evict from disk, but we stop tracking them in the win_rates stats.
         active_checkpoints = set(self._list_all_checkpoints())
         
+        all_agents = [None]
         if hasattr(self.config, "ACTIVE_AGENTS") and self.config.ACTIVE_AGENTS:
-            all_agents = self.config.ACTIVE_AGENTS
-        else:
-            all_agents = [agent_name]
+            all_agents.extend(self.config.ACTIVE_AGENTS)
         
         for a_name in all_agents:
-            if a_name is None: continue
             stats = self._load_stats(a_name)
             changed = False
             for old_f in list(stats.keys()):

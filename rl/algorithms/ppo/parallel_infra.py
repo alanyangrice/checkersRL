@@ -31,8 +31,10 @@ from checkers_game.constants import BLUE, RED, NUM_ACTIONS
 # ─────────────────────────────────────────────────────────────────────
 
 def load_opponent(n_actions, opp_path, cache):
-    """Return a cached CPU opponent agent."""
-    if opp_path not in cache:
+    """Return a cached CPU opponent agent. 
+    If opp_path is the reference model, we bypass the cache so we always load the latest."""
+    is_ref = opp_path.endswith("reference_model.pt")
+    if is_ref or opp_path not in cache:
         opp = PPOAgent((4, 8, 8), n_actions, device=torch.device("cpu"))
         checkpoint = torch.load(opp_path, map_location="cpu", weights_only=False)
         if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
@@ -41,7 +43,10 @@ def load_opponent(n_actions, opp_path, cache):
             state_dict = checkpoint
         load_policy_state_dict(opp.policy, state_dict)
         opp.policy.eval()
-        cache[opp_path] = opp
+        if not is_ref:
+            cache[opp_path] = opp
+        else:
+            return opp
     return cache[opp_path]
 
 
