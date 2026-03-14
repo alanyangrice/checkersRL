@@ -213,7 +213,7 @@ def save_game_csv(env, winner, player_color, ai_color, mode_name,
                   blue_rewards, red_rewards, all_reward_list):
     """Append game results to play_agent_games.csv."""
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    csv_path = os.path.join(base_dir, "play_agent_games.csv")
+    csv_path = os.path.join(base_dir, "scripts", "play_agent_games.csv")
 
     file_exists = os.path.exists(csv_path)
 

@@ -130,6 +130,36 @@
 			<li class="leading-relaxed"><strong class="font-semibold text-gray-900">Data-Regularized Actor-Critic (DrAC)</strong> (Raileanu et al., 2021): To improve the agent's ability to generalize across novel board states, DrAC acts as a regularizer during the PPO batch updates by adding random Gaussian noise to observations and passing these augmented copies through the network alongside the original data.</li>
 		</ul>
 
+		<h3 class="text-xl font-medium text-gray-800 mt-4">3.3 Reward Shaping & Discounting</h3>
+		<p class="text-gray-600 leading-relaxed">
+			In addition to the environment's terminal outcomes, the agent utilizes intermediate shaped rewards to provide denser learning signals throughout the game. These include a capture bonus (+10), a king promotion bonus (+15), a retroactive capture penalty applied after an opponent successfully takes a piece (-5), and a per-move time penalty. These are scaled down by a factor of 0.5 to ensure the terminal win/loss signals remain the dominant objective.
+		</p>
+		<p class="text-gray-600 leading-relaxed">
+			Furthermore, the discount factor heavily dictates the mathematical reality of these rewards. I discovered that a standard discount factor ({@html math("\\gamma=0.95")}) shrinks the value of distant terminal rewards so significantly that early-game tie exploits (like intentionally repeating board states to force a tie and escape a distant loss) became mathematically rational for the agent, requiring adjustment.
+		</p>
+
+		<h3 class="text-xl font-medium text-gray-800 mt-4">3.4 Self-Play & Multi-Agent League</h3>
+		<p class="text-gray-600 leading-relaxed">
+			The agent acts as both players simultaneously, automatically generating its own curriculum as it improves. However, pure self-play in zero-sum games often leads to <strong class="font-semibold text-gray-900">strategy cycling</strong> or <strong class="font-semibold text-gray-900">co-evolution collapse</strong>, where the agent becomes hyper-specialized in exploiting its own specific weaknesses but remains fragile against diverse playstyles (Lanctot et al., 2017). To combat this, several macro-level structural mechanisms were layered over the course of training:
+		</p>
+		<ul class="list-disc list-outside text-gray-600 space-y-2 ml-5">
+			<li class="leading-relaxed"><strong class="font-semibold text-gray-900">Curriculum Learning</strong>: To bootstrap the agent's understanding of the game mechanics, I designed a curriculum training phase where games initialize with randomized, asymmetric 4–9 piece mid-game positions. This guarantees an initial material advantage for one side, forcing the agent to learn both how to press an advantage to win and how to defend a losing position before transitioning to the balanced 12v12 full board.</li>
+			<li class="leading-relaxed"><strong class="font-semibold text-gray-900">Opponent Pooling</strong>: Inspired by large-scale RL systems like OpenAI Five (Berner et al., 2019), the agent periodically saves snapshots of its policy. It randomly selects these historical models as opponents for a fraction of its training games, forcing the current policy to remain robust against a variety of past strategies.</li>
+			<li class="leading-relaxed"><strong class="font-semibold text-gray-900">Prioritized Opponent Sampling (PFSP)</strong>: Rather than sampling past opponents uniformly, the opponent pool tracks historical win rates against each checkpoint. Opponents that the current agent struggles against receive a higher sampling weight (using a softmax distribution over {@html math("1 - \\text{win\\_rate}")}). This mechanism is grounded in Prioritized Fictitious Self-Play (Vinyals et al., 2019) and ensures that degradation against hard opponents is detected and corrected immediately.</li>
+			<li class="leading-relaxed"><strong class="font-semibold text-gray-900">League Play</strong>: To solve the passive co-evolution collapse, I introduced a reward-diverse multi-agent league, inspired by both AlphaStar's role-based exploiters (Vinyals et al., 2019) and OpenAI Five's population-based training (Berner et al., 2019). The system simultaneously trains three distinct agent profiles that share the same prioritized opponent pool. This diversity guarantees that passive, draw-seeking strategies are quickly exploited. The three profiles are:
+				<ul class="list-[circle] list-outside mt-2 ml-6 space-y-1 text-gray-600">
+					<li class="leading-relaxed"><strong class="font-semibold text-gray-900">Tactical</strong>: The well-rounded baseline agent. It receives standard shaped rewards for captures and king promotions.</li>
+					<li class="leading-relaxed"><strong class="font-semibold text-gray-900">Terminal</strong>: A purely positional agent with all intermediate shaped rewards disabled. To compensate for learning exclusively from terminal win/loss signals, its discount factor ({@html math("\\gamma=0.995")}) and entropy bonus are increased to encourage deep exploration of long-horizon strategies.</li>
+					<li class="leading-relaxed"><strong class="font-semibold text-gray-900">Aggressive</strong>: The designated "exploiter" of passive opponents. It receives amplified shaped rewards for captures and promotions, alongside heavier time penalties, explicitly encouraging a piece-hungry, exchange-heavy playstyle.</li>
+				</ul>
+			</li>
+		</ul>
+
+		<h3 class="text-xl font-medium text-gray-800 mt-4">3.5 Training Configuration</h3>
+		<p class="text-gray-600 leading-relaxed">
+			The PPO training loop parameters and multi-agent league configurations were scaled to ensure stability while maintaining computational efficiency:
+		</p>
+
 		<h4 class="text-lg font-medium text-gray-800 mt-4">Base PPO Configuration</h4>
 		<div class="overflow-x-auto">
 			<table class="min-w-full border-collapse border border-gray-200 text-sm text-left text-gray-600">
@@ -171,31 +201,9 @@
 				</tbody>
 			</table>
 		</div>
-
-		<h3 class="text-xl font-medium text-gray-800 mt-4">3.3 Reward Shaping & Discounting</h3>
-		<p class="text-gray-600 leading-relaxed">
-			In addition to the environment's terminal outcomes, the agent utilizes intermediate shaped rewards to provide denser learning signals throughout the game. These include a capture bonus (+10), a king promotion bonus (+15), a retroactive capture penalty applied after an opponent successfully takes a piece (-5), and a per-move time penalty. These are scaled down by a factor of 0.5 to ensure the terminal win/loss signals remain the dominant objective.
+		<p class="text-gray-600 leading-relaxed mt-2">
+			To ensure stability, the base PPO hyperparameters were carefully selected. The <strong class="font-semibold text-gray-900">learning rate</strong> was annealed down to 10<sup>-6</sup> to force convergence as the policy matured. The <strong class="font-semibold text-gray-900">PPO clip range (0.2)</strong> and <strong class="font-semibold text-gray-900">GAE lambda (0.95)</strong> were kept at their industry-standard values to balance update magnitudes and the bias-variance trade-off. Reusing the collected data for <strong class="font-semibold text-gray-900">4 update epochs ({@html math("K")})</strong> prevented the network from over-optimizing on a single batch, while simulating <strong class="font-semibold text-gray-900">5,000 games per epoch</strong> provided a massive, diverse sample size for stable gradient estimates.
 		</p>
-		<p class="text-gray-600 leading-relaxed">
-			Furthermore, the discount factor heavily dictates the mathematical reality of these rewards. I discovered that a standard discount factor ({@html math("\\gamma=0.95")}) shrinks the value of distant terminal rewards so significantly that early-game tie exploits (like intentionally repeating board states to force a tie and escape a distant loss) became mathematically rational for the agent, requiring adjustment.
-		</p>
-
-		<h3 class="text-xl font-medium text-gray-800 mt-4">3.4 Self-Play & Multi-Agent League</h3>
-		<p class="text-gray-600 leading-relaxed">
-			The agent acts as both players simultaneously, automatically generating its own curriculum as it improves. However, pure self-play in zero-sum games often leads to <strong class="font-semibold text-gray-900">strategy cycling</strong> or <strong class="font-semibold text-gray-900">co-evolution collapse</strong>, where the agent becomes hyper-specialized in exploiting its own specific weaknesses but remains fragile against diverse playstyles (Lanctot et al., 2017). To combat this, several macro-level structural mechanisms were layered over the course of training:
-		</p>
-		<ul class="list-disc list-outside text-gray-600 space-y-2 ml-5">
-			<li class="leading-relaxed"><strong class="font-semibold text-gray-900">Curriculum Learning</strong>: To bootstrap the agent's understanding of the game mechanics, I designed a curriculum training phase where games initialize with randomized, asymmetric 4–9 piece mid-game positions. This guarantees an initial material advantage for one side, forcing the agent to learn both how to press an advantage to win and how to defend a losing position before transitioning to the balanced 12v12 full board.</li>
-			<li class="leading-relaxed"><strong class="font-semibold text-gray-900">Opponent Pooling</strong>: Inspired by large-scale RL systems like OpenAI Five (Berner et al., 2019), the agent periodically saves snapshots of its policy. It randomly selects these historical models as opponents for a fraction of its training games, forcing the current policy to remain robust against a variety of past strategies.</li>
-			<li class="leading-relaxed"><strong class="font-semibold text-gray-900">Prioritized Opponent Sampling (PFSP)</strong>: Rather than sampling past opponents uniformly, the opponent pool tracks historical win rates against each checkpoint. Opponents that the current agent struggles against receive a higher sampling weight (using a softmax distribution over {@html math("1 - \\text{win\\_rate}")}). This mechanism is grounded in Prioritized Fictitious Self-Play (Vinyals et al., 2019) and ensures that degradation against hard opponents is detected and corrected immediately.</li>
-			<li class="leading-relaxed"><strong class="font-semibold text-gray-900">League Play</strong>: To solve the passive co-evolution collapse, I introduced a reward-diverse multi-agent league, inspired by both AlphaStar's role-based exploiters (Vinyals et al., 2019) and OpenAI Five's population-based training (Berner et al., 2019). The system simultaneously trains three distinct agent profiles that share the same prioritized opponent pool. This diversity guarantees that passive, draw-seeking strategies are quickly exploited. The three profiles are:
-				<ul class="list-[circle] list-outside mt-2 ml-6 space-y-1 text-gray-600">
-					<li class="leading-relaxed"><strong class="font-semibold text-gray-900">Tactical</strong>: The well-rounded baseline agent. It receives standard shaped rewards for captures and king promotions.</li>
-					<li class="leading-relaxed"><strong class="font-semibold text-gray-900">Terminal</strong>: A purely positional agent with all intermediate shaped rewards disabled. To compensate for learning exclusively from terminal win/loss signals, its discount factor ({@html math("\\gamma=0.995")}) and entropy bonus are increased to encourage deep exploration of long-horizon strategies.</li>
-					<li class="leading-relaxed"><strong class="font-semibold text-gray-900">Aggressive</strong>: The designated "exploiter" of passive opponents. It receives amplified shaped rewards for captures and promotions, alongside heavier time penalties, explicitly encouraging a piece-hungry, exchange-heavy playstyle.</li>
-				</ul>
-			</li>
-		</ul>
 
 		<h4 class="text-lg font-medium text-gray-800 mt-4">League Agent Configurations</h4>
 		<div class="overflow-x-auto">
@@ -242,6 +250,9 @@
 				</tbody>
 			</table>
 		</div>
+		<p class="text-gray-600 leading-relaxed mt-2">
+			For the league agents, the hyperparameters were tuned specifically to force distinct playstyles. The <strong class="font-semibold text-gray-900">Terminal</strong> agent's lack of shaped rewards required a longer planning horizon (<strong class="font-semibold text-gray-900">{@html math("\\gamma=0.995")}</strong>) and a higher <strong class="font-semibold text-gray-900">entropy bonus (0.02)</strong> to encourage deep exploration of positional moves. Conversely, the <strong class="font-semibold text-gray-900">Aggressive</strong> agent's <strong class="font-semibold text-gray-900">shaping scale</strong> and <strong class="font-semibold text-gray-900">time penalty</strong> were significantly amplified to force rapid, piece-hungry exchanges, expressly designed to punish any passive, draw-seeking opponents.
+		</p>
 	</section>
 
 </div>

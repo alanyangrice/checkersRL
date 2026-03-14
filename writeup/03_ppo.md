@@ -25,17 +25,6 @@ Beyond the core objective, several critical implementation details were required
 - **Learning Rate Scheduling**: The optimizer utilizes a cosine annealing schedule (`CosineAnnealingLR`), decaying the learning rate from $10^{-4}$ down to $10^{-6}$ to force convergence as the policy matures.
 - **Data-Regularized Actor-Critic (DrAC)** (Raileanu et al., 2021): To improve the agent's ability to generalize across novel board states, DrAC acts as a regularizer during the PPO batch updates by adding random Gaussian noise to observations and passing these augmented copies through the network alongside the original data.
 
-**Base PPO Configuration**
-| Parameter | Value |
-| :--- | :--- |
-| Learning rate | $10^{-4}$ (cosine annealed to $10^{-6}$) |
-| PPO clip range ($\epsilon$) | 0.2 |
-| GAE lambda ($\lambda$) | 0.95 |
-| Discount factor ($\gamma$) | 0.99 |
-| Update epochs ($K$) | 4 |
-| Mini-batch size | 2048 |
-| Games per epoch | 5000 |
-
 ### 3.3 Reward Shaping & Discounting
 
 In addition to the environment's terminal outcomes, the agent utilizes intermediate shaped rewards to provide denser learning signals throughout the game. These include a capture bonus (+10), a king promotion bonus (+15), a retroactive capture penalty applied after an opponent successfully takes a piece (-5), and a per-move time penalty. These are scaled down by a factor of 0.5 to ensure the terminal win/loss signals remain the dominant objective. 
@@ -54,9 +43,28 @@ The agent acts as both players simultaneously, automatically generating its own 
   - **Terminal**: A purely positional agent with all intermediate shaped rewards disabled. To compensate for learning exclusively from terminal win/loss signals, its discount factor ($\gamma=0.995$) and entropy bonus are increased to encourage deep exploration of long-horizon strategies.
   - **Aggressive**: The designated "exploiter" of passive opponents. It receives amplified shaped rewards for captures and promotions, alongside heavier time penalties, explicitly encouraging a piece-hungry, exchange-heavy playstyle.
 
+### 3.5 Training Configuration
+
+The PPO training loop parameters and multi-agent league configurations were scaled to ensure stability while maintaining computational efficiency:
+
+**Base PPO Configuration**
+| Parameter | Value |
+| :--- | :--- |
+| Learning rate | $10^{-4}$ (cosine annealed to $10^{-6}$) |
+| PPO clip range ($\epsilon$) | 0.2 |
+| GAE lambda ($\lambda$) | 0.95 |
+| Discount factor ($\gamma$) | 0.99 |
+| Update epochs ($K$) | 4 |
+| Mini-batch size | 2048 |
+| Games per epoch | 5000 |
+
+To ensure stability, the base PPO hyperparameters were carefully selected. The **learning rate** was annealed down to $10^{-6}$ to force convergence as the policy matured. The **PPO clip range (0.2)** and **GAE lambda (0.95)** were kept at their industry-standard values to balance update magnitudes and the bias-variance trade-off. Reusing the collected data for **4 update epochs ($K$)** prevented the network from over-optimizing on a single batch, while simulating **5,000 games per epoch** provided a massive, diverse sample size for stable gradient estimates.
+
 **League Agent Configurations**
 | Agent Type | Capture Bonus | King Bonus | Shaping Scale | Time Penalty Scale | Discount ($\gamma$) | Entropy Bonus |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Tactical** | 10.0 | 15.0 | 0.5 | 1.0 | 0.99 | 0.01 |
 | **Terminal** | 0.0 | 0.0 | 0.0 | 0.0 | 0.995 | 0.02 |
 | **Aggressive** | 15.0 | 20.0 | 0.8 | 2.0 | 0.99 | 0.02 |
+
+For the league agents, the hyperparameters were tuned specifically to force distinct playstyles. The **Terminal** agent's lack of shaped rewards required a longer planning horizon (**$\gamma=0.995$**) and a higher **entropy bonus (0.02)** to encourage deep exploration of positional moves. Conversely, the **Aggressive** agent's **shaping scale** and **time penalty** were significantly amplified to force rapid, piece-hungry exchanges, expressly designed to punish any passive, draw-seeking opponents.
