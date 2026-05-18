@@ -2,6 +2,12 @@
 
 A fully playable checkers game with reinforcement learning agents trained via **Proximal Policy Optimization (PPO)** self-play and **AlphaZero-style Monte Carlo Tree Search (MCTS)**. Play against a friend locally, challenge a trained AI, or interact through the web interface.
 
+## Visuals
+
+![CheckersRL live agent match](assets/readme/checkersrl-gameplay.gif)
+
+![PPO league training dashboard](assets/readme/checkersrl-ppo-training-dashboard.gif)
+
 ## Features
 
 - **Interactive Checkers Game** — full American checkers rules with a Pygame GUI
@@ -180,26 +186,18 @@ source .venv/bin/activate
 ```
 
 ```bash
-# GPU-accelerated parallel training (recommended)
+# GPU-accelerated parallel training
+# PPO: Curriculum + Self Play + Opponent Pools
 python -m rl.algorithms.ppo.trainer
 
-# CPU-only parallel training
-# Note: Deprecated / use the unified trainer above
-
-# Sequential training (single process)
-# Note: Deprecated / use the unified trainer above
+# PPO: Multi-agent league play
+python -m rl.algorithms.ppo.train_league
 
 # AlphaZero: scalar value head
 python -m rl.algorithms.mcts.trainer
 
 # AlphaZero: WDL value head
 python -m rl.algorithms.mcts.trainer --network-type wdl
-
-# AlphaZero: GPU-accelerated parallel
-python -m rl.algorithms.mcts.trainer
-
-# Multi-agent league play
-python -m rl.algorithms.ppo.train_league
 ```
 
 All training scripts auto-resume from the latest checkpoint.
