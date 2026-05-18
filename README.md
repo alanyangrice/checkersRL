@@ -2,6 +2,12 @@
 
 A fully playable checkers game with reinforcement learning agents trained via **Proximal Policy Optimization (PPO)** self-play and **AlphaZero-style Monte Carlo Tree Search (MCTS)**. Play against a friend locally, challenge a trained AI, or interact through the web interface.
 
+## Visuals
+
+![CheckersRL live agent match](assets/readme/checkersrl-gameplay.gif)
+
+![PPO league training dashboard](assets/readme/checkersrl-ppo-training-dashboard.gif)
+
 ## Features
 
 - **Interactive Checkers Game** — full American checkers rules with a Pygame GUI

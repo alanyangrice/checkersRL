@@ -133,7 +133,7 @@ def resume_ppo_checkpoint(model_dir, agent, device):
     if "scheduler_state_dict" in ckpt:
         agent.scheduler.load_state_dict(ckpt["scheduler_state_dict"])
     if "rng_state_torch" in ckpt:
-        torch.random.set_rng_state(ckpt["rng_state_torch"])
+        torch.random.set_rng_state(ckpt["rng_state_torch"].cpu().to(torch.uint8))
     if "rng_state_numpy" in ckpt:
         np.random.set_state(ckpt["rng_state_numpy"])
     if "rng_state_python" in ckpt:

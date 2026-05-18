@@ -9,7 +9,6 @@
 		<div class="flex items-center gap-4 sm:gap-6 text-sm text-gray-500">
 			<a href="/" class="{$page.url.pathname === '/' ? 'text-gray-900' : 'hover:text-gray-700'}">Play</a>
 			<a href="/training" class="{$page.url.pathname === '/training' ? 'text-gray-900' : 'hover:text-gray-700'}">Training</a>
-			<a href="/writeup" class="{$page.url.pathname === '/writeup' ? 'text-gray-900' : 'hover:text-gray-700'}">Writeup</a>
 		</div>
 	</nav>
 </div>

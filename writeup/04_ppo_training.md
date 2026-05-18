@@ -1,4 +1,4 @@
-# 4. The PPO Training Saga
+# 4. The PPO Training
 
 Training the PPO agent was far from a straightforward process. Before I could even begin experimenting with complex league structures, I had to completely dismantle and rebuild the broken architecture from my initial 2024 attempt. 
 
@@ -24,10 +24,6 @@ The league was a massive success. Because the Aggressive agent was designed spec
 - The **Aggressive** agent forced rapid exchanges, resulting in short, piece-hungry games averaging ~86 moves.
 - The **Terminal** agent, receiving no intermediate rewards, developed long-horizon positional strategies, resulting in drawn-out games averaging ~116 moves.
 
-### 4.3 The Aggressive Collapse (Value Clipping)
+### 4.4 Note on Ongoing Training
 
-Just as the league was succeeding, disaster struck. Around epoch 75, the Aggressive agent suddenly collapsed. Its win rate plummeted, and its tie rate spiked from 0.6% to 7.4%.
-
-The root cause was a combination of high reward magnitudes and a missing piece of PPO theory. Because the Aggressive agent received amplified rewards for captures and promotions, losses against strong pool opponents generated outsized negative returns. In my initial implementation, the Value network was not clipped during updates. These massive temporal difference (TD) errors caused unbounded updates to the value head, which subsequently corrupted the GAE advantage estimates and destroyed the policy. 
-
-Implementing the $L^{VF}$ value clipping formula (as defined in Section 3.1) prevented these unbounded updates and permanently stabilized the league training pipeline.
+*(Note: The PPO training experiments are currently being re-run with updated hyperparameters. This section will be updated with the final metrics and narrative arcs once those runs complete.)*

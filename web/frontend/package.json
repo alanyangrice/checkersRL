@@ -22,8 +22,7 @@
     "vite": "^5.2.11"
   },
   "dependencies": {
-    "chart.js": "^4.4.3",
-    "katex": "^0.16.38"
+    "chart.js": "^4.4.3"
   },
   "type": "module"
 }
