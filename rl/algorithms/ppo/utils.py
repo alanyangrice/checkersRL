@@ -12,7 +12,6 @@ from rl.configs.ppo_config import PPOConfig
 from rl.algorithms.ppo.agent import PPOAgent
 from rl.algorithms.ppo.torch_helpers import get_policy_state_dict, load_policy_state_dict
 from rl.algorithms.ppo.memory import Memory
-from rl.training_utils.checkpoint_utils import find_latest_checkpoint_path, prune_checkpoints as base_prune_checkpoints
 
 default_config = PPOConfig()
 
@@ -44,10 +43,27 @@ def write_detailed_csv(file_path, results, batch_start, epoch, num_games):
             ])
 
 
-def prune_checkpoints(model_dir, keep_last):
-    """Delete old agent_epoch_N.pt files, retaining only the most recent keep_last.
-    Re-export with PPO defaults for backward compatibility."""
-    base_prune_checkpoints(model_dir, keep_last)
+def find_latest_checkpoint_path(model_dir, prefix="agent_epoch_"):
+    """Find the path to the most recent checkpoint file."""
+    if not os.path.exists(model_dir):
+        return None
+    files = [f for f in os.listdir(model_dir) if f.startswith(prefix) and f.endswith(".pt")]
+    if not files:
+        return None
+    files.sort(key=lambda f: int(f.split("_")[-1].split(".")[0]))
+    return os.path.join(model_dir, files[-1])
+
+
+def prune_checkpoints(model_dir, keep_last, prefix="agent_epoch_"):
+    """Delete old agent_epoch_N.pt files, retaining only the most recent keep_last."""
+    if keep_last is None or keep_last <= 0:
+        return
+    files = [f for f in os.listdir(model_dir) if f.startswith(prefix) and f.endswith(".pt")]
+    files.sort(key=lambda f: int(f.split("_")[-1].split(".")[0]))
+    
+    if len(files) > keep_last:
+        for f in files[:-keep_last]:
+            os.remove(os.path.join(model_dir, f))
 
 
 def build_agent(agent_type, n_actions, device, config=None):
@@ -117,7 +133,7 @@ def resume_ppo_checkpoint(model_dir, agent, device):
     if "scheduler_state_dict" in ckpt:
         agent.scheduler.load_state_dict(ckpt["scheduler_state_dict"])
     if "rng_state_torch" in ckpt:
-        torch.random.set_rng_state(ckpt["rng_state_torch"])
+        torch.random.set_rng_state(ckpt["rng_state_torch"].cpu().to(torch.uint8))
     if "rng_state_numpy" in ckpt:
         np.random.set_state(ckpt["rng_state_numpy"])
     if "rng_state_python" in ckpt:

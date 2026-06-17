@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\AlanYang\\\\Desktop\\\\checkersRL\" -Recurse -File | Where-Object { $_.FullName -notmatch '\\\\.venv|\\\\.git' } | Select-Object FullName, Extension | Sort-Object FullName)",
+      "PowerShell(cd \"C:\\\\Users\\\\AlanYang\\\\Desktop\\\\checkersRL\"; Get-ChildItem -Path . -Recurse -File | Where-Object { $_.FullName -notmatch '\\\\.venv|\\\\.git|__pycache__|\\\\.pyc' -and @\\('.py', '.ipynb', '.md', '.txt', '.yml', '.yaml', '.json', '.cfg', '.toml', '.ini'\\) -contains $_.Extension } | Select-Object @{n='RelativePath';e={$_.FullName -replace [regex]::Escape\\('C:\\\\Users\\\\AlanYang\\\\Desktop\\\\checkersRL\\\\'\\)}}, Extension | Sort-Object RelativePath)",
+      "PowerShell(cd \"C:\\\\Users\\\\AlanYang\\\\Desktop\\\\checkersRL\"; Get-ChildItem -Path . -Recurse -File | Where-Object { $_.FullName -notmatch '\\\\.venv|\\\\.git|node_modules' -and @\\('.py', '.ipynb', '.md', '.txt', '.yml', '.yaml', '.json', '.cfg', '.toml', '.ini'\\) -contains $_.Extension } | Select-Object FullName | Sort-Object FullName | ForEach-Object { $_.FullName -replace [regex]::Escape\\('C:\\\\Users\\\\AlanYang\\\\Desktop\\\\checkersRL\\\\'\\), '' })"
+    ]
+  }
+}

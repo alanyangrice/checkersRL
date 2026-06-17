@@ -28,12 +28,16 @@ DATA = {
     "az_scalar_eval":   os.path.join(ROOT, "rl/training_results/mcts/alphazero_eval_benchmarks_scalar.csv"),
     "az_wdl_train":     os.path.join(ROOT, "rl/training_results/mcts/alphazero_training_progress_parallel_wdl.csv"),
     "az_wdl_eval":      os.path.join(ROOT, "rl/training_results/mcts/alphazero_eval_benchmarks_wdl.csv"),
-    "ppo_cs_train":     os.path.join(ROOT, "rl/training_results/ppo/training_progress_parallel_cs.csv"),
-    "ppo_cs_bench":     os.path.join(ROOT, "rl/training_results/ppo/benchmark_parallel_cs.csv"),
+    "ppo_cs_train":     os.path.join(ROOT, "rl/training_results/ppo/training_progress_parallel.csv"),
+    "ppo_cs_bench":     os.path.join(ROOT, "rl/training_results/ppo/benchmark_parallel.csv"),
     "ppo_tactical":     os.path.join(ROOT, "rl/training_results/ppo/training_progress_tactical.csv"),
     "ppo_terminal":     os.path.join(ROOT, "rl/training_results/ppo/training_progress_terminal.csv"),
     "ppo_aggressive":   os.path.join(ROOT, "rl/training_results/ppo/training_progress_aggressive.csv"),
     "ppo_league_bench": os.path.join(ROOT, "rl/training_results/ppo/benchmark_league.csv"),
+    "ppo_league_history_aggressive": os.path.join(ROOT, "rl/training_results/ppo/opponent_pool_league/win_rates_history_aggressive.csv"),
+    "ppo_league_history_tactical":   os.path.join(ROOT, "rl/training_results/ppo/opponent_pool_league/win_rates_history_tactical.csv"),
+    "ppo_league_history_terminal":   os.path.join(ROOT, "rl/training_results/ppo/opponent_pool_league/win_rates_history_terminal.csv"),
+    "ppo_single_history": os.path.join(ROOT, "rl/training_results/ppo/opponent_pool_parallel/win_rates_history_default.csv"),
 }
 
 OUT = {
@@ -43,6 +47,8 @@ OUT = {
     "ppo_curriculum":os.path.join(ROOT, "figures/output/ppo_curriculum"),
     "ppo_league":    os.path.join(ROOT, "figures/output/ppo_league"),
     "ppo_comparison": os.path.join(ROOT, "figures/output/ppo_comparison"),
+    "ppo_league_history": os.path.join(ROOT, "figures/output/ppo_league_history"),
+    "ppo_single_history": os.path.join(ROOT, "figures/output/ppo_single_pool_history"),
 }
 
 # AlphaZero training phase boundaries (observed from avg_moves / epoch_time jumps)
@@ -115,12 +121,12 @@ def rolling_avg(arr, window=5):
     return result
 
 
-def smooth_line(ax, x, y, color, label=None, window=5, zorder=3, lw=None):
+def smooth_line(ax, x, y, color, label=None, window=5, zorder=3, lw=None, ls="-"):
     """Plot raw data as faint background, smoothed line on top."""
     y = np.asarray(y, dtype=float)
     ax.plot(x, y, color=color, alpha=C["raw_alpha"], lw=0.9, zorder=zorder - 1)
     sm = rolling_avg(y, window)
-    kw = dict(color=color, zorder=zorder)
+    kw = dict(color=color, zorder=zorder, ls=ls)
     if label:
         kw["label"] = label
     if lw:
@@ -896,38 +902,235 @@ def ppo_league_figures(dfs):
 # ---------------------------------------------------------------------------
 
 def ppo_comparison_figures(dfs):
-    bm_cs = dfs["ppo_cs_bench"]
-    bm_lg = dfs["ppo_league_bench"]
+    bm_cs = dfs.get("ppo_cs_bench")
+    bm_lg = dfs.get("ppo_league_bench")
+    tr_cs = dfs.get("ppo_cs_train")
+    tr_tac = dfs.get("ppo_tactical")
+    tr_ter = dfs.get("ppo_terminal")
+    tr_agg = dfs.get("ppo_aggressive")
     outdir = OUT["ppo_comparison"]
 
-    fig, ax = plt.subplots(figsize=(6, 4))
+    if bm_cs is not None and bm_lg is not None:
+        # ---- PPO-C-1: Comparison of Win Rates vs Random --------------------------
+        fig, ax = plt.subplots(figsize=(6, 4))
+        
+        ax.plot(bm_cs["epoch"], bm_cs["vs_random_win"],
+                color=C["scalar"], lw=2.0, ls="--", marker="o", ms=5,
+                label="Single Agent (CS)")
+        
+        league_cols = [
+            ("tactical_vs_random_win",   "Tactical (League)",   C["tactical"],   "o"),
+            ("terminal_vs_random_win",   "Terminal (League)",   C["terminal"],   "s"),
+            ("aggressive_vs_random_win", "Aggressive (League)", C["aggressive"], "^"),
+        ]
+        for col, label, col_color, marker in league_cols:
+            ax.plot(bm_lg["epoch"], bm_lg[col],
+                    color=col_color, lw=1.9, ls="-", marker=marker, ms=5, label=label)
+        
+        ax.axhline(0.50,  color="0.6", lw=0.8, ls=":", label="Random baseline (0.50)")
+        ax.axhline(1.0, color="0.7", lw=0.7, ls=":")
+        
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Win Rate vs. Random")
+        ax.set_title("PPO Training Comparison — Win Rate vs. Random", fontweight="bold")
+        ax.set_ylim(0.35, 1.12)
+        ax.legend(fontsize=8.5, loc="lower right")
+        set_epoch_ticks(ax)
+        save_fig(fig, outdir, "PPO-C-1_ppo_comparison")
 
-    # Curriculum run (dashed) — no run number in label
-    ax.plot(bm_cs["epoch"], bm_cs["vs_random_win"],
-            color=C["scalar"], lw=2.0, ls="--", marker="o", ms=5,
-            label="Curriculum")
+    if all(x is not None for x in [tr_cs, tr_tac, tr_ter, tr_agg]):
+        # ---- PPO-C-2: Comparison of Episode Lengths --------------------------
+        fig, ax = plt.subplots(figsize=(6, 4))
+        
+        smooth_line(ax, tr_cs["epoch"], tr_cs["average_episode_length"], color=C["scalar"],
+                    window=7, label="Single Agent (CS)", ls="--")
+        
+        smooth_line(ax, tr_tac["epoch"], tr_tac["average_episode_length"], color=C["tactical"],
+                    window=7, label="Tactical (League)", ls="-")
+                    
+        smooth_line(ax, tr_ter["epoch"], tr_ter["average_episode_length"], color=C["terminal"],
+                    window=7, label="Terminal (League)", ls="-")
+                    
+        smooth_line(ax, tr_agg["epoch"], tr_agg["average_episode_length"], color=C["aggressive"],
+                    window=7, label="Aggressive (League)", ls="-")
+        
+        ax.set_xlabel("Training Epoch")
+        ax.set_ylabel("Avg Episode Length (Moves)")
+        ax.set_title("PPO Training Comparison — Episode Length", fontweight="bold")
+        ax.legend(fontsize=8.5, loc="upper left")
+        set_epoch_ticks(ax)
+        save_fig(fig, outdir, "PPO-C-2_episode_length_comparison")
+        
+        # ---- PPO-C-3: Comparison of Tie Rates --------------------------
+        fig, ax = plt.subplots(figsize=(6, 4))
+        
+        smooth_line(ax, tr_cs["epoch"], tr_cs["tie_rate"] * 100, color=C["scalar"],
+                    window=7, label="Single Agent (CS)", ls="--")
+        
+        smooth_line(ax, tr_tac["epoch"], tr_tac["tie_rate"] * 100, color=C["tactical"],
+                    window=7, label="Tactical (League)", ls="-")
+                    
+        smooth_line(ax, tr_ter["epoch"], tr_ter["tie_rate"] * 100, color=C["terminal"],
+                    window=7, label="Terminal (League)", ls="-")
+                    
+        smooth_line(ax, tr_agg["epoch"], tr_agg["tie_rate"] * 100, color=C["aggressive"],
+                    window=7, label="Aggressive (League)", ls="-")
+        
+        ax.set_xlabel("Training Epoch")
+        ax.set_ylabel("Tie Rate (%)")
+        ax.set_title("PPO Training Comparison — Tie Rate", fontweight="bold")
+        ax.legend(fontsize=8.5, loc="upper right")
+        set_epoch_ticks(ax)
+        save_fig(fig, outdir, "PPO-C-3_tie_rate_comparison")
 
-    # League agents (solid)
-    league_cols = [
-        ("tactical_vs_random_win",   "Tactical (League)",   C["tactical"],   "o"),
-        ("terminal_vs_random_win",   "Terminal (League)",   C["terminal"],   "s"),
-        ("aggressive_vs_random_win", "Aggressive (League)", C["aggressive"], "^"),
+
+# ---------------------------------------------------------------------------
+# PPO OPPONENT POOL HISTORY FIGURES (PPO-H-1)
+# ---------------------------------------------------------------------------
+
+def ppo_opponent_pool_figures(dfs):
+    outdir = OUT["ppo_league_history"]
+    
+    agent_info = [
+        ("Aggressive", "ppo_league_history_aggressive"),
+        ("Tactical", "ppo_league_history_tactical"),
+        ("Terminal", "ppo_league_history_terminal")
     ]
-    for col, label, col_color, marker in league_cols:
-        ax.plot(bm_lg["epoch"], bm_lg[col],
-                color=col_color, lw=1.9, ls="-", marker=marker, ms=5, label=label)
+    
+    for agent_name, df_key in agent_info:
+        df = dfs.get(df_key)
+        if df is None or df.empty:
+            continue
+            
+        df = df.copy()
+        # Extract opponent type from checkpoint name (e.g. 'tactical_epoch_10.pt' -> 'tactical')
+        df["opp_type"] = df["opponent_checkpoint"].str.split("_").str[0]
+        
+        import re
+        from matplotlib.lines import Line2D
+        import matplotlib.cm as cm
+        
+        def sort_key(chkpt_name):
+            nums = re.findall(r'\d+', chkpt_name)
+            return int(nums[-1]) if nums else 0
 
-    ax.axhline(0.50,  color="0.6", lw=0.8, ls=":", label="Random baseline (0.50)")
-    ax.axhline(1.0, color="0.7", lw=0.7, ls=":")
+        checkpoints = sorted(df["opponent_checkpoint"].unique(), key=lambda x: (x.split('_')[0], sort_key(x)))
+        opp_types = df["opp_type"].unique()
+        
+        # Create one graph for each opponent type for the current agent
+        for opp in opp_types:
+            fig, ax = plt.subplots(figsize=(7, 5))
+            
+            opp_checkpoints = [c for c in checkpoints if c.startswith(opp)]
+            if not opp_checkpoints:
+                continue
+                
+            max_chkpt_epoch = max([sort_key(c) for c in opp_checkpoints]) if opp_checkpoints else 100
+            
+            # Select a sequential colormap based on opponent style
+            if opp == "tactical":
+                cmap = cm.Blues
+            elif opp == "terminal":
+                cmap = cm.Oranges
+            else:
+                cmap = cm.Reds
+                
+            for chkpt in opp_checkpoints:
+                chkpt_df = df[df["opponent_checkpoint"] == chkpt].sort_values("epoch")
+                if chkpt_df.empty:
+                    continue
+                
+                chkpt_epoch = sort_key(chkpt)
+                epochs = chkpt_df["epoch"].values
+                wins = chkpt_df["win_rate"].values
+                
+                # Assign color from the colormap based on the opponent's epoch
+                # Avoid the very lightest colors by mapping from 0.3 to 1.0
+                norm_val = 0.3 + 0.7 * (chkpt_epoch / max_chkpt_epoch)
+                color = cmap(norm_val)
+                
+                label_name = f"Epoch {chkpt_epoch}"
+                
+                # Plot the line with its specific color
+                ax.plot(epochs, wins, color=color, lw=1.5, marker='o', ms=3, label=label_name)
 
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("Win Rate vs. Random")
-    ax.set_title("PPO Training Comparison — Win Rate vs. Random Agent",
-                 fontweight="bold")
-    ax.set_ylim(0.35, 1.12)
-    ax.legend(fontsize=8.5, loc="lower right")
+            ax.axhline(0.50, color="0.6", lw=1.2, ls=":", zorder=1)
+            
+            ax.set_xlabel("Training Epoch")
+            ax.set_ylabel("Win Rate")
+            ax.set_title(f"{agent_name} Agent vs. {opp.capitalize()} Opponents", fontweight="bold")
+            ax.set_ylim(-0.05, 1.05)
+            
+            # Put legend outside the plot
+            ax.legend(title="Opponent Checkpoint", fontsize=7, title_fontsize=8, 
+                      loc="center left", bbox_to_anchor=(1.02, 0.5), ncol=1)
+            set_epoch_ticks(ax)
+            
+            # Use tight_layout to make sure the external legend is not cut off
+            plt.tight_layout()
+            save_fig(fig, outdir, f"PPO-H_{agent_name.lower()}_vs_{opp}_history")
+
+
+def ppo_single_pool_figures(dfs):
+    df = dfs.get("ppo_single_history")
+    if df is None or df.empty:
+        return
+        
+    outdir = OUT["ppo_single_history"]
+    os.makedirs(outdir, exist_ok=True)
+    
+    df = df.copy()
+    
+    import re
+    from matplotlib.lines import Line2D
+    import matplotlib.cm as cm
+    
+    def sort_key(chkpt_name):
+        nums = re.findall(r'\d+', chkpt_name)
+        return int(nums[-1]) if nums else 0
+
+    checkpoints = sorted(df["opponent_checkpoint"].unique(), key=sort_key)
+    
+    fig, ax = plt.subplots(figsize=(7, 5))
+    
+    max_chkpt_epoch = max([sort_key(c) for c in checkpoints]) if checkpoints else 100
+    
+    # Select a sequential colormap
+    cmap = cm.Purples
+        
+    for chkpt in checkpoints:
+        chkpt_df = df[df["opponent_checkpoint"] == chkpt].sort_values("epoch")
+        if chkpt_df.empty:
+            continue
+        
+        chkpt_epoch = sort_key(chkpt)
+        epochs = chkpt_df["epoch"].values
+        wins = chkpt_df["win_rate"].values
+        
+        # Assign color from the colormap based on the opponent's epoch
+        norm_val = 0.3 + 0.7 * (chkpt_epoch / max_chkpt_epoch)
+        color = cmap(norm_val)
+        
+        label_name = f"Epoch {chkpt_epoch}"
+        
+        # Plot the line with its specific color
+        ax.plot(epochs, wins, color=color, lw=1.5, marker='o', ms=3, label=label_name)
+
+    ax.axhline(0.50, color="0.6", lw=1.2, ls=":", zorder=1)
+    
+    ax.set_xlabel("Training Epoch")
+    ax.set_ylabel("Win Rate")
+    ax.set_title("Single Agent vs. Past Pool Opponents", fontweight="bold")
+    ax.set_ylim(-0.05, 1.05)
+    
+    # Put legend outside the plot
+    ax.legend(title="Opponent Checkpoint", fontsize=7, title_fontsize=8, 
+              loc="center left", bbox_to_anchor=(1.02, 0.5), ncol=1)
     set_epoch_ticks(ax)
-    save_fig(fig, outdir, "PPO-C-1_ppo_comparison")
+    
+    # Use tight_layout to make sure the external legend is not cut off
+    plt.tight_layout()
+    save_fig(fig, outdir, "PPO-H_single_vs_pool_history")
 
 
 # ---------------------------------------------------------------------------
@@ -938,23 +1141,29 @@ def main():
     print("Loading data...")
     dfs = load_data()
 
-    print("\n[1/6] AlphaZero Scalar figures...")
+    print("\n[1/8] AlphaZero Scalar figures...")
     az_scalar_figures(dfs)
 
-    print("\n[2/6] AlphaZero WDL figures...")
+    print("\n[2/8] AlphaZero WDL figures...")
     az_wdl_figures(dfs)
 
-    print("\n[3/6] AlphaZero Comparison figures...")
+    print("\n[3/8] AlphaZero Comparison figures...")
     az_comparison_figures(dfs)
 
-    print("\n[4/6] PPO Curriculum figures...")
+    print("\n[4/8] PPO Curriculum figures...")
     ppo_curriculum_figures(dfs)
 
-    print("\n[5/6] PPO League figures...")
+    print("\n[5/8] PPO League figures...")
     ppo_league_figures(dfs)
 
-    print("\n[6/6] PPO Comparison figures...")
+    print("\n[6/8] PPO Comparison figures...")
     ppo_comparison_figures(dfs)
+
+    print("\n[7/8] PPO Opponent Pool History figures...")
+    ppo_opponent_pool_figures(dfs)
+
+    print("\n[8/8] PPO Single Agent Pool History figures...")
+    ppo_single_pool_figures(dfs)
 
     print("\nDone. All figures saved to figures/output/")
 
